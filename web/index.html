@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>drop</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="header-wrapper">
+      <h1 class="title">drop</h1>
+      <p class="subtitle">Share files instantly with a one-time code, <br /> nothing is stored</p>
+    </div>
+
+    <div class="download-wrapper">
+      <input
+        class="download-input"
+        id="codeInput"
+        type="text"
+        placeholder="Enter code"
+      />
+      <button class="download-btn" id="downloadBtn" type="button">
+        Download
+      </button>
+    </div>
+
+    <div class="upload-wrapper">
+      <input class="upload-input" id="fileInput" type="file" hidden />
+      <button class="upload-btn" id="uploadBtn" type="button">
+        Drop a file
+      </button>
+
+      <pre class="status" id="status">Idle</pre>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

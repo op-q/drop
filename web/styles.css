@@ -1,0 +1,98 @@
+:root {
+    --bg: #C7CED6;
+    --text-dark: #2B2B2B;
+    --text-light: #F2F2F0;
+    --surface: #1F1E1A;
+    --font-size-1: 4rem;
+    --font-size-2: 1.6rem;
+    --font-size-3: 0.8rem;
+}
+
+*, :before, :after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+.html {
+    
+}
+
+body {
+    padding: 1rem 0;
+    font-family: "Inter", sans-serif;
+    background-color: var(--bg);
+    color: var(--text-dark);
+    letter-spacing: 1px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2rem;
+}
+
+.header-wrapper {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.download-wrapper {
+    display: flex;
+    gap: 1rem;
+}
+
+.upload-wrapper {
+    margin: 8rem 0 0 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+}
+
+.download-input {
+    border: none;
+    outline: none;
+    background-color: transparent;
+    color: var(--text-dark);
+    border-bottom: 2px solid var(--surface);
+    padding: 0;
+    margin: 0;
+}
+
+.upload-btn, .download-btn {
+    border: none;
+    outline: none;
+    background-color: var(--surface);
+    color: var(--text-light);
+    cursor: pointer;
+    letter-spacing: 1px;
+}
+
+.download-btn {
+    font-size: var(--font-size-3);
+    padding: 0.5rem 1rem;
+    border-radius: 5px;
+}
+
+.upload-btn {
+    font-size: var(--font-size-2);
+    width: 340px;
+    height: 3.5rem;
+    border-radius: 9999px;
+}
+
+.title {
+    font-size: var(--font-size-1);
+}
+
+.subtitle {
+    font-size: var(--font-size-3);
+    text-align: center;
+    line-height: 1.2rem;
+}
+
+.status {
+    font-size: var(--font-size-3);
+    text-align: center;
+}
