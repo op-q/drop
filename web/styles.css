@@ -96,3 +96,11 @@ body {
     font-size: var(--font-size-3);
     text-align: center;
 }
+
+.github {
+    position: fixed;
+    bottom: 1rem;
+    font-size: var(--font-size-3);
+    color: var(--text-dark);
+    text-decoration: none;
+}
