@@ -2,7 +2,7 @@ services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.fullstack
     environment:
       DROP_BIND_ADDR: 0.0.0.0:8080
       RUST_LOG: ${RUST_LOG:-info,tower_http=info}

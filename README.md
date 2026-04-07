@@ -148,6 +148,11 @@ Environment variables used by the compose setup:
 
 For local testing, the compose file defaults to `localhost`. For a VPS, set `DROP_SITE_ADDRESS` to your real domain and point DNS to the server. Caddy will then handle HTTPS automatically.
 
+Notes:
+
+- [Dockerfile](/home/opq/code/drop/Dockerfile) is backend-only and is the right one for Render
+- [Dockerfile.fullstack](/home/opq/code/drop/Dockerfile.fullstack) is used by local `docker compose` when you want Rust + built frontend + Caddy together
+
 ---
 
 ## Split Deployment
@@ -165,6 +170,7 @@ Set these environment variables:
   - `DROP_ALLOWED_ORIGINS=https://your-vercel-project.vercel.app,https://your-domain.com`
 
 Render also provides a `PORT` environment variable automatically, and the backend now binds to it when present.
+For Render, use the backend-only [Dockerfile](/home/opq/code/drop/Dockerfile).
 
 This is the cleanest setup if you want any two users to open the public page and use the same backend relay service.
 

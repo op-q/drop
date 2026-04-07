@@ -1,3 +1,12 @@
+FROM node:22-alpine AS web-builder
+WORKDIR /app/web
+
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web ./
+RUN npm run build
+
 FROM rust:1-slim-bookworm AS rust-builder
 WORKDIR /app
 
@@ -14,6 +23,7 @@ RUN apt-get update \
     && useradd --system --create-home --home-dir /app --uid 10001 drop
 
 COPY --from=rust-builder /app/target/release/api /usr/local/bin/drop
+COPY --from=web-builder /app/web/dist /app/web/dist
 
 ENV DROP_BIND_ADDR=0.0.0.0:8080
 EXPOSE 8080
