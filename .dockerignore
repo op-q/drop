@@ -1,0 +1,7 @@
+.git
+.gitignore
+.codex
+target
+node_modules
+web/node_modules
+web/dist

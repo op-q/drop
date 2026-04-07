@@ -1,9 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
-
-use crate::domain::session::Session;
+use crate::{
+    services::rate_limit_service::RateLimitService, store::InMemorySessionStore,
+    telemetry::metrics::AppMetrics,
+};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub sessions: Arc<Mutex<HashMap<String, Session>>>,
+    pub sessions: InMemorySessionStore,
+    pub rate_limiter: RateLimitService,
+    pub metrics: AppMetrics,
 }

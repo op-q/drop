@@ -1,66 +1,95 @@
+use std::net::{IpAddr, SocketAddr};
+
 use axum::{
     extract::{
+        ConnectInfo, Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
     },
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tracing::info;
+use tokio::time::{Duration, interval, timeout};
+use tracing::{Instrument, info, warn};
 
 use crate::{
     app_state::AppState,
+    config::{
+        DOWNLOAD_EVENT_CHANNEL_CAPACITY, RECEIVER_SEND_TIMEOUT_SECS, WS_HEARTBEAT_INTERVAL_SECS,
+        WS_IDLE_TIMEOUT_SECS,
+    },
     domain::session::{DownloadEvent, SenderEvent},
+    errors::AppError,
+    services::{
+        cleanup_service::remove_expired_sessions,
+        session_service::{ReceiverClaimResult, SessionService},
+        transfer_service::TransferService,
+    },
+    telemetry::tracing::transfer_span,
+    ws::protocol,
 };
 
 pub async fn download_ws(
     ws: WebSocketUpgrade,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path(code): Path<String>,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, code, state))
+) -> Result<impl IntoResponse, AppError> {
+    remove_expired_sessions(&state).await;
+    state
+        .rate_limiter
+        .check_connection_attempt_limit(addr.ip())
+        .await?;
+    state
+        .rate_limiter
+        .try_acquire_ws_connection(addr.ip())
+        .await?;
+    state.metrics.record_ws_connection_opened();
+
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, code, state, addr.ip())))
 }
 
-async fn handle_socket(socket: WebSocket, code: String, state: AppState) {
+async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_ip: IpAddr) {
+    let span = transfer_span("download", &code);
     let (mut ws_sender, mut ws_receiver) = socket.split();
-    let (download_tx, mut download_rx) = mpsc::channel::<DownloadEvent>(32);
+    let (download_tx, mut download_rx) =
+        mpsc::channel::<DownloadEvent>(DOWNLOAD_EVENT_CHANNEL_CAPACITY);
 
-    let sender_tx = {
-        let mut sessions = state.sessions.lock().await;
-
-        let Some(session) = sessions.get_mut(&code) else {
+    let sender_tx = match SessionService::claim_receiver(&state, &code, download_tx).await {
+        ReceiverClaimResult::InvalidCode => {
             let _ = ws_sender
                 .send(Message::Text(
                     r#"{"type":"error","message":"invalid session code"}"#.into(),
                 ))
                 .await;
             let _ = ws_sender.close().await;
+            state.rate_limiter.release_ws_connection(client_ip).await;
+            state.metrics.record_ws_connection_closed();
             return;
-        };
-
-        if session.download_tx.is_some() {
+        }
+        ReceiverClaimResult::AlreadyClaimed => {
             let _ = ws_sender
                 .send(Message::Text(
                     r#"{"type":"error","message":"session already claimed"}"#.into(),
                 ))
                 .await;
             let _ = ws_sender.close().await;
+            state.rate_limiter.release_ws_connection(client_ip).await;
+            state.metrics.record_ws_connection_closed();
             return;
         }
-
-        session.download_tx = Some(download_tx);
-        session.receiver_connected = true;
-
-        session.sender_tx.clone()
+        ReceiverClaimResult::Accepted { sender_tx } => sender_tx,
     };
 
-    info!("receiver connected for code {}", code);
+    info!(session_code = %code, client_ip = %client_ip, "receiver connected");
 
     if let Some(sender_tx) = sender_tx {
-        let _ = sender_tx.send(SenderEvent::Status("receiver_connected")).await;
+        let _ = sender_tx
+            .send(SenderEvent::Status("receiver_connected"))
+            .await;
     }
 
+    protocol::log_download_event(&code, &DownloadEvent::Status("waiting_for_sender"));
     let _ = ws_sender
         .send(Message::Text(
             serde_json::json!({
@@ -71,107 +100,230 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState) {
         ))
         .await;
 
-    let send_task = tokio::spawn(async move {
-        while let Some(event) = download_rx.recv().await {
-            match event {
-                DownloadEvent::Status(status) => {
-                    let msg = serde_json::json!({
-                        "type": "status",
-                        "status": status
-                    });
+    let state_for_send = state.clone();
+    let code_for_send = code.clone();
 
-                    if ws_sender.send(Message::Text(msg.to_string())).await.is_err() {
-                        break;
-                    }
-                }
-                DownloadEvent::Meta {
-                    filename,
-                    file_size,
-                    mime_type,
-                } => {
-                    let msg = serde_json::json!({
-                        "type": "meta",
-                        "filename": filename,
-                        "file_size": file_size,
-                        "mime_type": mime_type
-                    });
+    let send_task = tokio::spawn(
+        async move {
+            let mut total_bytes = None;
+            let mut heartbeat = interval(Duration::from_secs(WS_HEARTBEAT_INTERVAL_SECS));
+            let send_timeout = Duration::from_secs(RECEIVER_SEND_TIMEOUT_SECS);
 
-                    if ws_sender.send(Message::Text(msg.to_string())).await.is_err() {
-                        break;
+            loop {
+                tokio::select! {
+                    _ = heartbeat.tick() => {
+                        if ws_sender.send(Message::Ping(Vec::new())).await.is_err() {
+                            break;
+                        }
                     }
-                }
-                DownloadEvent::Chunk(chunk) => {
-                    if ws_sender.send(Message::Binary(chunk)).await.is_err() {
-                        break;
+                    maybe_event = download_rx.recv() => {
+                        let Some(event) = maybe_event else {
+                            break;
+                        };
+
+                        match event {
+                            DownloadEvent::Status(status) => {
+                                let msg = serde_json::json!({
+                                    "type": "status",
+                                    "status": status
+                                });
+
+                                if ws_sender
+                                    .send(Message::Text(msg.to_string()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            DownloadEvent::Progress {
+                                bytes_transferred,
+                                total_bytes: total,
+                            } => {
+                                let msg = serde_json::json!({
+                                    "type": "progress",
+                                    "bytes_transferred": bytes_transferred,
+                                    "total_bytes": total
+                                });
+
+                                if ws_sender
+                                    .send(Message::Text(msg.to_string()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            DownloadEvent::Meta {
+                                filename,
+                                file_size,
+                                mime_type,
+                            } => {
+                                total_bytes = Some(file_size);
+                                let msg = serde_json::json!({
+                                    "type": "meta",
+                                    "filename": filename,
+                                    "file_size": file_size,
+                                    "mime_type": mime_type
+                                });
+
+                                if ws_sender
+                                    .send(Message::Text(msg.to_string()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            DownloadEvent::Chunk(chunk) => {
+                                match timeout(send_timeout, ws_sender.send(Message::Binary(chunk))).await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(_)) => {
+                                        TransferService::fail_session(
+                                            &state_for_send,
+                                            &code_for_send,
+                                            Some("receiver disconnected"),
+                                            None,
+                                            "receiver websocket send failed",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        let error_message = match total_bytes {
+                                            Some(total_bytes) if total_bytes > 0 => {
+                                                "receiver is too slow; transfer timed out"
+                                            }
+                                            _ => "receiver is too slow",
+                                        };
+
+                                        TransferService::fail_session(
+                                            &state_for_send,
+                                            &code_for_send,
+                                            Some(error_message),
+                                            None,
+                                            "receiver send timeout",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+                                }
+                            }
+                            DownloadEvent::Complete => {
+                                let complete_message = Message::Text(
+                                    serde_json::json!({
+                                        "type": "complete"
+                                    })
+                                    .to_string(),
+                                );
+
+                                match timeout(send_timeout, ws_sender.send(complete_message)).await {
+                                    Ok(Ok(())) => {}
+                                    _ => {
+                                        TransferService::fail_session(
+                                            &state_for_send,
+                                            &code_for_send,
+                                            Some("receiver is too slow; transfer timed out"),
+                                            None,
+                                            "receiver complete send timed out",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+                                }
+
+                                let _ = ws_sender.send(Message::Close(None)).await;
+                                break;
+                            }
+                            DownloadEvent::Error(message) => {
+                                let _ = ws_sender
+                                    .send(Message::Text(
+                                        serde_json::json!({
+                                            "type": "error",
+                                            "message": message
+                                        })
+                                        .to_string(),
+                                    ))
+                                    .await;
+                                break;
+                            }
+                        }
                     }
-                }
-                DownloadEvent::Complete => {
-                    let _ = ws_sender
-                        .send(Message::Text(
-                            serde_json::json!({
-                                "type": "complete"
-                            })
-                            .to_string(),
-                        ))
-                        .await;
-                    break;
-                }
-                DownloadEvent::Error(message) => {
-                    let _ = ws_sender
-                        .send(Message::Text(
-                            serde_json::json!({
-                                "type": "error",
-                                "message": message
-                            })
-                            .to_string(),
-                        ))
-                        .await;
-                    break;
                 }
             }
         }
-    });
+        .instrument(span.clone()),
+    );
 
     let state_for_recv = state.clone();
     let code_for_recv = code.clone();
 
-    let recv_task = tokio::spawn(async move {
-        while let Some(result) = ws_receiver.next().await {
-            match result {
-                Ok(Message::Close(_)) => {
-                    let sender_tx = {
-                        let sessions = state_for_recv.sessions.lock().await;
-                        sessions
-                            .get(&code_for_recv)
-                            .and_then(|session| session.sender_tx.clone())
-                    };
+    let recv_task = tokio::spawn(
+        async move {
+            let idle_timeout = Duration::from_secs(WS_IDLE_TIMEOUT_SECS);
 
-                    if let Some(sender_tx) = sender_tx {
-                        let _ = sender_tx
-                            .send(SenderEvent::Error("receiver disconnected".into()))
-                            .await;
+            loop {
+                let result = match timeout(idle_timeout, ws_receiver.next()).await {
+                    Ok(Some(result)) => result,
+                    Ok(None) => break,
+                    Err(_) => {
+                        TransferService::fail_session(
+                            &state_for_recv,
+                            &code_for_recv,
+                            Some("receiver connection timed out"),
+                            None,
+                            "receiver websocket timed out",
+                        )
+                        .await;
+                        break;
                     }
+                };
 
-                    {
-                        let mut sessions = state_for_recv.sessions.lock().await;
-                        sessions.remove(&code_for_recv);
+                match result {
+                    Ok(Message::Close(_)) => {
+                        TransferService::fail_session(
+                            &state_for_recv,
+                            &code_for_recv,
+                            Some("receiver disconnected"),
+                            None,
+                            "receiver closed websocket",
+                        )
+                        .await;
+                        break;
                     }
-
-                    break;
-                }
-                Ok(_) => {}
-                Err(_) => {
-                    {
-                        let mut sessions = state_for_recv.sessions.lock().await;
-                        sessions.remove(&code_for_recv);
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!("receiver socket error for {}: {}", code_for_recv, err);
+                        TransferService::fail_session(
+                            &state_for_recv,
+                            &code_for_recv,
+                            Some("receiver disconnected"),
+                            None,
+                            "receiver websocket error",
+                        )
+                        .await;
+                        break;
                     }
-                    break;
                 }
             }
         }
-    });
+        .instrument(span),
+    );
 
     let _ = tokio::join!(send_task, recv_task);
 
-    info!("receiver disconnected for code {}", code);
+    if SessionService::remove_session(&state, &code)
+        .await
+        .is_some()
+    {
+        state.metrics.record_transfer_failed();
+        warn!(
+            session_code = %code,
+            "download session ended without an explicit terminal event"
+        );
+    }
+
+    state.rate_limiter.release_ws_connection(client_ip).await;
+    state.metrics.record_ws_connection_closed();
+    info!(session_code = %code, client_ip = %client_ip, "receiver socket closed");
 }
