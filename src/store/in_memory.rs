@@ -18,6 +18,10 @@ impl InMemorySessionStore {
         self.inner.lock().await.len()
     }
 
+    pub async fn is_empty(&self) -> bool {
+        self.inner.lock().await.is_empty()
+    }
+
     pub async fn insert(&self, code: String, session: Session) {
         self.inner.lock().await.insert(code, session);
     }
