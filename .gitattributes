@@ -1,0 +1,17 @@
+* text=auto eol=lf
+
+*.rs text diff=rust
+*.svelte text
+*.ts text
+*.lock text
+
+# Vite's minified runtime contains significant whitespace inside a template
+# literal, so generated bundles are excluded from patch whitespace checks.
+/web/dist/assets/*.js -whitespace
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary

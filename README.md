@@ -1,205 +1,205 @@
 # Drop
 
-Drop is a real-time file transfer service built in Rust that streams data directly between a sender and a receiver using WebSockets. Files are never stored on the server, and each transfer is tied to a one-time session code that exists only while both parties are connected.
+[![CI](https://github.com/op-q/drop/actions/workflows/ci.yml/badge.svg)](https://github.com/op-q/drop/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/op-q/drop/actions/workflows/codeql.yml/badge.svg)](https://github.com/op-q/drop/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-The system is designed as an ephemeral relay: the backend coordinates a live transfer between two clients without persisting data, enforcing strict session lifecycles and one-time access.
+Drop is a small, self-hostable file-transfer service built with Rust and
+Svelte. A sender and receiver connect to the same short-lived session over
+WebSockets while the server relays file chunks directly between them. Drop
+does not write transferred files to application storage.
 
----
+Try the hosted instance at [drop.lifbom.com](https://drop.lifbom.com).
 
-## Overview
-
-Drop implements a minimal, high-performance backend for ephemeral file transfer. Instead of handling uploads and downloads through storage, it relays data in real time between connected peers.
-
-The project focuses on backend architecture, async concurrency, and protocol design using Rust.
-
----
+> [!IMPORTANT]
+> Drop is pre-release software. The protocol and deployment defaults may
+> change, and the public instance should not be treated as a durable storage or
+> high-assurance secure-transfer service.
 
 ## Features
 
-- Real-time file transfer over WebSockets
-- One-time session codes
-- No file storage (in-memory relay only)
-- Single sender and single receiver per session
-- Live transfer model (sender must remain connected)
-- Immediate cancellation and error propagation
-- Strict session lifecycle management
-- 4 GB backend-enforced upload limit
-- Per-IP rate limiting and WebSocket connection limiting
-- Session TTL and background cleanup
-- Progressive browser download when supported
-- Built-in metrics and structured tracing
+- live WebSocket transfer with no application-level file persistence;
+- one-time, short-lived transfer sessions;
+- one sender and one receiver per session;
+- backend-enforced 4 GiB transfer limit;
+- per-IP session and WebSocket connection limits;
+- cancellation, disconnect, timeout, and error propagation;
+- progressive browser downloads when the File System Access API is available;
+- in-memory metrics and structured tracing;
+- a Svelte and TypeScript browser client;
+- Docker and Caddy configuration for self-hosting.
 
----
+## Privacy and security model
+
+Drop is an ephemeral relay, not peer-to-peer or end-to-end encrypted storage.
+When HTTPS is configured, TLS protects each connection to the deployment, but
+the Drop server still handles file bytes in memory while relaying them. The
+server operator and a compromised server could therefore access an active
+transfer.
+
+The session code acts as a temporary capability: anyone who learns an active
+code may be able to join that session. Share codes through a trusted channel.
+Drop removes sessions after completion, cancellation, disconnect, or the
+five-minute TTL, but operating-system, proxy, and infrastructure behavior is
+outside the application's no-storage guarantee.
+
+Please report vulnerabilities privately according to the
+[security policy](.github/SECURITY.md).
 
 ## Architecture
 
-- **Language:** Rust  
-- **Framework:** Axum  
-- **Runtime:** Tokio  
-- **Transport:** WebSockets  
-- **State:** In-memory session store with explicit store/service boundaries
-- **Coordination:** Channel-based message passing (`mpsc`)
-- **Frontend:** Svelte + TypeScript, backend-driven UI
-- **Observability:** `tracing`, HTTP trace layer, metrics snapshot endpoint
+| Layer | Technology | Responsibility |
+| --- | --- | --- |
+| API | Rust, Axum | HTTP endpoints, WebSocket upgrades, static frontend |
+| Runtime | Tokio | async connections, channels, timeouts, cleanup |
+| State | in-memory store | active session metadata and connection channels |
+| Web | Svelte, TypeScript, Vite | sender and receiver browser flows |
+| Edge | Caddy | optional HTTPS termination and reverse proxy |
 
-The backend maintains short-lived in-memory sessions keyed by one-time codes. Each session links:
-- a sender connection
-- a receiver connection
-- communication channels for streaming data and control messages
+Each session connects:
 
----
+- a sender WebSocket;
+- a receiver WebSocket;
+- bounded Tokio channels for file chunks, progress, and control events.
 
-## Transfer Flow
+The transfer flow is:
 
-1. A session is created via `POST /api/session/create`
-2. The sender connects to `/ws/upload/:code`
-3. The receiver connects to `/ws/download/:code`
-4. The backend binds sender and receiver to the same session
-5. The sender streams file data in chunks
-6. The backend relays chunks directly to the receiver
-7. The session is destroyed after completion, cancellation, or disconnect
+1. `POST /api/session/create` creates a temporary session code.
+2. The sender connects to `/ws/upload/:code`.
+3. The receiver connects to `/ws/download/:code`.
+4. The sender provides metadata and streams binary frames.
+5. Drop forwards those frames to the receiver.
+6. Drop destroys the session after a terminal event.
 
----
+## Requirements
 
-## Protocol
+- Rust 1.85 or newer (the minimum version supporting Rust 2024);
+- Node.js `^20.19.0` or `>=22.12.0`;
+- npm;
+- Docker Compose, only for the containerized deployment.
 
-### Sender → Backend
+## Run locally
 
-- `meta`: file metadata (name, size, type)
-- binary frames: file data
-- `complete`: transfer finished
-- `cancel`: abort transfer
-
-### Backend → Sender
-
-- `waiting_for_receiver`
-- `receiver_connected`
-- `sending`
-- `transfer_complete`
-- `cancelled`
-- `error`
-
-### Backend → Receiver
-
-- `waiting_for_sender`
-- `meta`
-- binary frames
-- `progress`
-- `complete`
-- `error`
-
----
-
-## Concurrency Model
-
-- Each WebSocket connection is split into independent send/receive tasks
-- `mpsc` channels are used to decouple sender and receiver streams
-- Shared state is kept in a small explicit in-memory store
-- Sessions are short-lived and cleaned up after termination events
-- WebSocket heartbeats and idle timeouts protect long-lived connections
-
----
-
-## Running Locally
+Install and build the browser client:
 
 ```bash
 cd web
 npm ci
 npm run build
-
 cd ..
+```
+
+Start the Rust server:
+
+```bash
 cargo run
 ```
 
-The app is served by Rust at:
+Drop is then available at:
 
-- `http://127.0.0.1:8080/`
-- `http://127.0.0.1:8080/health`
-- `http://127.0.0.1:8080/metrics`
+- `http://127.0.0.1:8080/`;
+- `http://127.0.0.1:8080/health`;
+- `http://127.0.0.1:8080/metrics`.
 
-You can override the bind address with:
+The default bind address is `0.0.0.0:8080`. Override it when needed:
 
 ```bash
-DROP_BIND_ADDR=0.0.0.0:8080 cargo run
+DROP_BIND_ADDR=127.0.0.1:8080 cargo run
 ```
 
----
+For frontend development, run Vite separately:
 
-## Docker Deployment
+```bash
+cd web
+VITE_BACKEND_ORIGIN=http://127.0.0.1:8080 npm run dev
+```
 
-Build and run the full stack with:
+Then allow the Vite origin on the backend:
+
+```bash
+DROP_ALLOWED_ORIGINS=http://127.0.0.1:5173 cargo run
+```
+
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DROP_BIND_ADDR` | `0.0.0.0:8080` | server socket address |
+| `PORT` | unset | hosting-provider port, used when `DROP_BIND_ADDR` is unset |
+| `DROP_ALLOWED_ORIGINS` | none | comma-separated cross-origin frontend URLs |
+| `RUST_LOG` | application default | tracing filter |
+| `VITE_BACKEND_ORIGIN` | current page origin | backend URL for a separately hosted frontend |
+| `DROP_SITE_ADDRESS` | `localhost` | Caddy site address in Docker Compose |
+| `ACME_EMAIL` | empty | optional Caddy ACME account email |
+
+Copy [`.env.example`](.env.example) when configuring Docker Compose. The Rust
+application does not automatically load `.env` files; export its variables in
+your shell or deployment environment.
+
+## Docker deployment
+
+Build the complete app and run it behind Caddy:
 
 ```bash
 docker compose up --build
 ```
 
-This starts:
+[`Dockerfile.fullstack`](Dockerfile.fullstack) builds both the Svelte frontend
+and Rust service. [`Dockerfile`](Dockerfile) builds the backend only for split
+deployments.
 
-- the Rust app container
-- a Caddy reverse proxy in front of it
+For a public host, set `DROP_SITE_ADDRESS` to the domain, point DNS at the
+server, and optionally set `ACME_EMAIL`. Caddy then handles HTTPS certificates.
 
-Environment variables used by the compose setup:
+## Split deployment
 
-- `DROP_SITE_ADDRESS`
-  - Example: `drop.example.com`
-- `ACME_EMAIL`
-  - Example: `ops@example.com`
-- `RUST_LOG`
+The frontend and backend can be deployed independently:
 
-For local testing, the compose file defaults to `localhost`. For a VPS, set `DROP_SITE_ADDRESS` to your real domain and point DNS to the server. Caddy will then handle HTTPS automatically.
+- set `VITE_BACKEND_ORIGIN=https://api.example.com` on the frontend;
+- set `DROP_ALLOWED_ORIGINS=https://drop.example.com` on the backend;
+- use the backend-only [`Dockerfile`](Dockerfile).
 
-Notes:
+The backend honors a hosting provider's `PORT` variable when
+`DROP_BIND_ADDR` is not set.
 
-- [Dockerfile](/home/opq/code/drop/Dockerfile) is backend-only and is the right one for Render
-- [Dockerfile.fullstack](/home/opq/code/drop/Dockerfile.fullstack) is used by local `docker compose` when you want Rust + built frontend + Caddy together
+## Development
 
----
+Run the repository checks before opening a pull request:
 
-## Split Deployment
+```bash
+scripts/check-secrets.sh
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
+npm --prefix web ci
+npm --prefix web run build
+npm --prefix web audit --audit-level=high
+```
 
-If you deploy the frontend and backend separately:
+The main directories are:
 
-- deploy the Rust backend to Render
-- deploy the Svelte frontend to Vercel
+```text
+src/        Rust application, domain, services, routes, and telemetry
+tests/      integration and WebSocket transfer tests
+web/        Svelte and TypeScript client
+.github/    community files, issue forms, and CI/security automation
+scripts/    repository safety checks
+```
 
-Set these environment variables:
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the branch workflow and pull
+request expectations.
 
-- On Vercel:
-  - `VITE_BACKEND_ORIGIN=https://your-render-service.onrender.com`
-- On Render:
-  - `DROP_ALLOWED_ORIGINS=https://your-vercel-project.vercel.app,https://your-domain.com`
+## Operational limits
 
-Render also provides a `PORT` environment variable automatically, and the backend now binds to it when present.
-For Render, use the backend-only [Dockerfile](/home/opq/code/drop/Dockerfile).
-
-This is the cleanest setup if you want any two users to open the public page and use the same backend relay service.
-
----
-
-## Operational Considerations
-
-Drop is designed as an in-memory relay with no persistent storage. As such, it relies on active connections and bounded resource usage.
-
-Current production-oriented safeguards:
-- backend-enforced 4 GB upload limit
-- concurrent session cap
-- per-IP session creation rate limiting
-- per-IP WebSocket connection limiting
-- TTL-based session expiration
-- progress/error propagation between peers
-- metrics snapshot endpoint
-- structured logging and request tracing
-
-Current limitations:
-- Transfers are live and require both peers to remain connected
-- Sessions are stored in memory and are short-lived
-- Large transfers still depend on network stability and receiver throughput
-- Resume, retry, and chunk acknowledgments are not implemented
-- The in-memory store means a single process remains the source of truth
-- Metrics are exposed as JSON snapshots rather than Prometheus-style scraping
-
----
+- Transfers require both peers to remain online.
+- Sessions and metrics are local to one process.
+- Horizontal scaling needs session affinity or a shared coordination layer.
+- Resume, retry, and chunk acknowledgements are not implemented.
+- Browser fallback downloads buffer the complete file in memory.
+- The metrics endpoint returns a JSON snapshot rather than Prometheus text.
+- Reverse proxies must preserve the intended client-address semantics for
+  per-IP limits.
 
 ## License
 
-MIT
+Drop is available under the [MIT License](LICENSE).

@@ -603,6 +603,10 @@
   >
 </div>
 
-<a class="github" target="_blank" href="https://github.com/l-lifbom/drop"
-  >github.com/l-lifbom/drop</a
+<a
+  class="github"
+  target="_blank"
+  rel="noreferrer"
+  href="https://github.com/op-q/drop"
+  >github.com/op-q/drop</a
 >
