@@ -1,0 +1,74 @@
+name: Bug report
+description: Report reproducible behavior that does not match Drop's documentation.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report vulnerabilities here. Follow `.github/SECURITY.md` and remove credentials, private files, session codes, IP addresses, and sensitive logs.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I used synthetic files and removed private or identifying data.
+          required: true
+        - label: I searched existing issues for the same behavior.
+          required: true
+
+  - type: input
+    id: revision
+    attributes:
+      label: Drop version or commit
+      placeholder: v0.1.0 or commit abc1234
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Rust API
+        - Sender WebSocket
+        - Receiver WebSocket
+        - Browser client
+        - Docker or Caddy
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include relevant browser, operating-system, deployment, and reverse-proxy versions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Describe the observed result and what you expected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use synthetic data and include the smallest reliable steps.
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include only the smallest relevant output after removing sensitive data.
+      render: text

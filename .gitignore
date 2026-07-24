@@ -1,5 +1,30 @@
-/target
-.codex
-web/node_modules
-node_modules
-.env*
+# Rust and web build state
+/target/
+/node_modules/
+/web/node_modules/
+
+# Local tools, editors, and operating-system state
+/.codex/
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+!**/.env.example
+.envrc
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# Logs and coverage
+*.log
+/coverage/

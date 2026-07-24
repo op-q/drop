@@ -2,6 +2,12 @@
 name = "api"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "An ephemeral real-time file-transfer relay built with Rust and WebSockets"
+license = "MIT"
+repository = "https://github.com/op-q/drop"
+readme = "README.md"
+publish = false
 
 [dependencies]
 axum = { version = "0.7", features = ["ws", "json"] }
