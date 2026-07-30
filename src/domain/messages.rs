@@ -11,3 +11,11 @@ pub enum SenderMessage {
     Complete,
     Cancel,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReceiverMessage {
+    ChunkAck { bytes_received: u64 },
+    Complete { bytes_received: u64 },
+    Error,
+}

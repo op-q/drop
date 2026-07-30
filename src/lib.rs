@@ -8,11 +8,13 @@ pub mod store;
 pub mod telemetry;
 pub mod ws;
 
-use std::net::SocketAddr;
+use std::{future::Future, net::SocketAddr};
 
 use app_state::AppState;
 use axum::{
     Router,
+    extract::State,
+    http::StatusCode,
     routing::{get, get_service, post},
 };
 use config::cors_layer_from_env;
@@ -29,17 +31,18 @@ use tower_http::{
 use tracing::Level;
 
 pub fn build_state() -> AppState {
-    AppState {
-        sessions: InMemorySessionStore::new(),
-        rate_limiter: RateLimitService::new(),
-        metrics: AppMetrics::new(),
-    }
+    AppState::new(
+        InMemorySessionStore::new(),
+        RateLimitService::new(),
+        AppMetrics::new(),
+    )
 }
 
 pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route_service("/", get_service(ServeFile::new("web/dist/index.html")))
         .route("/health", get(health))
+        .route("/ready", get(readiness))
         .route("/metrics", get(metrics))
         .route("/api/session/create", post(create_session))
         .route("/ws/upload/:code", get(upload_ws))
@@ -69,6 +72,30 @@ pub async fn serve(listener: tokio::net::TcpListener, app: Router) -> std::io::R
     .await
 }
 
+pub async fn serve_with_shutdown<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    signal: F,
+) -> std::io::Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(signal)
+    .await
+}
+
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn readiness(State(state): State<AppState>) -> StatusCode {
+    if state.is_accepting_connections() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
 }

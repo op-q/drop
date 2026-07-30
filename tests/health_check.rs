@@ -27,6 +27,36 @@ async fn health_endpoint_returns_ok() {
 }
 
 #[tokio::test]
+async fn readiness_endpoint_tracks_draining_state() {
+    let state = api::build_state();
+    let app = api::build_app(state.clone()).layer(axum::extract::connect_info::MockConnectInfo(
+        SocketAddr::from(([127, 0, 0, 1], 3003)),
+    ));
+
+    let ready = send(
+        &app,
+        Request::builder()
+            .uri("/ready")
+            .body(Body::empty())
+            .expect("expected request builder"),
+    )
+    .await;
+    assert_eq!(ready.status(), StatusCode::OK);
+
+    state.begin_draining();
+
+    let draining = send(
+        &app,
+        Request::builder()
+            .uri("/ready")
+            .body(Body::empty())
+            .expect("expected request builder"),
+    )
+    .await;
+    assert_eq!(draining.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 async fn index_serves_the_drop_entrypoint() {
     let app = test_app(SocketAddr::from(([127, 0, 0, 1], 3001)));
 
