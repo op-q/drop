@@ -3,10 +3,14 @@ use std::net::SocketAddr;
 use axum::{
     Json,
     extract::{ConnectInfo, State},
+    http::HeaderMap,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{app_state::AppState, errors::AppError, services::session_service::SessionService};
+use crate::{
+    app_state::AppState, config::client_ip_from_request, errors::AppError,
+    services::session_service::SessionService,
+};
 
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
@@ -21,11 +25,14 @@ pub struct CreateSessionResponse {
 
 pub async fn create_session(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     State(state): State<AppState>,
     Json(payload): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, AppError> {
+    state.ensure_accepting_connections()?;
+    let client_ip = client_ip_from_request(addr.ip(), &headers);
     let code =
-        SessionService::create_session(&state, addr.ip(), payload.filename, payload.file_size)
+        SessionService::create_session(&state, client_ip, payload.filename, payload.file_size)
             .await?;
 
     Ok(Json(CreateSessionResponse { code }))
@@ -50,14 +57,15 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_uploads_over_limit() {
-        let state = AppState {
-            sessions: InMemorySessionStore::new(),
-            rate_limiter: RateLimitService::new(),
-            metrics: AppMetrics::new(),
-        };
+        let state = AppState::new(
+            InMemorySessionStore::new(),
+            RateLimitService::new(),
+            AppMetrics::new(),
+        );
 
         let result = create_session(
             ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))),
+            axum::http::HeaderMap::new(),
             State(state),
             axum::Json(CreateSessionRequest {
                 filename: "too-big.bin".into(),
@@ -71,14 +79,15 @@ mod tests {
 
     #[tokio::test]
     async fn creates_session_when_file_size_is_within_limit() {
-        let state = AppState {
-            sessions: InMemorySessionStore::new(),
-            rate_limiter: RateLimitService::new(),
-            metrics: AppMetrics::new(),
-        };
+        let state = AppState::new(
+            InMemorySessionStore::new(),
+            RateLimitService::new(),
+            AppMetrics::new(),
+        );
 
         let result = create_session(
             ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))),
+            axum::http::HeaderMap::new(),
             State(state.clone()),
             axum::Json(CreateSessionRequest {
                 filename: "ok.bin".into(),
@@ -109,26 +118,50 @@ mod tests {
                         filename: "ok.bin".into(),
                         file_size: 1,
                         created_at: Instant::now(),
+                        last_activity: Instant::now(),
                         sender_tx: None,
                         download_tx: None,
                         sender_connected: false,
                         receiver_connected: false,
+                        bytes_relayed: 0,
+                        receiver_acknowledged_bytes: 0,
+                        sender_finished: false,
                     },
                 )
                 .await;
         }
 
-        let state = AppState {
-            sessions,
-            rate_limiter: RateLimitService::new(),
-            metrics: AppMetrics::new(),
-        };
+        let state = AppState::new(sessions, RateLimitService::new(), AppMetrics::new());
 
         let result = create_session(
             ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4321))),
+            axum::http::HeaderMap::new(),
             State(state),
             axum::Json(CreateSessionRequest {
                 filename: "full.bin".into(),
+                file_size: 1,
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_new_sessions_while_draining() {
+        let state = AppState::new(
+            InMemorySessionStore::new(),
+            RateLimitService::new(),
+            AppMetrics::new(),
+        );
+        state.begin_draining();
+
+        let result = create_session(
+            ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))),
+            axum::http::HeaderMap::new(),
+            State(state),
+            axum::Json(CreateSessionRequest {
+                filename: "late.bin".into(),
                 file_size: 1,
             }),
         )

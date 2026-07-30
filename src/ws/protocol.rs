@@ -76,6 +76,14 @@ pub fn log_sender_event(code: &str, event: &SenderEvent) {
                 "dispatching sender event"
             );
         }
+        SenderEvent::Acknowledgement { bytes_received } => {
+            debug!(
+                session_code = %code,
+                event = "receiver_acknowledgement",
+                bytes_received,
+                "dispatching sender event"
+            );
+        }
         SenderEvent::Error(message) => {
             debug!(
                 session_code = %code,
