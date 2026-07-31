@@ -7,6 +7,10 @@
   } from "./types";
 
   const CHUNK_SIZE = 64 * 1024;
+  const MAX_IN_FLIGHT_CHUNKS = 8;
+  const MAX_IN_FLIGHT_BYTES = CHUNK_SIZE * MAX_IN_FLIGHT_CHUNKS;
+  const WS_BUFFER_HIGH_WATER_BYTES = MAX_IN_FLIGHT_BYTES;
+  const MAX_MEMORY_DOWNLOAD_BYTES = 256 * 1024 * 1024;
 
   interface FilePickerWindow extends Window {
     showSaveFilePicker?: (options?: {
@@ -29,6 +33,12 @@
     write(chunk: ArrayBuffer): Promise<void>;
     complete(filename: string, mimeType: string): Promise<void>;
     abort(): Promise<void>;
+  }
+
+  interface UploadFlowControl {
+    acknowledgedBytes: number;
+    error: Error | null;
+    wake: (() => void) | null;
   }
 
   let codeInput = "";
@@ -144,7 +154,8 @@
           link.click();
           link.remove();
 
-          URL.revokeObjectURL(url);
+          chunks.length = 0;
+          window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
         },
         async abort(): Promise<void> {
           chunks.length = 0;
@@ -156,55 +167,107 @@
       suggestedName: `drop-${code}`,
     });
     const writable = await handle.createWritable();
-    let writeQueue = Promise.resolve();
 
     return {
       kind: "disk",
       async write(chunk: ArrayBuffer): Promise<void> {
-        writeQueue = writeQueue.then(() => writable.write(new Uint8Array(chunk)));
-        await writeQueue;
+        await writable.write(new Uint8Array(chunk));
       },
       async complete(): Promise<void> {
-        await writeQueue;
         await writable.close();
       },
       async abort(): Promise<void> {
-        try {
-          await writable.abort();
-        } catch {
-          await writable.close().catch(() => undefined);
-        }
+        await writable.abort().catch(() => undefined);
       },
     };
+  }
+
+  function signalUploadFlow(flow: UploadFlowControl): void {
+    const wake = flow.wake;
+    flow.wake = null;
+    wake?.();
+  }
+
+  async function waitForUploadSignal(flow: UploadFlowControl): Promise<void> {
+    await new Promise<void>((resolve) => {
+      let settled = false;
+
+      const finish = (): void => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        window.clearTimeout(timer);
+        if (flow.wake === finish) {
+          flow.wake = null;
+        }
+        resolve();
+      };
+
+      const timer = window.setTimeout(finish, 25);
+      flow.wake = finish;
+    });
+  }
+
+  function assertUploadCanContinue(
+    socket: WebSocket,
+    flow: UploadFlowControl
+  ): void {
+    if (flow.error) {
+      throw flow.error;
+    }
+
+    if (
+      uploadCancelled ||
+      uploadSocket !== socket ||
+      socket.readyState !== WebSocket.OPEN
+    ) {
+      throw new Error("upload connection closed before the transfer completed");
+    }
+  }
+
+  async function waitForUploadCapacity(
+    socket: WebSocket,
+    flow: UploadFlowControl,
+    bytesAfterNextChunk: number
+  ): Promise<void> {
+    while (
+      bytesAfterNextChunk - flow.acknowledgedBytes > MAX_IN_FLIGHT_BYTES ||
+      socket.bufferedAmount > WS_BUFFER_HIGH_WATER_BYTES
+    ) {
+      assertUploadCanContinue(socket, flow);
+      await waitForUploadSignal(flow);
+    }
+
+    assertUploadCanContinue(socket, flow);
   }
 
   async function sendFileChunks(
     socket: WebSocket,
     file: File,
-    code: string
+    code: string,
+    flow: UploadFlowControl
   ): Promise<void> {
     let offset = 0;
     setStatus(["Upload started.", "Your file is on the way."], code);
 
     while (offset < file.size) {
-      if (
-        uploadCancelled ||
-        uploadSocket !== socket ||
-        socket.readyState !== WebSocket.OPEN
-      ) {
-        return;
-      }
-
       const end = Math.min(offset + CHUNK_SIZE, file.size);
+      await waitForUploadCapacity(socket, flow, end);
       const chunk = await file.slice(offset, end).arrayBuffer();
+      assertUploadCanContinue(socket, flow);
       socket.send(chunk);
       offset = end;
-      await new Promise((resolve) => window.setTimeout(resolve, 0));
     }
 
-    if (!uploadCancelled && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "complete" }));
+    while (flow.acknowledgedBytes < file.size) {
+      assertUploadCanContinue(socket, flow);
+      await waitForUploadSignal(flow);
     }
+
+    assertUploadCanContinue(socket, flow);
+    socket.send(JSON.stringify({ type: "complete" }));
   }
 
   async function startUpload(file: File | null): Promise<void> {
@@ -238,16 +301,59 @@
 
       const socket = await openUploadSocket(session.code);
       uploadSocket = socket;
+      const flow: UploadFlowControl = {
+        acknowledgedBytes: 0,
+        error: null,
+        wake: null,
+      };
+      let transferComplete = false;
 
-      socket.onmessage = async (event: MessageEvent<string>) => {
+      const failUpload = (error: Error): void => {
+        if (uploadCancelled || transferComplete) {
+          return;
+        }
+
+        flow.error ??= error;
+        signalUploadFlow(flow);
+        setStatus(["Upload stopped.", flow.error.message], uploadCode);
+
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "cancel" }));
+          socket.close();
+        }
+      };
+
+      socket.onmessage = (event: MessageEvent<string>) => {
         if (typeof event.data !== "string") {
           return;
         }
 
-        const message = JSON.parse(event.data) as UploadSocketMessage;
+        let message: UploadSocketMessage;
+        try {
+          message = JSON.parse(event.data) as UploadSocketMessage;
+        } catch {
+          failUpload(new Error("the server sent an invalid response"));
+          return;
+        }
 
         if (message.type === "error") {
+          flow.error = new Error(message.message);
+          signalUploadFlow(flow);
           setStatus(["Upload stopped.", message.message], uploadCode);
+          return;
+        }
+
+        if (message.type === "ack") {
+          if (
+            message.bytes_received < flow.acknowledgedBytes ||
+            message.bytes_received > file.size
+          ) {
+            failUpload(new Error("the receiver sent an invalid acknowledgement"));
+            return;
+          }
+
+          flow.acknowledgedBytes = message.bytes_received;
+          signalUploadFlow(flow);
           return;
         }
 
@@ -294,7 +400,15 @@
               })
             );
 
-            await sendFileChunks(socket, uploadFile, session.code);
+            void sendFileChunks(socket, uploadFile, session.code, flow).catch(
+              (error: unknown) => {
+                failUpload(
+                  error instanceof Error
+                    ? error
+                    : new Error("the upload could not continue")
+                );
+              }
+            );
           }
 
           return;
@@ -308,7 +422,19 @@
           return;
         }
 
+        if (message.status === "awaiting_receiver") {
+          setStatus(
+            [
+              "Upload delivered.",
+              "Waiting for the receiver to finish saving the file...",
+            ],
+            uploadCode
+          );
+          return;
+        }
+
         if (message.status === "transfer_complete") {
+          transferComplete = true;
           setStatus(
             ["Upload complete.", "The transfer finished successfully."],
             uploadCode
@@ -322,6 +448,14 @@
       };
 
       socket.onclose = () => {
+        if (!transferComplete && !uploadCancelled && !flow.error) {
+          flow.error = new Error(
+            "upload connection closed before the receiver confirmed the file"
+          );
+          setStatus(["Upload stopped.", flow.error.message], uploadCode);
+        }
+        signalUploadFlow(flow);
+
         if (uploadCancelled) {
           setStatus(
             ["Transfer cancelled.", "You can start a new upload anytime."],
@@ -369,13 +503,45 @@
 
     try {
       downloadTarget = await createDownloadTarget(code);
+      const target = downloadTarget;
       const socket = await openDownloadSocket(code);
       let filename = "download.bin";
       let mimeType = "application/octet-stream";
       let total = 0;
       let expectedTotal = 0;
+      let finalized = false;
+      let failed = false;
+      let messageQueue = Promise.resolve();
 
-      socket.onmessage = async (event: MessageEvent<ArrayBuffer | string>) => {
+      const abortDownload = async (
+        error: Error,
+        notifyServer: boolean
+      ): Promise<void> => {
+        if (failed || finalized) {
+          return;
+        }
+
+        failed = true;
+
+        if (notifyServer && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "error" }));
+        }
+
+        await target.abort().catch(() => undefined);
+        setStatus(["Download stopped.", error.message], null);
+
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.close();
+        }
+      };
+
+      const handleDownloadMessage = async (
+        event: MessageEvent<ArrayBuffer | string>
+      ): Promise<void> => {
+        if (failed || finalized) {
+          return;
+        }
+
         if (typeof event.data === "string") {
           const message = JSON.parse(event.data) as DownloadSocketMessage;
 
@@ -386,11 +552,7 @@
                 filename === "download.bin"
                   ? "Receiving your file..."
                   : `Receiving ${filename}...`,
-                formatProgress(
-                  "Downloaded",
-                  message.bytes_transferred,
-                  message.total_bytes
-                ),
+                formatProgress("Saved", total, message.total_bytes),
               ],
               null
             );
@@ -409,6 +571,18 @@
             filename = message.filename || filename;
             mimeType = message.mime_type || mimeType;
             expectedTotal = message.file_size;
+
+            if (
+              target.kind === "memory" &&
+              expectedTotal > MAX_MEMORY_DOWNLOAD_BYTES
+            ) {
+              throw new Error(
+                `this browser cannot safely buffer files over ${formatBytes(
+                  MAX_MEMORY_DOWNLOAD_BYTES
+                )}; use a browser with direct-to-disk download support`
+              );
+            }
+
             setStatus(
               [
                 `Receiving ${filename}...`,
@@ -420,7 +594,34 @@
           }
 
           if (message.type === "complete") {
-            await downloadTarget.complete(filename, mimeType);
+            if (expectedTotal === 0 || total !== expectedTotal) {
+              throw new Error(
+                `received ${formatBytes(total)} but expected ${formatBytes(
+                  expectedTotal
+                )}`
+              );
+            }
+
+            await target.complete(filename, mimeType);
+            finalized = true;
+
+            if (socket.readyState !== WebSocket.OPEN) {
+              setStatus(
+                [
+                  "Download saved.",
+                  "The file was saved, but confirmation to the sender failed.",
+                ],
+                null
+              );
+              return;
+            }
+
+            socket.send(
+              JSON.stringify({
+                type: "complete",
+                bytes_received: total,
+              })
+            );
             setStatus(
               [
                 "Download complete.",
@@ -428,37 +629,71 @@
               ],
               null
             );
-            socket.close();
             return;
           }
 
           if (message.type === "error") {
-            await downloadTarget.abort();
-            setStatus(["Download stopped.", message.message], null);
-            socket.close();
+            throw new Error(message.message);
           }
 
           return;
         }
 
-        await downloadTarget.write(event.data);
+        if (expectedTotal === 0) {
+          throw new Error("received file bytes before file metadata");
+        }
+
+        if (total + event.data.byteLength > expectedTotal) {
+          throw new Error("received more bytes than the declared file size");
+        }
+
+        await target.write(event.data);
         total += event.data.byteLength;
 
-        if (expectedTotal === 0) {
-          setStatus(
-            [
-              filename === "download.bin"
-                ? "Receiving your file..."
-                : `Receiving ${filename}...`,
-              `Downloaded ${formatBytes(total)} so far.`,
-            ],
-            null
-          );
+        if (socket.readyState !== WebSocket.OPEN) {
+          throw new Error("download connection closed while saving the file");
         }
+
+        socket.send(
+          JSON.stringify({
+            type: "chunk_ack",
+            bytes_received: total,
+          })
+        );
+        setStatus(
+          [
+            filename === "download.bin"
+              ? "Receiving your file..."
+              : `Receiving ${filename}...`,
+            formatProgress("Saved", total, expectedTotal),
+          ],
+          null
+        );
+      };
+
+      socket.onmessage = (event: MessageEvent<ArrayBuffer | string>) => {
+        messageQueue = messageQueue
+          .then(() => handleDownloadMessage(event))
+          .catch((error: unknown) =>
+            abortDownload(
+              error instanceof Error
+                ? error
+                : new Error("the download could not continue"),
+              true
+            )
+          );
       };
 
       socket.onclose = () => {
-        downloadTarget = null;
+        messageQueue = messageQueue.then(async () => {
+          if (!finalized && !failed) {
+            await abortDownload(
+              new Error("download connection closed before completion"),
+              false
+            );
+          }
+          downloadTarget = null;
+        });
       };
     } catch (error) {
       if (downloadTarget) {
