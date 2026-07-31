@@ -5,6 +5,7 @@ use axum::{
         ConnectInfo, Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::HeaderMap,
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -16,7 +17,8 @@ use crate::{
     app_state::AppState,
     config::{
         MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_LABEL, SENDER_EVENT_CHANNEL_CAPACITY,
-        WS_HEARTBEAT_INTERVAL_SECS, WS_IDLE_TIMEOUT_SECS,
+        WS_HEARTBEAT_INTERVAL_SECS, WS_IDLE_TIMEOUT_SECS, WS_MAX_MESSAGE_BYTES,
+        client_ip_from_request,
     },
     domain::{
         messages::SenderMessage,
@@ -35,21 +37,27 @@ use crate::{
 pub async fn upload_ws(
     ws: WebSocketUpgrade,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(code): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
+    state.ensure_accepting_connections()?;
+    let client_ip = client_ip_from_request(addr.ip(), &headers);
     remove_expired_sessions(&state).await;
     state
         .rate_limiter
-        .check_connection_attempt_limit(addr.ip())
+        .check_connection_attempt_limit(client_ip)
         .await?;
     state
         .rate_limiter
-        .try_acquire_ws_connection(addr.ip())
+        .try_acquire_ws_connection(client_ip)
         .await?;
     state.metrics.record_ws_connection_opened();
 
-    Ok(ws.on_upgrade(move |socket| handle_socket(socket, code, state, addr.ip())))
+    Ok(ws
+        .max_message_size(WS_MAX_MESSAGE_BYTES)
+        .max_frame_size(WS_MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, code, state, client_ip)))
 }
 
 async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_ip: IpAddr) {
@@ -117,11 +125,17 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                     "status": status
                                 });
 
+                                let terminal = matches!(status, "transfer_complete" | "cancelled");
                                 if ws_sender
                                     .send(Message::Text(msg.to_string()))
                                     .await
                                     .is_err()
                                 {
+                                    break;
+                                }
+
+                                if terminal {
+                                    let _ = ws_sender.send(Message::Close(None)).await;
                                     break;
                                 }
                             }
@@ -133,6 +147,20 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                     "type": "progress",
                                     "bytes_transferred": bytes_transferred,
                                     "total_bytes": total_bytes
+                                });
+
+                                if ws_sender
+                                    .send(Message::Text(msg.to_string()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            SenderEvent::Acknowledgement { bytes_received } => {
+                                let msg = serde_json::json!({
+                                    "type": "ack",
+                                    "bytes_received": bytes_received
                                 });
 
                                 if ws_sender
@@ -188,180 +216,198 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                 };
 
                 match result {
-                    Ok(Message::Text(text)) => {
-                        match serde_json::from_str::<SenderMessage>(&text) {
-                            Ok(message) => {
-                                protocol::log_incoming_sender_message(&code_for_recv, &message);
+                    Ok(Message::Text(text)) => match serde_json::from_str::<SenderMessage>(&text) {
+                        Ok(message) => {
+                            protocol::log_incoming_sender_message(&code_for_recv, &message);
 
-                                match message {
-                                    SenderMessage::Meta {
-                                        filename,
-                                        file_size,
-                                        mime_type,
-                                    } => {
-                                        let Some(session_file_size) =
-                                            SessionService::session_file_size(
-                                                &state_for_recv,
-                                                &code_for_recv,
-                                            )
-                                            .await
-                                        else {
-                                            break;
-                                        };
-
-                                        if file_size != session_file_size {
-                                            TransferService::fail_session(
-                                    &state_for_recv,
-                                    &code_for_recv,
-                                    Some("meta file size does not match the created session"),
-                                    None,
-                                    "sender meta size mismatch",
-                                )
-                                .await;
-                                            break;
-                                        }
-
-                                        if file_size > MAX_UPLOAD_SIZE_BYTES {
-                                            let message = format!(
-                                                "file size exceeds the {} upload limit",
-                                                MAX_UPLOAD_SIZE_LABEL
-                                            );
-                                            TransferService::fail_session(
-                                                &state_for_recv,
-                                                &code_for_recv,
-                                                Some(&message),
-                                                None,
-                                                "sender meta exceeded upload limit",
-                                            )
-                                            .await;
-                                            break;
-                                        }
-
-                                        if !SessionService::receiver_connected(
+                            match message {
+                                SenderMessage::Meta {
+                                    filename,
+                                    file_size,
+                                    mime_type,
+                                } => {
+                                    let Some(session_file_size) =
+                                        SessionService::session_file_size(
                                             &state_for_recv,
                                             &code_for_recv,
                                         )
                                         .await
-                                        {
-                                            TransferService::fail_session(
-                                                &state_for_recv,
-                                                &code_for_recv,
-                                                Some("receiver is not connected"),
-                                                None,
-                                                "sender started before receiver connected",
-                                            )
-                                            .await;
-                                            break;
-                                        }
-
-                                        received_meta = true;
-                                        expected_file_size = Some(file_size);
-
-                                        TransferService::send_receiver(
-                                            &state_for_recv,
-                                            &code_for_recv,
-                                            DownloadEvent::Meta {
-                                                filename,
-                                                file_size,
-                                                mime_type,
-                                            },
-                                        )
-                                        .await;
-
-                                        TransferService::send_sender(
-                                            &state_for_recv,
-                                            &code_for_recv,
-                                            SenderEvent::Status("sending"),
-                                        )
-                                        .await;
-                                        TransferService::try_send_sender(
-                                            &state_for_recv,
-                                            &code_for_recv,
-                                            SenderEvent::Progress {
-                                                bytes_transferred: 0,
-                                                total_bytes: file_size,
-                                            },
-                                        )
-                                        .await;
-                                        TransferService::try_send_receiver(
-                                            &state_for_recv,
-                                            &code_for_recv,
-                                            DownloadEvent::Progress {
-                                                bytes_transferred: 0,
-                                                total_bytes: file_size,
-                                            },
-                                        )
-                                        .await;
-                                    }
-
-                                    SenderMessage::Complete => {
-                                        if Some(bytes_received) != expected_file_size {
-                                            TransferService::fail_session(
-                                    &state_for_recv,
-                                    &code_for_recv,
-                                    Some("sent bytes did not match declared file size"),
-                                    Some("transfer ended before declared file size was sent"),
-                                    "sender completed with mismatched byte count",
-                                )
-                                .await;
-                                            break;
-                                        }
-
-                                        TransferService::send_receiver(
-                                            &state_for_recv,
-                                            &code_for_recv,
-                                            DownloadEvent::Complete,
-                                        )
-                                        .await;
-                                        TransferService::send_sender(
-                                            &state_for_recv,
-                                            &code_for_recv,
-                                            SenderEvent::Status("transfer_complete"),
-                                        )
-                                        .await;
-                                        TransferService::complete_session(
-                                            &state_for_recv,
-                                            &code_for_recv,
-                                            bytes_received,
-                                        )
-                                        .await;
+                                    else {
                                         break;
-                                    }
+                                    };
 
-                                    SenderMessage::Cancel => {
-                                        TransferService::send_sender(
-                                            &state_for_recv,
-                                            &code_for_recv,
-                                            SenderEvent::Status("cancelled"),
-                                        )
-                                        .await;
+                                    if file_size != session_file_size {
                                         TransferService::fail_session(
                                             &state_for_recv,
                                             &code_for_recv,
+                                            Some(
+                                                "meta file size does not match the created session",
+                                            ),
                                             None,
-                                            Some("sender cancelled"),
-                                            "sender cancelled transfer",
+                                            "sender meta size mismatch",
                                         )
                                         .await;
                                         break;
                                     }
+
+                                    if file_size > MAX_UPLOAD_SIZE_BYTES {
+                                        let message = format!(
+                                            "file size exceeds the {} upload limit",
+                                            MAX_UPLOAD_SIZE_LABEL
+                                        );
+                                        TransferService::fail_session(
+                                            &state_for_recv,
+                                            &code_for_recv,
+                                            Some(&message),
+                                            None,
+                                            "sender meta exceeded upload limit",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+
+                                    if !SessionService::receiver_connected(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                    )
+                                    .await
+                                    {
+                                        TransferService::fail_session(
+                                            &state_for_recv,
+                                            &code_for_recv,
+                                            Some("receiver is not connected"),
+                                            None,
+                                            "sender started before receiver connected",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+
+                                    received_meta = true;
+                                    expected_file_size = Some(file_size);
+                                    let _ = SessionService::touch_session(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                    )
+                                    .await;
+
+                                    TransferService::send_receiver(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        DownloadEvent::Meta {
+                                            filename,
+                                            file_size,
+                                            mime_type,
+                                        },
+                                    )
+                                    .await;
+
+                                    TransferService::send_sender(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        SenderEvent::Status("sending"),
+                                    )
+                                    .await;
+                                    TransferService::try_send_sender(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        SenderEvent::Progress {
+                                            bytes_transferred: 0,
+                                            total_bytes: file_size,
+                                        },
+                                    )
+                                    .await;
+                                    TransferService::try_send_receiver(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        DownloadEvent::Progress {
+                                            bytes_transferred: 0,
+                                            total_bytes: file_size,
+                                        },
+                                    )
+                                    .await;
+                                }
+
+                                SenderMessage::Complete => {
+                                    if Some(bytes_received) != expected_file_size {
+                                        TransferService::fail_session(
+                                            &state_for_recv,
+                                            &code_for_recv,
+                                            Some("sent bytes did not match declared file size"),
+                                            Some(
+                                                "transfer ended before declared file size was sent",
+                                            ),
+                                            "sender completed with mismatched byte count",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+
+                                    if !SessionService::mark_sender_finished(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                    )
+                                    .await
+                                    {
+                                        TransferService::fail_session(
+                                            &state_for_recv,
+                                            &code_for_recv,
+                                            Some("transfer could not be finalized"),
+                                            Some("transfer could not be finalized"),
+                                            "sender completion state was invalid",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+
+                                    TransferService::send_receiver(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        DownloadEvent::Complete,
+                                    )
+                                    .await;
+                                    TransferService::send_sender(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        SenderEvent::Status("awaiting_receiver"),
+                                    )
+                                    .await;
+                                    break;
+                                }
+
+                                SenderMessage::Cancel => {
+                                    TransferService::send_sender(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        SenderEvent::Status("cancelled"),
+                                    )
+                                    .await;
+                                    TransferService::fail_session(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        None,
+                                        Some("sender cancelled"),
+                                        "sender cancelled transfer",
+                                    )
+                                    .await;
+                                    break;
                                 }
                             }
-
-                            Err(err) => {
-                                warn!(
-                                    "invalid sender control message for {}: {}",
-                                    code_for_recv, err
-                                );
-                                TransferService::send_sender(
-                                    &state_for_recv,
-                                    &code_for_recv,
-                                    SenderEvent::Error("invalid control message".into()),
-                                )
-                                .await;
-                            }
                         }
-                    }
+
+                        Err(err) => {
+                            warn!(
+                                "invalid sender control message for {}: {}",
+                                code_for_recv, err
+                            );
+                            TransferService::send_sender(
+                                &state_for_recv,
+                                &code_for_recv,
+                                SenderEvent::Error("invalid control message".into()),
+                            )
+                            .await;
+                        }
+                    },
 
                     Ok(Message::Binary(bytes)) => {
                         if !received_meta {
@@ -394,6 +440,24 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                 Some("upload exceeded the allowed file size"),
                                 Some("upload exceeded allowed size"),
                                 "sender exceeded allowed size",
+                            )
+                            .await;
+                            break;
+                        }
+
+                        if !SessionService::record_relayed_bytes(
+                            &state_for_recv,
+                            &code_for_recv,
+                            bytes_received,
+                        )
+                        .await
+                        {
+                            TransferService::fail_session(
+                                &state_for_recv,
+                                &code_for_recv,
+                                Some("transfer byte accounting failed"),
+                                Some("transfer byte accounting failed"),
+                                "could not record relayed bytes",
                             )
                             .await;
                             break;

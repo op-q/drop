@@ -5,6 +5,7 @@ use axum::{
         ConnectInfo, Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::HeaderMap,
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -16,9 +17,12 @@ use crate::{
     app_state::AppState,
     config::{
         DOWNLOAD_EVENT_CHANNEL_CAPACITY, RECEIVER_SEND_TIMEOUT_SECS, WS_HEARTBEAT_INTERVAL_SECS,
-        WS_IDLE_TIMEOUT_SECS,
+        WS_IDLE_TIMEOUT_SECS, WS_MAX_MESSAGE_BYTES, client_ip_from_request,
     },
-    domain::session::{DownloadEvent, SenderEvent},
+    domain::{
+        messages::ReceiverMessage,
+        session::{DownloadEvent, SenderEvent},
+    },
     errors::AppError,
     services::{
         cleanup_service::remove_expired_sessions,
@@ -32,21 +36,27 @@ use crate::{
 pub async fn download_ws(
     ws: WebSocketUpgrade,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(code): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
+    state.ensure_accepting_connections()?;
+    let client_ip = client_ip_from_request(addr.ip(), &headers);
     remove_expired_sessions(&state).await;
     state
         .rate_limiter
-        .check_connection_attempt_limit(addr.ip())
+        .check_connection_attempt_limit(client_ip)
         .await?;
     state
         .rate_limiter
-        .try_acquire_ws_connection(addr.ip())
+        .try_acquire_ws_connection(client_ip)
         .await?;
     state.metrics.record_ws_connection_opened();
 
-    Ok(ws.on_upgrade(move |socket| handle_socket(socket, code, state, addr.ip())))
+    Ok(ws
+        .max_message_size(WS_MAX_MESSAGE_BYTES)
+        .max_frame_size(WS_MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, code, state, client_ip)))
 }
 
 async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_ip: IpAddr) {
@@ -118,6 +128,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                     }
                     maybe_event = download_rx.recv() => {
                         let Some(event) = maybe_event else {
+                            let _ = ws_sender.send(Message::Close(None)).await;
                             break;
                         };
 
@@ -231,9 +242,6 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                         break;
                                     }
                                 }
-
-                                let _ = ws_sender.send(Message::Close(None)).await;
-                                break;
                             }
                             DownloadEvent::Error(message) => {
                                 let _ = ws_sender
@@ -245,6 +253,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                         .to_string(),
                                     ))
                                     .await;
+                                let _ = ws_sender.send(Message::Close(None)).await;
                                 break;
                             }
                         }
@@ -280,6 +289,99 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                 };
 
                 match result {
+                    Ok(Message::Text(text)) => {
+                        let message = match serde_json::from_str::<ReceiverMessage>(&text) {
+                            Ok(message) => message,
+                            Err(err) => {
+                                warn!(
+                                    "invalid receiver control message for {}: {}",
+                                    code_for_recv, err
+                                );
+                                TransferService::fail_session(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    Some("receiver sent an invalid control message"),
+                                    Some("invalid control message"),
+                                    "invalid receiver control message",
+                                )
+                                .await;
+                                break;
+                            }
+                        };
+
+                        match message {
+                            ReceiverMessage::ChunkAck { bytes_received } => {
+                                if !SessionService::acknowledge_receiver_bytes(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    bytes_received,
+                                )
+                                .await
+                                {
+                                    TransferService::fail_session(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        Some("receiver acknowledgement was invalid"),
+                                        Some("transfer acknowledgement was invalid"),
+                                        "invalid receiver chunk acknowledgement",
+                                    )
+                                    .await;
+                                    break;
+                                }
+
+                                TransferService::send_sender(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    SenderEvent::Acknowledgement { bytes_received },
+                                )
+                                .await;
+                            }
+                            ReceiverMessage::Complete { bytes_received } => {
+                                if !SessionService::confirm_receiver_complete(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    bytes_received,
+                                )
+                                .await
+                                {
+                                    TransferService::fail_session(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        Some("receiver completion was invalid"),
+                                        Some("transfer completion was invalid"),
+                                        "invalid receiver completion acknowledgement",
+                                    )
+                                    .await;
+                                    break;
+                                }
+
+                                TransferService::send_sender(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    SenderEvent::Status("transfer_complete"),
+                                )
+                                .await;
+                                TransferService::complete_session(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    bytes_received,
+                                )
+                                .await;
+                                break;
+                            }
+                            ReceiverMessage::Error => {
+                                TransferService::fail_session(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    Some("receiver could not save the file"),
+                                    None,
+                                    "receiver reported a file write error",
+                                )
+                                .await;
+                                break;
+                            }
+                        }
+                    }
                     Ok(Message::Close(_)) => {
                         TransferService::fail_session(
                             &state_for_recv,

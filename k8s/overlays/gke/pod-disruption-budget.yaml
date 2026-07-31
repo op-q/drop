@@ -1,0 +1,19 @@
+# Autopilot respects a PodDisruptionBudget for up to one hour during voluntary
+# disruptions such as a node drain. With a single replica and no transfer
+# resume, that hour is the difference between a finished transfer and a failed
+# one. Autopilot proceeds after the hour, so this delays disruption rather than
+# blocking cluster maintenance indefinitely.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: drop
+  labels:
+    app.kubernetes.io/name: drop
+    app.kubernetes.io/component: relay
+    app.kubernetes.io/part-of: drop
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: drop
+      app.kubernetes.io/component: relay

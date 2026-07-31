@@ -73,6 +73,7 @@ impl SessionService {
             .collect::<String>()
             .to_uppercase();
 
+        let now = Instant::now();
         state
             .sessions
             .insert(
@@ -80,11 +81,15 @@ impl SessionService {
                 Session {
                     filename,
                     file_size,
-                    created_at: Instant::now(),
+                    created_at: now,
+                    last_activity: now,
                     sender_tx: None,
                     download_tx: None,
                     sender_connected: false,
                     receiver_connected: false,
+                    bytes_relayed: 0,
+                    receiver_acknowledged_bytes: 0,
+                    sender_finished: false,
                 },
             )
             .await;
@@ -109,6 +114,7 @@ impl SessionService {
                     let receiver_connected = session.receiver_connected;
                     session.sender_connected = true;
                     session.sender_tx = Some(sender_tx);
+                    session.last_activity = Instant::now();
                     SenderClaimResult::Accepted { receiver_connected }
                 }
             })
@@ -130,6 +136,7 @@ impl SessionService {
                     let sender_tx = session.sender_tx.clone();
                     session.download_tx = Some(download_tx);
                     session.receiver_connected = true;
+                    session.last_activity = Instant::now();
                     ReceiverClaimResult::Accepted { sender_tx }
                 }
             })
@@ -167,6 +174,94 @@ impl SessionService {
             .get(code)
             .await
             .map(|session| session.receiver_connected)
+            .unwrap_or(false)
+    }
+
+    pub async fn touch_session(state: &AppState, code: &str) -> bool {
+        state
+            .sessions
+            .with_session_mut(code, |session| {
+                session.last_activity = Instant::now();
+            })
+            .await
+            .is_some()
+    }
+
+    pub async fn record_relayed_bytes(state: &AppState, code: &str, total: u64) -> bool {
+        state
+            .sessions
+            .with_session_mut(code, |session| {
+                if total < session.bytes_relayed || total > session.file_size {
+                    return false;
+                }
+
+                session.bytes_relayed = total;
+                session.last_activity = Instant::now();
+                true
+            })
+            .await
+            .unwrap_or(false)
+    }
+
+    pub async fn acknowledge_receiver_bytes(
+        state: &AppState,
+        code: &str,
+        bytes_received: u64,
+    ) -> bool {
+        state
+            .sessions
+            .with_session_mut(code, |session| {
+                if bytes_received < session.receiver_acknowledged_bytes
+                    || bytes_received > session.bytes_relayed
+                {
+                    return false;
+                }
+
+                session.receiver_acknowledged_bytes = bytes_received;
+                session.last_activity = Instant::now();
+                true
+            })
+            .await
+            .unwrap_or(false)
+    }
+
+    pub async fn mark_sender_finished(state: &AppState, code: &str) -> bool {
+        state
+            .sessions
+            .with_session_mut(code, |session| {
+                if session.bytes_relayed != session.file_size {
+                    return false;
+                }
+
+                session.sender_finished = true;
+                session.last_activity = Instant::now();
+                true
+            })
+            .await
+            .unwrap_or(false)
+    }
+
+    pub async fn confirm_receiver_complete(
+        state: &AppState,
+        code: &str,
+        bytes_received: u64,
+    ) -> bool {
+        state
+            .sessions
+            .with_session_mut(code, |session| {
+                if !session.sender_finished
+                    || bytes_received != session.file_size
+                    || bytes_received != session.bytes_relayed
+                    || bytes_received < session.receiver_acknowledged_bytes
+                {
+                    return false;
+                }
+
+                session.receiver_acknowledged_bytes = bytes_received;
+                session.last_activity = Instant::now();
+                true
+            })
+            .await
             .unwrap_or(false)
     }
 

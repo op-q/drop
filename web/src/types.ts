@@ -23,6 +23,11 @@ export interface ErrorMessage {
   message: string;
 }
 
+export interface AcknowledgementMessage {
+  type: "ack";
+  bytes_received: number;
+}
+
 export interface MetaMessage {
   type: "meta";
   filename: string;
@@ -34,7 +39,11 @@ export interface CompleteMessage {
   type: "complete";
 }
 
-export type UploadSocketMessage = StatusMessage | ProgressMessage | ErrorMessage;
+export type UploadSocketMessage =
+  | StatusMessage
+  | ProgressMessage
+  | AcknowledgementMessage
+  | ErrorMessage;
 export type DownloadSocketMessage =
   | StatusMessage
   | ProgressMessage
