@@ -10,7 +10,7 @@ readme = "README.md"
 publish = false
 
 [dependencies]
-axum = { version = "0.7", features = ["ws", "json"] }
+axum = { version = "0.8", features = ["ws", "json"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 serde = { version = "1", features = ["derive"] }
