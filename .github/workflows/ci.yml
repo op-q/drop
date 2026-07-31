@@ -83,7 +83,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install kubectl
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@v5
         with:
           version: v1.31.0
       - name: Render local overlay
