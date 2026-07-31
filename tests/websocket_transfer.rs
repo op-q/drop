@@ -2,7 +2,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use api::{build_state, domain::session::Session};
+use api::{build_state, config::WS_MAX_MESSAGE_BYTES, domain::session::Session};
 use common::spawn_network_test_server_with_state;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -61,22 +61,138 @@ async fn next_binary_message(
     }
 }
 
+/// A single oversized frame must be refused rather than buffered, because the
+/// relay runs under a hard container memory limit that
+/// `MAX_CONCURRENT_SESSIONS * DOWNLOAD_EVENT_CHANNEL_CAPACITY` oversized chunks
+/// would blow past.
 #[tokio::test]
-async fn upload_socket_relays_file_to_receiver() {
-    let code = "ABC123";
+async fn upload_socket_rejects_chunks_over_the_message_cap() {
+    let code = "TOOBIG";
+    let oversized = vec![7_u8; WS_MAX_MESSAGE_BYTES + 1];
+    let file_size = oversized.len() as u64;
     let state = build_state();
     state
         .sessions
         .insert(
             code.to_string(),
             Session {
-                filename: "hello.txt".into(),
-                file_size: 11,
+                filename: "oversized.bin".into(),
+                file_size,
                 created_at: Instant::now(),
+                last_activity: Instant::now(),
                 sender_tx: None,
                 download_tx: None,
                 sender_connected: false,
                 receiver_connected: false,
+                bytes_relayed: 0,
+                receiver_acknowledged_bytes: 0,
+                sender_finished: false,
+            },
+        )
+        .await;
+
+    let server = spawn_network_test_server_with_state(state.clone()).await;
+
+    let (mut receiver_ws, _) = connect_async(server.ws_url(&format!("/ws/download/{code}")))
+        .await
+        .expect("expected receiver websocket connection");
+    next_json_message_matching(&mut receiver_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "waiting_for_sender"
+    })
+    .await;
+
+    let (mut sender_ws, _) = connect_async(server.ws_url(&format!("/ws/upload/{code}")))
+        .await
+        .expect("expected sender websocket connection");
+    next_json_message_matching(&mut sender_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "receiver_connected"
+    })
+    .await;
+
+    sender_ws
+        .send(Message::text(
+            json!({
+                "type": "meta",
+                "filename": "oversized.bin",
+                "file_size": file_size,
+                "mime_type": "application/octet-stream",
+            })
+            .to_string(),
+        ))
+        .await
+        .expect("expected sender meta message to be sent");
+    next_json_message_matching(&mut receiver_ws, |payload| payload["type"] == "meta").await;
+
+    sender_ws
+        .send(Message::binary(oversized))
+        .await
+        .expect("expected oversized chunk to be written");
+
+    // The relay must tear the session down instead of relaying the chunk. The
+    // receiver stream therefore ends, with an error frame rather than any part
+    // of the oversized payload.
+    let mut saw_error_frame = false;
+    while let Ok(Some(item)) = timeout(Duration::from_secs(2), receiver_ws.next()).await {
+        let Ok(message) = item else {
+            break;
+        };
+
+        assert!(
+            !message.is_binary(),
+            "relay must not forward a chunk larger than WS_MAX_MESSAGE_BYTES"
+        );
+
+        if message.is_close() {
+            break;
+        }
+
+        if let Ok(text) = message.into_text()
+            && let Ok(payload) = serde_json::from_str::<Value>(&text)
+            && payload["type"] == "error"
+        {
+            saw_error_frame = true;
+        }
+    }
+
+    assert!(
+        saw_error_frame,
+        "receiver must be told the transfer failed instead of hanging"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while state.sessions.contains(code).await {
+        assert!(
+            Instant::now() < deadline,
+            "session must be torn down after an oversized chunk"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn upload_socket_relays_acknowledged_chunks_before_reporting_completion() {
+    let code = "ABC123";
+    let payload = (0..(1024 * 1024 + 17))
+        .map(|index| ((index * 31) % 251) as u8)
+        .collect::<Vec<_>>();
+    let file_size = payload.len() as u64;
+    let state = build_state();
+    state
+        .sessions
+        .insert(
+            code.to_string(),
+            Session {
+                filename: "sample.mkv".into(),
+                file_size,
+                created_at: Instant::now(),
+                last_activity: Instant::now(),
+                sender_tx: None,
+                download_tx: None,
+                sender_connected: false,
+                receiver_connected: false,
+                bytes_relayed: 0,
+                receiver_acknowledged_bytes: 0,
+                sender_finished: false,
             },
         )
         .await;
@@ -109,9 +225,9 @@ async fn upload_socket_relays_file_to_receiver() {
         .send(Message::text(
             json!({
                 "type": "meta",
-                "filename": "hello.txt",
-                "file_size": 11,
-                "mime_type": "text/plain",
+                "filename": "sample.mkv",
+                "file_size": file_size,
+                "mime_type": "video/x-matroska",
             })
             .to_string(),
         ))
@@ -121,8 +237,8 @@ async fn upload_socket_relays_file_to_receiver() {
     let receiver_meta =
         next_json_message_matching(&mut receiver_ws, |payload| payload["type"] == "meta").await;
     assert_eq!(receiver_meta["type"], "meta");
-    assert_eq!(receiver_meta["filename"], "hello.txt");
-    assert_eq!(receiver_meta["file_size"], 11);
+    assert_eq!(receiver_meta["filename"], "sample.mkv");
+    assert_eq!(receiver_meta["file_size"], file_size);
 
     let sender_sending_status = next_json_message_matching(&mut sender_ws, |payload| {
         payload["type"] == "status" && payload["status"] == "sending"
@@ -130,13 +246,36 @@ async fn upload_socket_relays_file_to_receiver() {
     .await;
     assert_eq!(sender_sending_status["status"], "sending");
 
-    sender_ws
-        .send(Message::binary(b"hello world".to_vec()))
-        .await
-        .expect("expected binary chunk to be sent");
+    let mut acknowledged = 0_u64;
+    for chunk in payload.chunks(64 * 1024) {
+        sender_ws
+            .send(Message::binary(chunk.to_vec()))
+            .await
+            .expect("expected binary chunk to be sent");
 
-    let receiver_binary = next_binary_message(&mut receiver_ws).await;
-    assert_eq!(receiver_binary, b"hello world");
+        let receiver_binary = next_binary_message(&mut receiver_ws).await;
+        assert_eq!(receiver_binary, chunk);
+        acknowledged += receiver_binary.len() as u64;
+
+        receiver_ws
+            .send(Message::text(
+                json!({
+                    "type": "chunk_ack",
+                    "bytes_received": acknowledged,
+                })
+                .to_string(),
+            ))
+            .await
+            .expect("expected receiver acknowledgement to be sent");
+
+        let acknowledgement = next_json_message_matching(&mut sender_ws, |message| {
+            message["type"] == "ack" && message["bytes_received"] == acknowledged
+        })
+        .await;
+        assert_eq!(acknowledgement["bytes_received"], acknowledged);
+    }
+
+    assert_eq!(acknowledged, file_size);
 
     sender_ws
         .send(Message::text(json!({ "type": "complete" }).to_string()))
@@ -146,6 +285,30 @@ async fn upload_socket_relays_file_to_receiver() {
     let receiver_complete =
         next_json_message_matching(&mut receiver_ws, |payload| payload["type"] == "complete").await;
     assert_eq!(receiver_complete["type"], "complete");
+
+    assert!(state.sessions.contains(code).await);
+    let premature_sender_completion = timeout(
+        Duration::from_millis(100),
+        next_json_message_matching(&mut sender_ws, |payload| {
+            payload["type"] == "status" && payload["status"] == "transfer_complete"
+        }),
+    )
+    .await;
+    assert!(
+        premature_sender_completion.is_err(),
+        "sender must not see completion before the receiver saves the file"
+    );
+
+    receiver_ws
+        .send(Message::text(
+            json!({
+                "type": "complete",
+                "bytes_received": file_size,
+            })
+            .to_string(),
+        ))
+        .await
+        .expect("expected receiver completion acknowledgement to be sent");
 
     let sender_complete = next_json_message_matching(&mut sender_ws, |payload| {
         payload["type"] == "status" && payload["status"] == "transfer_complete"

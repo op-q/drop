@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drop
+spec:
+  progressDeadlineSeconds: 900
+  template:
+    metadata:
+      annotations:
+        # Autopilot keeps extended-duration Pods running for at least seven days
+        # before a scale-down or node auto-upgrade may evict them, so a transfer
+        # in flight is not cut short by routine cluster activity.
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      # Autopilot honors at most 600s during node auto-upgrades, so the portable
+      # base value of 3600 would be silently truncated here.
+      terminationGracePeriodSeconds: 600
+      containers:
+        - name: drop
+          imagePullPolicy: Always
+          env:
+            - name: DROP_TRUST_GCP_X_FORWARDED_FOR
+              value: "true"
+            # The GCE health check needs checkIntervalSec * unhealthyThreshold
+            # (10 * 2) to stop sending new connections, so hold readiness open
+            # slightly longer than that before draining.
+            - name: DROP_SHUTDOWN_DRAIN_DELAY_SECS
+              value: "30"
+            # Must leave headroom inside terminationGracePeriodSeconds for the
+            # drain delay above plus Axum's own graceful shutdown.
+            - name: DROP_SHUTDOWN_MAX_TRANSFER_WAIT_SECS
+              value: "540"
+          resources:
+            requests:
+              # Autopilot enforces a 512Mi floor per Pod and a 1:1 to 1:6.5
+              # CPU:memory ratio; requesting it explicitly avoids a surprise
+              # upward adjustment at admission time.
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 100Mi

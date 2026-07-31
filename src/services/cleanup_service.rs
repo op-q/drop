@@ -65,7 +65,7 @@ pub async fn remove_expired_sessions(state: &AppState) {
 }
 
 pub fn is_session_expired(session: &Session, now: Instant) -> bool {
-    now.duration_since(session.created_at) >= Duration::from_secs(SESSION_TTL_SECS)
+    now.duration_since(session.last_activity) >= Duration::from_secs(SESSION_TTL_SECS)
 }
 
 #[cfg(test)]
@@ -78,16 +78,41 @@ mod tests {
 
     #[test]
     fn detects_expired_sessions() {
+        let last_activity = Instant::now() - Duration::from_secs(301);
         let session = Session {
             filename: "file.bin".into(),
             file_size: 1,
-            created_at: Instant::now() - Duration::from_secs(301),
+            created_at: last_activity,
+            last_activity,
             sender_tx: None,
             download_tx: None,
             sender_connected: false,
             receiver_connected: false,
+            bytes_relayed: 0,
+            receiver_acknowledged_bytes: 0,
+            sender_finished: false,
         };
 
         assert!(is_session_expired(&session, Instant::now()));
+    }
+
+    #[test]
+    fn keeps_active_transfers_alive() {
+        let now = Instant::now();
+        let session = Session {
+            filename: "file.bin".into(),
+            file_size: 1,
+            created_at: now - Duration::from_secs(301),
+            last_activity: now,
+            sender_tx: None,
+            download_tx: None,
+            sender_connected: true,
+            receiver_connected: true,
+            bytes_relayed: 1,
+            receiver_acknowledged_bytes: 1,
+            sender_finished: false,
+        };
+
+        assert!(!is_session_expired(&session, now));
     }
 }
