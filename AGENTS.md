@@ -34,6 +34,22 @@ this repository.
   without explicit direction and documentation.
 - Use synthetic test fixtures; never commit real credentials or private files.
 
+## Documentation
+
+- [`docs/`](docs/README.md) is the engineering reference. Read
+  [`docs/protocol.md`](docs/protocol.md) before changing the wire contract and
+  [`docs/security.md`](docs/security.md) before changing a trust boundary.
+- Save a multi-step plan in full as
+  `docs/plans/<topic>-plan-YYYY-MM-DD.md` before or as implementation starts.
+  Never compress a plan to a chat summary: preserve phases, file lists, risks,
+  validation steps, and open questions so any agent can resume with no chat
+  history. The contract is in [`docs/plans/README.md`](docs/plans/README.md).
+- Mirror plan status into
+  [`docs/implementation-checklist.md`](docs/implementation-checklist.md) and
+  update it honestly in the same change as the behavior.
+- Record a costly or hard-to-reverse choice in
+  [`docs/decisions.md`](docs/decisions.md) rather than only in a commit message.
+
 ## Development workflow
 
 - Keep changes focused and include tests for behavior changes.
