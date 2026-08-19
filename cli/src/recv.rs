@@ -138,7 +138,7 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
             Message::Binary(data) => {
                 if received + data.len() as u64 > size {
                     let _ = socket
-                        .send(Message::Text(json!({ "type": "error" }).to_string()))
+                        .send(Message::Text(json!({ "type": "error" }).to_string().into()))
                         .await;
                     return Err("the relay sent more bytes than the file declared".into());
                 }
@@ -153,7 +153,9 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
                     unacknowledged = 0;
                     socket
                         .send(Message::Text(
-                            json!({ "type": "chunk_ack", "bytes_received": received }).to_string(),
+                            json!({ "type": "chunk_ack", "bytes_received": received })
+                                .to_string()
+                                .into(),
                         ))
                         .await?;
                 }
@@ -169,7 +171,8 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
                         socket
                             .send(Message::Text(
                                 json!({ "type": "complete", "bytes_received": received })
-                                    .to_string(),
+                                    .to_string()
+                                    .into(),
                             ))
                             .await?;
 
