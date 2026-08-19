@@ -41,6 +41,13 @@ pub fn build_state() -> AppState {
 pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route_service("/", get_service(ServeFile::new("web/dist/index.html")))
+        // Served from the relay so `curl -fsSL https://drop.lifbom.com/install.sh`
+        // works. The script itself fetches binaries from GitHub releases, which
+        // keeps release artifacts off this single-pod deployment.
+        .route_service(
+            "/install.sh",
+            get_service(ServeFile::new("web/dist/install.sh")),
+        )
         .route("/health", get(health))
         .route("/ready", get(readiness))
         .route("/metrics", get(metrics))

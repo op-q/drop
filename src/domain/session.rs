@@ -2,6 +2,8 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
+use crate::services::relay_budget::RelayReservation;
+
 #[derive(Clone)]
 pub struct Session {
     pub filename: String,
@@ -30,7 +32,9 @@ pub enum SenderEvent {
     Error(String),
 }
 
-#[derive(Debug, Clone)]
+/// Not `Clone`: a [`DownloadEvent::Chunk`] carries the relay-budget
+/// reservation covering its own bytes, and duplicating an event would
+/// duplicate buffered data the budget had only accounted for once.
 pub enum DownloadEvent {
     Status(&'static str),
     Progress {
@@ -42,7 +46,12 @@ pub enum DownloadEvent {
         file_size: u64,
         mime_type: String,
     },
-    Chunk(Vec<u8>),
+    Chunk {
+        data: Vec<u8>,
+        /// Released when the chunk has been written to the receiver socket, or
+        /// when a dropped channel discards it.
+        reservation: RelayReservation,
+    },
     Complete,
     Error(String),
 }

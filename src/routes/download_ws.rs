@@ -186,8 +186,19 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                     break;
                                 }
                             }
-                            DownloadEvent::Chunk(chunk) => {
-                                match timeout(send_timeout, ws_sender.send(Message::Binary(chunk))).await {
+                            DownloadEvent::Chunk { data, reservation } => {
+                                let sent = timeout(
+                                    send_timeout,
+                                    ws_sender.send(Message::Binary(data)),
+                                )
+                                .await;
+
+                                // The chunk is no longer buffered by the relay,
+                                // so return its bytes to the shared budget
+                                // before handling the outcome.
+                                drop(reservation);
+
+                                match sent {
                                     Ok(Ok(())) => {}
                                     Ok(Err(_)) => {
                                         TransferService::fail_session(

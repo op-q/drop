@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach binaries to"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners for every target, so nothing is cross-compiled.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-13
+          - target: aarch64-apple-darwin
+            runner: macos-14
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # The TLS stack builds C code, so a musl target needs a musl C toolchain.
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          echo "CC_$(echo ${{ matrix.target }} | tr '-' '_')=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --locked --package drop-cli --target ${{ matrix.target }}
+
+      - name: Verify the binary runs
+        # A cross-built binary cannot be executed on the runner, but every
+        # target here is native, so a binary that will not start is caught now
+        # rather than by the first person to install it.
+        run: ./target/${{ matrix.target }}/release/drop --version
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          staging=$(mktemp -d)
+          cp "target/${{ matrix.target }}/release/drop" "${staging}/drop"
+          cp LICENSE README.md "${staging}/"
+          tar -czf "drop-${{ matrix.target }}.tar.gz" -C "${staging}" drop LICENSE README.md
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: drop-${{ matrix.target }}
+          path: drop-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum drop-*.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Publish to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            artifacts/drop-*.tar.gz
+            artifacts/checksums.txt
+          fail_on_unmatched_files: true

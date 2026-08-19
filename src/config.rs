@@ -16,19 +16,40 @@ pub const CONNECTION_ATTEMPT_LIMIT_PER_MINUTE: usize = 30;
 pub const SESSION_TTL_SECS: u64 = 5 * 60;
 pub const CLEANUP_INTERVAL_SECS: u64 = 30;
 pub const SENDER_EVENT_CHANNEL_CAPACITY: usize = 16;
-pub const DOWNLOAD_EVENT_CHANNEL_CAPACITY: usize = 8;
+pub const DOWNLOAD_EVENT_CHANNEL_CAPACITY: usize = 32;
 pub const RECEIVER_SEND_TIMEOUT_SECS: u64 = 10;
 pub const WS_HEARTBEAT_INTERVAL_SECS: u64 = 15;
 pub const WS_IDLE_TIMEOUT_SECS: u64 = 45;
 pub const SHUTDOWN_DRAIN_DELAY_SECS: u64 = 10;
 pub const SHUTDOWN_MAX_TRANSFER_WAIT_SECS: u64 = 3_500;
 
-/// The browser client sends 64 KiB chunks, so this leaves four times the
-/// headroom it needs while bounding what a hostile or broken sender can make
-/// the relay buffer. Worst case is
-/// `MAX_CONCURRENT_SESSIONS * DOWNLOAD_EVENT_CHANNEL_CAPACITY * this`, which
-/// must stay under the container memory limit: 100 * 8 * 256 KiB = 200 MiB.
-pub const WS_MAX_MESSAGE_BYTES: usize = 256 * 1024;
+/// The chunk size clients should send. Larger chunks mean fewer WebSocket
+/// frames, fewer wakeups, and fewer control messages per transferred byte, so
+/// a transfer is no longer bottlenecked on per-chunk overhead.
+pub const RECOMMENDED_CHUNK_BYTES: usize = 1024 * 1024;
+
+/// Accepted frame ceiling. This is deliberately larger than
+/// `RECOMMENDED_CHUNK_BYTES` so a client that pads or slightly overshoots a
+/// 1 MiB chunk is not disconnected, while a hostile sender still cannot make
+/// the relay buffer an unbounded frame.
+pub const WS_MAX_MESSAGE_BYTES: usize = RECOMMENDED_CHUNK_BYTES + 64 * 1024;
+
+/// Total bytes of relayed file data that may sit in memory across *all*
+/// sessions at once, enforced by [`crate::services::relay_budget::RelayBudget`].
+///
+/// Per-session buffering is bounded by `DOWNLOAD_EVENT_CHANNEL_CAPACITY`
+/// chunks, but the old per-session-only bound multiplied out to
+/// `MAX_CONCURRENT_SESSIONS * capacity * chunk`, which cannot grow with the
+/// chunk size and stay inside the container memory limit. A shared budget
+/// decouples the two: one transfer may use a 32 MiB window, while a hundred
+/// concurrent transfers share this ceiling instead of multiplying it. The
+/// value keeps the same worst case the 256 KiB-frame relay had.
+pub const RELAY_BUDGET_BYTES: usize = 200 * 1024 * 1024;
+
+/// Progress notifications are throttled to this interval. They are advisory UI
+/// updates, so emitting one per chunk only burned serialization and socket
+/// wakeups that the actual file bytes needed.
+pub const PROGRESS_INTERVAL_MS: u64 = 200;
 
 /// Load balancers and orchestrators cap how long a pod may take to stop, and
 /// the honored ceiling differs per platform, so both shutdown phases are

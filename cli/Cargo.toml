@@ -1,0 +1,32 @@
+[package]
+name = "drop-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Terminal client for the Drop ephemeral file-transfer relay"
+license = "MIT"
+repository = "https://github.com/op-q/drop"
+publish = false
+
+[lib]
+name = "drop_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "drop"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "signal", "time", "sync"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+# Pure-Rust deflate: the CLI ships as a prebuilt binary for four targets, and a
+# C dependency would require a cross C toolchain for each of them.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[dev-dependencies]
+api = { path = ".." }
+futures-util = "0.3"

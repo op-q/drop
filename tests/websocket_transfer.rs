@@ -177,6 +177,7 @@ async fn upload_socket_relays_acknowledged_chunks_before_reporting_completion() 
         .collect::<Vec<_>>();
     let file_size = payload.len() as u64;
     let state = build_state();
+    let full_budget = state.relay_budget.available_bytes();
     state
         .sessions
         .insert(
@@ -317,4 +318,111 @@ async fn upload_socket_relays_acknowledged_chunks_before_reporting_completion() 
     assert_eq!(sender_complete["status"], "transfer_complete");
 
     assert!(!state.sessions.contains(code).await);
+
+    // Every chunk here was written out to the receiver, so this covers the
+    // release path a discarded channel never exercises.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while state.relay_budget.available_bytes() != full_budget {
+        assert!(
+            Instant::now() < deadline,
+            "relay budget leaked after a completed transfer: {} of {} bytes never came back",
+            full_budget - state.relay_budget.available_bytes(),
+            full_budget
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// The relay budget must come back after a transfer ends, however it ends.
+///
+/// Every buffered chunk holds a reservation against a server-wide ceiling. A
+/// reservation that is not released is invisible in normal operation and only
+/// shows up much later, as a relay that has quietly throttled itself to a
+/// standstill, so both the clean and the abandoned path are checked here.
+#[tokio::test]
+async fn returns_the_relay_budget_after_a_receiver_abandons_a_transfer() {
+    let code = "BUDGET";
+    let chunk = vec![5_u8; 256 * 1024];
+    let file_size = (chunk.len() * 4) as u64;
+    let state = build_state();
+    let full_budget = state.relay_budget.available_bytes();
+
+    state
+        .sessions
+        .insert(
+            code.to_string(),
+            Session {
+                filename: "abandoned.bin".into(),
+                file_size,
+                created_at: Instant::now(),
+                last_activity: Instant::now(),
+                sender_tx: None,
+                download_tx: None,
+                sender_connected: false,
+                receiver_connected: false,
+                bytes_relayed: 0,
+                receiver_acknowledged_bytes: 0,
+                sender_finished: false,
+            },
+        )
+        .await;
+
+    let server = spawn_network_test_server_with_state(state.clone()).await;
+
+    let (mut receiver_ws, _) = connect_async(server.ws_url(&format!("/ws/download/{code}")))
+        .await
+        .expect("expected receiver websocket connection");
+    next_json_message_matching(&mut receiver_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "waiting_for_sender"
+    })
+    .await;
+
+    let (mut sender_ws, _) = connect_async(server.ws_url(&format!("/ws/upload/{code}")))
+        .await
+        .expect("expected sender websocket connection");
+    next_json_message_matching(&mut sender_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "receiver_connected"
+    })
+    .await;
+
+    sender_ws
+        .send(Message::text(
+            json!({
+                "type": "meta",
+                "filename": "abandoned.bin",
+                "file_size": file_size,
+                "mime_type": "application/octet-stream",
+            })
+            .to_string(),
+        ))
+        .await
+        .expect("expected sender meta message to be sent");
+    next_json_message_matching(&mut receiver_ws, |payload| payload["type"] == "meta").await;
+
+    sender_ws
+        .send(Message::binary(chunk.clone()))
+        .await
+        .expect("expected first chunk to be written");
+
+    // Walk away mid-transfer, leaving chunks buffered inside the relay.
+    drop(receiver_ws);
+    let _ = sender_ws.send(Message::binary(chunk)).await;
+    drop(sender_ws);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if state.relay_budget.available_bytes() == full_budget
+            && !state.sessions.contains(code).await
+        {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "relay budget leaked: {} of {} bytes never came back",
+            full_budget - state.relay_budget.available_bytes(),
+            full_budget
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }

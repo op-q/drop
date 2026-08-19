@@ -6,10 +6,18 @@
     UploadSocketMessage,
   } from "./types";
 
-  const CHUNK_SIZE = 64 * 1024;
-  const MAX_IN_FLIGHT_CHUNKS = 8;
-  const MAX_IN_FLIGHT_BYTES = CHUNK_SIZE * MAX_IN_FLIGHT_CHUNKS;
+  // Matches the relay's RECOMMENDED_CHUNK_BYTES. Larger chunks mean far fewer
+  // frames, wakeups, and control messages for the same number of file bytes.
+  const CHUNK_SIZE = 1024 * 1024;
+  // The window of unacknowledged bytes is what sets throughput on a
+  // high-latency link: the ceiling is roughly this divided by the round trip
+  // time, no matter how much bandwidth is available.
+  const MAX_IN_FLIGHT_BYTES = 16 * 1024 * 1024;
   const WS_BUFFER_HIGH_WATER_BYTES = MAX_IN_FLIGHT_BYTES;
+  // Acknowledge in batches rather than per chunk. This must stay well below
+  // MAX_IN_FLIGHT_BYTES, or the sender would wait on an acknowledgement that
+  // only a later chunk could trigger.
+  const ACK_INTERVAL_BYTES = 4 * 1024 * 1024;
   const MAX_MEMORY_DOWNLOAD_BYTES = 256 * 1024 * 1024;
 
   interface FilePickerWindow extends Window {
@@ -509,6 +517,7 @@
       let mimeType = "application/octet-stream";
       let total = 0;
       let expectedTotal = 0;
+      let unacknowledgedBytes = 0;
       let finalized = false;
       let failed = false;
       let messageQueue = Promise.resolve();
@@ -649,17 +658,29 @@
 
         await target.write(event.data);
         total += event.data.byteLength;
+        unacknowledgedBytes += event.data.byteLength;
 
         if (socket.readyState !== WebSocket.OPEN) {
           throw new Error("download connection closed while saving the file");
         }
 
-        socket.send(
-          JSON.stringify({
-            type: "chunk_ack",
-            bytes_received: total,
-          })
-        );
+        // Acknowledging every chunk cost a control message per chunk. Batch
+        // them, but always flush once the whole file has arrived: the sender
+        // waits for the final acknowledgement, and a tail smaller than the
+        // batch would otherwise never trigger one.
+        if (
+          unacknowledgedBytes >= ACK_INTERVAL_BYTES ||
+          total === expectedTotal
+        ) {
+          unacknowledgedBytes = 0;
+          socket.send(
+            JSON.stringify({
+              type: "chunk_ack",
+              bytes_received: total,
+            })
+          );
+        }
+
         setStatus(
           [
             filename === "download.bin"
