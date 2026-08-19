@@ -14,6 +14,11 @@ command-line client, or between one of each.
 
 Try the hosted instance at [drop.lifbom.com](https://drop.lifbom.com).
 
+That host serves the browser client and the install script; the relay itself
+answers on `api.drop.lifbom.com`, which is what the `drop` CLI talks to by
+default. Both clients reach the same relay, so a browser and a terminal can be
+the two ends of one transfer.
+
 > [!IMPORTANT]
 > Drop is pre-release software. The protocol and deployment defaults may
 > change, and the public instance should not be treated as a durable storage or
@@ -249,7 +254,7 @@ DROP_ALLOWED_ORIGINS=http://127.0.0.1:5173 cargo run
 | `DROP_SHUTDOWN_MAX_TRANSFER_WAIT_SECS` | `3500` | after the drain delay, how long to keep running for in-flight transfers |
 | `RUST_LOG` | application default | tracing filter |
 | `VITE_BACKEND_ORIGIN` | current page origin | backend URL for a separately hosted frontend |
-| `DROP_SERVER` | `https://drop.lifbom.com` | relay used by the `drop` CLI |
+| `DROP_SERVER` | `https://api.drop.lifbom.com` | relay used by the `drop` CLI |
 | `DROP_INSTALL_DIR` | `~/.local/bin` | where `install.sh` puts the CLI |
 | `DROP_VERSION` | `latest` | release tag `install.sh` installs |
 | `DROP_RELEASE_BASE` | GitHub releases | base URL `install.sh` downloads from |

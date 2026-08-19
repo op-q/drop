@@ -120,3 +120,25 @@ CLI-to-CLI case is the strong one. Any wording that blurs the two is worse than
 no claim.
 
 Record the outcome here when it is made.
+
+## 8. The hosted instance is a split deployment
+
+**Decision.** `drop.lifbom.com` serves the browser client and `install.sh` as
+static files; the relay answers on `api.drop.lifbom.com`. Both the frontend
+build and the CLI's compiled default point at the API origin.
+
+**Why.** The two halves already deploy independently, and the README documents
+that split as a supported shape. Naming the API host separately also keeps both
+clients off a provider-generated hostname: if the relay is recreated or moved,
+DNS changes and nothing has to be rebuilt or re-released.
+
+**Consequences.** The CLI's default and the URL a person types into a browser
+are deliberately different hosts, which looks like a mistake unless it is
+written down — this entry is that record. `DEFAULT_SERVER` in
+[`client.rs`](../cli/src/client.rs) is compiled in, so an installed binary
+cannot be redirected without `--server`, `DROP_SERVER`, or a new release; the
+API hostname therefore has to stay stable once binaries ship.
+
+The failure mode when it is wrong is at least loud and safe: pointing the CLI
+at the static host returns 404 from `POST /api/session/create` rather than
+silently transferring somewhere unexpected.
