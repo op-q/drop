@@ -1,7 +1,7 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **none started — [relay teardown](plans/relay-teardown-drain-plan-2026-08-19.md) is next**
+Current work: **[receiver confirmation](plans/receiver-confirmation-plan-2026-08-19.md) is next**
 Last updated: **2026-08-19**
 
 The tactical view of what is being built and what state it is in. The detailed
@@ -30,20 +30,19 @@ of that order — is in
 ## 1. Relay teardown reset
 
 Plan: [`relay-teardown-drain-plan-2026-08-19.md`](plans/relay-teardown-drain-plan-2026-08-19.md)
-Status: **proposed**
+Status: **done**
 
 A sender intermittently sees `Connection reset by peer` after a transfer that
 actually succeeded. The upload receive task stops reading the socket when the
 sender completes, so the peer's closing handshake reply lands unread and the
 socket is dropped with data queued, producing RST instead of FIN.
 
-- [ ] Phase 1 — keep the receive task alive through teardown
-- [ ] Phase 2 — bound the drain with a named deadline
-- [ ] Phase 3 — check the receiver socket for the same shape
-- [ ] Phase 4 — repeated-run evidence
+- [x] Phase 1 — keep the receive task alive through teardown
+- [x] Phase 2 — bound the drain, in two stages rather than one
+- [x] Phase 3 — check the receiver socket for the same shape
+- [x] Phase 4 — repeated-run evidence
 
-Gate: at least 50 consecutive small-payload CLI transfers with zero resets,
-command and counts recorded in the plan.
+Gate met: 80 runs clean, against 3 failures in 30 on unfixed `main`.
 
 ## 2. Receiver preview and confirmation
 
@@ -96,6 +95,13 @@ Recorded so they are not rediscovered as new ideas. None are committed work.
 - **A direct peer-to-peer data channel** with relay fallback. Larger than
   encryption, needs signaling and a TURN dependency, and does not remove the
   relay path because TURN-blocked networks fall back to it.
+- **The download socket's teardown**, which carries the same shape the upload
+  socket had: its receive task stops reading before the send task writes a
+  `Close`. It produces no user-visible symptom, because the receiving client
+  discards the result of its own close, so it is latent rather than harmless.
+  Fixing it needs a way to show the change worked, which the upload side had
+  and this side does not. See the Phase 3 finding in
+  [`plans/relay-teardown-drain-plan-2026-08-19.md`](plans/relay-teardown-drain-plan-2026-08-19.md).
 - **Prometheus text** from `/metrics`, which currently returns a JSON snapshot.
 - **A first transfer shakeout run** using
   [`validation/transfer-shakeout-template.md`](validation/transfer-shakeout-template.md).

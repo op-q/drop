@@ -36,10 +36,6 @@ None. No implementation work has started.
 
 ## Proposed
 
-- [`relay-teardown-drain-plan-2026-08-19.md`](relay-teardown-drain-plan-2026-08-19.md)
-  — fix the intermittent `Connection reset by peer` a sender sees after a
-  successful transfer. Pre-existing defect, deliberately deferred out of PR #30.
-  Smallest of the three and a prerequisite in practice.
 - [`receiver-confirmation-plan-2026-08-19.md`](receiver-confirmation-plan-2026-08-19.md)
   — show the receiver what it is about to accept and require a y/n before any
   bytes move. Adds a protocol handshake and a new terminal outcome.
@@ -49,15 +45,22 @@ None. No implementation work has started.
 
 ## Done
 
-None yet.
+- [`relay-teardown-drain-plan-2026-08-19.md`](relay-teardown-drain-plan-2026-08-19.md)
+  — completed 2026-08-19: the upload receive task now stays alive through
+  teardown and answers the sender's closing handshake, so a socket is no longer
+  dropped with the peer's reply unread. 80 runs clean against 3 failures in 30
+  before. Two findings recorded rather than fixed: the assertions #30 removed
+  stay out because they guard nothing under per-transfer relay isolation, and
+  the download socket carries the same latent shape without a user-visible
+  symptom.
 
 ## Suggested order (dependencies, not law)
 
-Teardown first. It is a real defect, it needs no protocol change, and the
-confirmation feature adds a new terminal close path — decline — that would
-inherit the same reset bug on the day it ships.
+Teardown first — **done**. It was a real defect, it needed no protocol change,
+and the confirmation feature adds a new terminal close path, decline, that
+would have inherited the same reset bug on the day it shipped.
 
-Confirmation second. It is reviewable without crypto, and it settles what the
+Confirmation next. It is reviewable without crypto, and it settles what the
 receiver sees and when.
 
 Encryption last. It relocates the very metadata fields the confirmation prompt

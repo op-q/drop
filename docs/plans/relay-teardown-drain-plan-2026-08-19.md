@@ -1,8 +1,9 @@
 # Relay teardown drain plan
 
-Status: **proposed**
+Status: **done**
 Created: **2026-08-19**
 Last updated: **2026-08-19**
+Completed: **2026-08-19**
 
 ## Goal
 
@@ -84,39 +85,103 @@ at step 1 — long before the Close frame in step 2 is even sent.
 
 ### Phase 1 — Keep the receive task alive
 
-- [ ] Replace the `break` after `awaiting_receiver`
+- [x] Replace the `break` after `awaiting_receiver`
       ([`upload_ws.rs:451`](../../src/routes/upload_ws.rs#L451)) with a
       transition into a drain state, so `ws_receiver` is not dropped.
-- [ ] In the drain state, keep polling the stream and discard what arrives,
+- [x] In the drain state, keep polling the stream and discard what arrives,
       exiting on the peer's Close frame, on stream end, or on error.
-- [ ] Confirm no other `break` on a success path drops the stream early.
+- [x] Confirm no other `break` on a success path drops the stream early.
+
+Implemented as a `sender_completed` flag plus a drain block after the loop,
+rather than as a state inside it. The loop's many exit paths all mean "stop
+relaying"; only the clean completion also means "stay and finish the
+handshake", so the distinction reads better outside the loop.
 
 ### Phase 2 — Bound the drain
 
-- [ ] Add a named drain-deadline constant to
+- [x] Add a named drain-deadline constant to
       [`config.rs`](../../src/config.rs) with a comment stating what it bounds.
       A second or two is enough for a close handshake on a live connection.
-- [ ] Apply the deadline to the drain loop, so a peer that never replies is
+- [x] Apply the deadline to the drain loop, so a peer that never replies is
       abandoned rather than waited on.
-- [ ] Confirm the existing idle timeout does not fire during a normal drain and
+- [x] Confirm the existing idle timeout does not fire during a normal drain and
       convert a clean finish into a spurious failure.
+
+**Deviation from the plan.** A single short deadline does not work. The plan
+assumed the drain only had to cover a close handshake, but the send task cannot
+write `transfer_complete` until the receiver has finished writing the file,
+which is unbounded work. The wait is therefore two stages: first wait for the
+send task to exit, detected through the event receiver being dropped and
+bounded by the existing idle timeout, then apply
+`WS_CLOSE_DRAIN_TIMEOUT_SECS` to the peer's reply. Both stages are bounded, so
+the property the plan wanted still holds.
 
 ### Phase 3 — Check the receiver side
 
-- [ ] Read the success path in
+- [x] Read the success path in
       [`download_ws.rs`](../../src/routes/download_ws.rs) for the same shape.
-      Initial reading suggests it is less exposed — it does not send a Close on
-      success and its receive task keeps reading — but confirm rather than
-      assume.
-- [ ] If the same defect exists there, fix it in this change; if not, note in
+- [x] If the same defect exists there, fix it in this change; if not, note in
       the plan why it does not apply.
+
+**Finding: the same shape exists, and it is deferred.** The initial reading in
+this plan was wrong. On `ReceiverMessage::Complete` the download receive task
+notifies the sender, completes the session, and breaks, dropping its half of
+the socket; the send task then observes its event channel close and writes a
+`Close`. The receiving client has already sent a `Close` of its own by then, so
+it lands unread exactly as on the upload socket.
+
+It is not user-visible today because the receiving client discards the result
+of its close and returns success immediately, so the reset never reaches a
+person. That makes it latent rather than benign.
+
+It is deliberately not fixed here. The defect produces no observable symptom on
+that socket, so a change to its teardown could not be backed by the kind of
+before-and-after evidence this plan required for the upload side — which is the
+same reason #30 declined to fix the upload side inside a test-stability change.
+It is recorded as its own item in
+[`../implementation-checklist.md`](../implementation-checklist.md).
 
 ### Phase 4 — Evidence
 
-- [ ] Run repeated small-payload CLI transfers and record the reset count.
-- [ ] Attempt to restore the completion-handshake assertions PR #30 removed
+- [x] Run repeated small-payload CLI transfers and record the reset count.
+- [x] Attempt to restore the completion-handshake assertions PR #30 removed
       from the two small-payload tests, or record why they stay out.
-- [ ] Run the full validation command set.
+- [x] Run the full validation command set.
+
+**The defect does not reproduce through separate CLI processes.** A first
+harness that drove `drop send` and `drop recv` as separate processes measured
+zero resets on unfixed `main` across 50 runs. The sender exits the moment it
+reads `transfer_complete`, so the RST arrives at a process that no longer
+touches the socket. Running that harness only against the fix would have
+produced a clean result that meant nothing. It reproduces in the in-process
+harness with two transfers sharing one relay, which is the shape the tests had
+before #30.
+
+Measured with the pre-#30 test file restored:
+
+| Build | Runs | Failures |
+| --- | --- | --- |
+| `main`, unfixed | 30 | 3 |
+| this change | 30 | 0 |
+| this change | 80 | 0 |
+
+The failure text on `main` was
+`transfer should succeed: "IO error: Connection reset by peer (os error 104)"`,
+matching the roughly one-in-six rate #30 reported.
+
+**The removed assertions stay out, for a measured reason.** Restoring them
+while keeping #30's per-transfer relay isolation produced zero failures on
+unfixed `main` as well, across 30 runs: the isolation removes the contention
+that triggers the race, so the assertions would guard nothing. The shape that
+does catch it detects at roughly ten percent per run, which is too weak for CI
+and would reintroduce the flakiness #30 removed. A stronger guard should be a
+targeted test that drives the close handshake directly rather than a
+probabilistic end-to-end race.
+
+Note for any future evidence run: `SESSION_CREATION_LIMIT_PER_MINUTE` is 10 and
+lives in process memory, so a long unbroken run against one relay starts
+failing with a rate-limit error rather than anything meaningful. Restart the
+relay every few transfers.
 
 ## Risks
 
@@ -159,12 +224,13 @@ npm --prefix web audit --audit-level=high
 
 ## Acceptance criteria
 
-- [ ] At least 50 consecutive small-payload CLI transfers with zero resets,
-      with the command and counts recorded.
-- [ ] No new protocol message or status.
-- [ ] The drain has a bounded deadline expressed as a named constant.
-- [ ] The receiver socket has been checked and the finding recorded.
-- [ ] Full validation set passes.
+- [x] At least 50 consecutive runs with zero resets: 80 runs of the in-process
+      harness, against 3 failures in 30 on unfixed `main`.
+- [x] No new protocol message or status.
+- [x] The drain has a bounded deadline expressed as a named constant.
+- [x] The receiver socket has been checked and the finding recorded.
+- [x] Full validation set passes: fmt, clippy with warnings as errors, and 56
+      tests.
 
 ## Kickoff prompt
 
@@ -180,8 +246,10 @@ this plan before opening a pull request.
 
 ## Open questions
 
-- How long should the drain deadline be? A second or two should cover a close
-  handshake on a live connection, but confirm against a slow or lossy link
-  rather than picking a number by feel.
-- Should a drain that hits its deadline be logged at warn or debug? It is
-  benign on a healthy relay but a useful signal if it becomes common.
+- ~~How long should the drain deadline be?~~ Two seconds, applied only to the
+  peer's reply once the send task has already finished. Still worth confirming
+  against a slow or lossy link.
+- ~~Should a drain that hits its deadline be logged at warn or debug?~~ Debug,
+  on the grounds that it is benign on a healthy relay. Revisit if it turns out
+  to be common enough to be worth surfacing.
+- The download socket carries the same latent shape. See the Phase 3 finding.
