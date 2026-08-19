@@ -99,7 +99,8 @@ pub async fn run(
                 "file_size": payload.size,
                 "mime_type": payload.mime_type,
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await?;
 
@@ -110,7 +111,9 @@ pub async fn run(
         // Tell the relay this transfer is over so the receiver is not left
         // waiting on a session that will never finish.
         let _ = socket
-            .send(Message::Text(json!({ "type": "cancel" }).to_string()))
+            .send(Message::Text(
+                json!({ "type": "cancel" }).to_string().into(),
+            ))
             .await;
         let _ = socket.close(None).await;
         return Err(error);
@@ -176,7 +179,7 @@ async fn stream_payload(
 
         let chunk = chunk?;
         sent += chunk.len() as u64;
-        socket.send(Message::Binary(chunk)).await?;
+        socket.send(Message::Binary(chunk.into())).await?;
         progress.update(acknowledged);
     }
 
@@ -196,7 +199,9 @@ async fn stream_payload(
     progress.finish(total);
 
     socket
-        .send(Message::Text(json!({ "type": "complete" }).to_string()))
+        .send(Message::Text(
+            json!({ "type": "complete" }).to_string().into(),
+        ))
         .await?;
 
     Ok(())
