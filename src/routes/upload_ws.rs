@@ -163,7 +163,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
             loop {
                 tokio::select! {
                     _ = heartbeat.tick() => {
-                        if ws_sender.send(Message::Ping(Vec::new())).await.is_err() {
+                        if ws_sender.send(Message::Ping(Vec::new().into())).await.is_err() {
                             break;
                         }
                     }
@@ -181,7 +181,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
 
                                 let terminal = matches!(status, "transfer_complete" | "cancelled");
                                 if ws_sender
-                                    .send(Message::Text(msg.to_string()))
+                                    .send(Message::Text(msg.to_string().into()))
                                     .await
                                     .is_err()
                                 {
@@ -204,7 +204,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                 });
 
                                 if ws_sender
-                                    .send(Message::Text(msg.to_string()))
+                                    .send(Message::Text(msg.to_string().into()))
                                     .await
                                     .is_err()
                                 {
@@ -218,7 +218,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                 });
 
                                 if ws_sender
-                                    .send(Message::Text(msg.to_string()))
+                                    .send(Message::Text(msg.to_string().into()))
                                     .await
                                     .is_err()
                                 {
@@ -231,7 +231,9 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                     "message": message
                                 });
 
-                                let _ = ws_sender.send(Message::Text(msg.to_string())).await;
+                                let _ = ws_sender
+                                    .send(Message::Text(msg.to_string().into()))
+                                    .await;
                                 break;
                             }
                         }
@@ -560,7 +562,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
 
                         if download_tx
                             .send(DownloadEvent::Chunk {
-                                data: bytes,
+                                data: bytes.to_vec(),
                                 reservation,
                             })
                             .await
