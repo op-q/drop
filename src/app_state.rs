@@ -4,7 +4,9 @@ use std::sync::{
 };
 
 use crate::{
-    errors::AppError, services::rate_limit_service::RateLimitService, store::InMemorySessionStore,
+    errors::AppError,
+    services::{rate_limit_service::RateLimitService, relay_budget::RelayBudget},
+    store::InMemorySessionStore,
     telemetry::metrics::AppMetrics,
 };
 
@@ -13,6 +15,8 @@ pub struct AppState {
     pub sessions: InMemorySessionStore,
     pub rate_limiter: RateLimitService,
     pub metrics: AppMetrics,
+    /// Server-wide ceiling on in-flight relayed bytes, shared by every session.
+    pub relay_budget: RelayBudget,
     accepting_connections: Arc<AtomicBool>,
 }
 
@@ -26,6 +30,7 @@ impl AppState {
             sessions,
             rate_limiter,
             metrics,
+            relay_budget: RelayBudget::new(),
             accepting_connections: Arc::new(AtomicBool::new(true)),
         }
     }

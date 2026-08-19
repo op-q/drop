@@ -131,11 +131,11 @@ pub fn log_download_event(code: &str, event: &DownloadEvent) {
                 "dispatching receiver event"
             );
         }
-        DownloadEvent::Chunk(chunk) => {
+        DownloadEvent::Chunk { data, .. } => {
             debug!(
                 session_code = %code,
                 event = "receiver_chunk",
-                chunk_len = chunk.len(),
+                chunk_len = data.len(),
                 "dispatching receiver event"
             );
         }

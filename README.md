@@ -9,6 +9,9 @@ Svelte. A sender and receiver connect to the same short-lived session over
 WebSockets while the server relays file chunks directly between them. Drop
 does not write transferred files to application storage.
 
+Transfers work between two browsers, between two terminals with the `drop`
+command-line client, or between one of each.
+
 Try the hosted instance at [drop.lifbom.com](https://drop.lifbom.com).
 
 > [!IMPORTANT]
@@ -21,14 +24,106 @@ Try the hosted instance at [drop.lifbom.com](https://drop.lifbom.com).
 - live WebSocket transfer with no application-level file persistence;
 - one-time, short-lived transfer sessions;
 - one sender and one receiver per session;
+- a command-line client that sends a whole folder as one transfer;
 - backend-enforced 4 GiB transfer limit;
 - per-IP session and WebSocket connection limits;
 - cancellation, disconnect, timeout, and error propagation;
-- bounded in-flight chunks with receiver write acknowledgements;
+- 1 MiB chunks with a windowed, acknowledged flow-control loop;
+- a server-wide ceiling on buffered bytes, shared across sessions;
 - progressive browser downloads when the File System Access API is available;
 - in-memory metrics and structured tracing;
 - a Svelte and TypeScript browser client;
 - Docker and Caddy configuration for self-hosting.
+
+## Command-line client
+
+Install the `drop` client on both computers:
+
+```bash
+curl -fsSL https://drop.lifbom.com/install.sh | sh
+```
+
+The script picks the right prebuilt binary for the platform, checks it against
+the published SHA-256 checksums, and installs it to `~/.local/bin`. Set
+`DROP_INSTALL_DIR` to install elsewhere, or `DROP_VERSION` to pin a release.
+The checksums come from the same release as the binary, so they detect a
+corrupted or truncated download rather than a compromised release; the trust
+anchor is GitHub, and the artifacts are not signed.
+
+On the sending computer, point it at a file or a folder:
+
+```bash
+$ drop send ./project
+Sending ./project (128 files, archived as project.tar)
+Size    412.7 MiB
+
+  Run this on the other computer:
+
+      drop recv 7F2A91
+
+Waiting for the receiver to connect...
+```
+
+On the receiving computer, use the code:
+
+```bash
+$ drop recv 7F2A91
+Receiving project.tar (412.7 MiB)
+Receiving  100.0%  412.7 MiB / 412.7 MiB  86.4 MiB/s  ETA --
+Extracted 128 files into .
+```
+
+A folder is streamed as a tar archive and unpacked on arrival; a single file is
+written straight to disk. The code is printed on stdout by itself, so it can be
+piped, while the progress display goes to stderr.
+
+Nothing that already exists in the destination is replaced unless `--force` is
+given: a skipped entry is reported and extraction continues. The sender picks
+the paths inside the archive, so overwriting what the receiver already has is
+not a decision the other end gets to make silently.
+
+| Option | Applies to | Purpose |
+| --- | --- | --- |
+| `-s`, `--server <URL>` | both | relay to use, or set `DROP_SERVER` |
+| `-c`, `--compress` | `send` | compress before sending |
+| `--level <N>` | `send` | compression level, 1-9 (default 6) |
+| `-o`, `--out <DIR>` | `recv` | where to write (default: current directory) |
+| `--no-extract` | `recv` | save the archive instead of unpacking it |
+| `-f`, `--force` | `recv` | replace files that already exist |
+
+Compression is off by default because it cannot be streamed: Drop declares the
+exact payload length before sending a byte, so a compressed payload is written
+to a temporary file first to learn its length. That costs local disk and a
+second pass, which is worth it for source trees and documents but wasted on
+media that is already compressed. The temporary file is created readable only
+by its owner and is removed when the transfer ends, however it ends, including
+when the send is interrupted with Ctrl-C.
+
+To point the client at a self-hosted relay:
+
+```bash
+drop send ./project --server https://drop.example.com
+```
+
+### Receiving from an untrusted sender
+
+The receiving end treats an archive as hostile input, because the sender chooses
+every path inside it:
+
+- absolute paths, `..` components, and Windows drive prefixes are refused;
+- an entry is refused if any of its parent directories on disk is a symbolic
+  link, which is what stops a chain of links from walking the extractor out of
+  the destination even when every path is lexically clean;
+- a symlink is refused if its target leaves the destination, evaluated against
+  what is on disk rather than against the target's text alone;
+- existing files are kept unless `--force` is given;
+- permission bits are masked to the ownership bits, so an archive cannot set
+  setuid, setgid, or sticky;
+- a compressed payload that expands more than a hundredfold is abandoned rather
+  than unpacked, which bounds a decompression bomb by the amount the sender had
+  to push through the relay.
+
+Refusals are reported as warnings and do not abort the rest of the extraction.
 
 ## Privacy and security model
 
@@ -73,6 +168,24 @@ The transfer flow is:
 6. The receiver acknowledges chunks after successful file writes.
 7. Drop reports success and destroys the session only after the receiver closes
    the completed file and confirms the final byte count.
+
+### Transfer throughput
+
+Throughput on a long-distance link is set by how many bytes may be in flight
+before the sender must wait for an acknowledgement, so the window matters more
+than raw bandwidth: roughly `window / round-trip time`. Clients send 1 MiB
+chunks and keep up to 16 MiB unacknowledged, and acknowledge in 4 MiB batches
+rather than per chunk.
+
+Buffered bytes are bounded server-wide rather than per session. Each chunk
+waiting inside the relay holds a reservation against one 200 MiB ceiling, so a
+single transfer may use a large window while a hundred concurrent transfers
+share that ceiling instead of multiplying it. A reservation is returned when
+the chunk reaches the receiver, and also when a session is discarded, so an
+abandoned transfer cannot strand capacity.
+
+Progress notifications are advisory and throttled to one every 200 ms, instead
+of one per chunk in each direction.
 
 ## Requirements
 
@@ -136,6 +249,10 @@ DROP_ALLOWED_ORIGINS=http://127.0.0.1:5173 cargo run
 | `DROP_SHUTDOWN_MAX_TRANSFER_WAIT_SECS` | `3500` | after the drain delay, how long to keep running for in-flight transfers |
 | `RUST_LOG` | application default | tracing filter |
 | `VITE_BACKEND_ORIGIN` | current page origin | backend URL for a separately hosted frontend |
+| `DROP_SERVER` | `https://drop.lifbom.com` | relay used by the `drop` CLI |
+| `DROP_INSTALL_DIR` | `~/.local/bin` | where `install.sh` puts the CLI |
+| `DROP_VERSION` | `latest` | release tag `install.sh` installs |
+| `DROP_RELEASE_BASE` | GitHub releases | base URL `install.sh` downloads from |
 | `DROP_SITE_ADDRESS` | `localhost` | Caddy site address in Docker Compose |
 | `ACME_EMAIL` | empty | optional Caddy ACME account email |
 
@@ -197,8 +314,8 @@ Run the repository checks before opening a pull request:
 ```bash
 scripts/check-secrets.sh
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets
 npm --prefix web ci
 npm --prefix web run build
 npm --prefix web audit --audit-level=high
@@ -207,13 +324,21 @@ npm --prefix web audit --audit-level=high
 The main directories are:
 
 ```text
-src/        Rust application, domain, services, routes, and telemetry
+src/        Rust relay: domain, services, routes, and telemetry
+cli/        `drop` command-line client and its archive format
 tests/      integration and WebSocket transfer tests
-web/        Svelte and TypeScript client
+web/        Svelte and TypeScript client, and the hosted install script
 k8s/        portable and GKE-specific Kubernetes manifests
 .github/    community files, issue forms, and CI/security automation
 scripts/    repository safety checks
 ```
+
+The repository is a Cargo workspace: `api` is the relay and `drop-cli` is the
+client. Only `api` is built into the container image; the client ships as a
+prebuilt binary attached to a GitHub release by
+[`release.yml`](.github/workflows/release.yml), which builds each target on a
+native runner. Tagging `v*` publishes those binaries and the checksums file
+that `install.sh` verifies against.
 
 See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the branch workflow and pull
 request expectations.
@@ -222,6 +347,16 @@ request expectations.
 
 - Transfers require both peers to remain online.
 - Sessions and metrics are local to one process.
+- A folder is sent as a single archive whose length is computed before the
+  transfer starts. A file that changes size while it is being read is padded or
+  truncated to the length recorded at scan time, with a warning, because the
+  declared total is already committed.
+- Sockets, FIFOs, and device nodes are skipped when archiving a folder.
+- Four WebSocket connections are allowed per IP address, so one address can run
+  two simultaneous transfers.
+- The backend-only [`Dockerfile`](Dockerfile) does not build the web client, so
+  a split deployment serves `/install.sh` from the frontend host rather than
+  from the API host.
 - The Kubernetes deployment intentionally uses one replica.
 - Horizontal scaling needs shared session coordination and transfer-aware
   routing; ordinary session affinity alone cannot recover live WebSockets.
