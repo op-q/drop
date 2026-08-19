@@ -11,14 +11,14 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, interval, timeout};
-use tracing::{Instrument, info, warn};
+use tracing::{Instrument, debug, info, warn};
 
 use crate::{
     app_state::AppState,
     config::{
         MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_LABEL, PROGRESS_INTERVAL_MS,
-        SENDER_EVENT_CHANNEL_CAPACITY, WS_HEARTBEAT_INTERVAL_SECS, WS_IDLE_TIMEOUT_SECS,
-        WS_MAX_MESSAGE_BYTES, client_ip_from_request,
+        SENDER_EVENT_CHANNEL_CAPACITY, WS_CLOSE_DRAIN_TIMEOUT_SECS, WS_HEARTBEAT_INTERVAL_SECS,
+        WS_IDLE_TIMEOUT_SECS, WS_MAX_MESSAGE_BYTES, client_ip_from_request,
     },
     domain::{
         messages::SenderMessage,
@@ -259,6 +259,9 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
             let mut expected_file_size = None;
             let mut bytes_received = 0_u64;
             let mut progress = ProgressThrottle::new();
+            // Set when the sender completes normally, so teardown knows this
+            // socket is owed a closing handshake rather than being abandoned.
+            let mut sender_completed = false;
 
             loop {
                 let result = match timeout(idle_timeout, ws_receiver.next()).await {
@@ -451,6 +454,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                         SenderEvent::Status("awaiting_receiver"),
                                     )
                                     .await;
+                                    sender_completed = true;
                                     break;
                                 }
 
@@ -618,6 +622,52 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                         .await;
                         break;
                     }
+                }
+            }
+
+            // The relay still owes this sender a terminal status and a `Close`
+            // frame, both written by the send task. Dropping `ws_receiver` here
+            // would stop reading a socket that is still open, so the peer's
+            // reply to that `Close` would sit unread, and closing a socket with
+            // data queued sends RST instead of FIN. The sender reports that as
+            // `Connection reset by peer` after a transfer that actually
+            // succeeded.
+            //
+            // The wait cannot be a single short deadline: the send task cannot
+            // write `transfer_complete` until the receiver has finished writing
+            // the file, which is unbounded work. So wait for the send task to
+            // finish first — it drops the event receiver as it exits — and only
+            // then give the peer a brief window to answer. Both stages are
+            // bounded, so a peer that goes quiet cannot hold this task and its
+            // per-IP connection slot open.
+            if sender_completed {
+                if timeout(
+                    Duration::from_secs(WS_IDLE_TIMEOUT_SECS),
+                    sender_tx_for_recv.closed(),
+                )
+                .await
+                .is_err()
+                {
+                    debug!(
+                        session_code = %code_for_recv,
+                        "send task did not finish before the closing handshake wait expired"
+                    );
+                }
+
+                let answered = timeout(Duration::from_secs(WS_CLOSE_DRAIN_TIMEOUT_SECS), async {
+                    while let Some(Ok(message)) = ws_receiver.next().await {
+                        if matches!(message, Message::Close(_)) {
+                            return;
+                        }
+                    }
+                })
+                .await;
+
+                if answered.is_err() {
+                    debug!(
+                        session_code = %code_for_recv,
+                        "sender did not answer the closing handshake before the drain deadline"
+                    );
                 }
             }
         }

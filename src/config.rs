@@ -23,6 +23,18 @@ pub const WS_IDLE_TIMEOUT_SECS: u64 = 45;
 pub const SHUTDOWN_DRAIN_DELAY_SECS: u64 = 10;
 pub const SHUTDOWN_MAX_TRANSFER_WAIT_SECS: u64 = 3_500;
 
+/// How long the upload socket keeps reading after the relay has written its
+/// closing frame, waiting for the peer to answer it.
+///
+/// A WebSocket close is a two-way handshake. If the relay stops reading as soon
+/// as it has written its own `Close`, the peer's reply lands in a socket nobody
+/// is draining, and closing a socket with unread data queued sends RST instead
+/// of FIN — which the sender reports as `Connection reset by peer` after a
+/// transfer that actually succeeded. This bounds how long that courtesy lasts,
+/// so a peer that never answers cannot hold the task and its per-IP connection
+/// slot open.
+pub const WS_CLOSE_DRAIN_TIMEOUT_SECS: u64 = 2;
+
 /// The chunk size clients should send. Larger chunks mean fewer WebSocket
 /// frames, fewer wakeups, and fewer control messages per transferred byte, so
 /// a transfer is no longer bottlenecked on per-chunk overhead.
