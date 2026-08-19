@@ -329,6 +329,7 @@ cli/        `drop` command-line client and its archive format
 tests/      integration and WebSocket transfer tests
 web/        Svelte and TypeScript client, and the hosted install script
 k8s/        portable and GKE-specific Kubernetes manifests
+docs/       plans, protocol, security model, decisions, and checklists
 .github/    community files, issue forms, and CI/security automation
 scripts/    repository safety checks
 ```
@@ -339,6 +340,14 @@ prebuilt binary attached to a GitHub release by
 [`release.yml`](.github/workflows/release.yml), which builds each target on a
 native runner. Tagging `v*` publishes those binaries and the checksums file
 that `install.sh` verifies against.
+
+The [`docs`](docs/README.md) directory holds the engineering reference: the
+[transfer protocol](docs/protocol.md), the [security model](docs/security.md),
+the [decisions](docs/decisions.md) behind the current shape, the
+[implementation checklist](docs/implementation-checklist.md) and the
+[plans](docs/plans/README.md) behind it, the
+[release checklist](docs/release-checklist.md), and the
+[commands](docs/commands.md).
 
 See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for the branch workflow and pull
 request expectations.
