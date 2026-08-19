@@ -56,7 +56,7 @@ async fn next_binary_message(
         let message = next_message(stream).await;
 
         if message.is_binary() {
-            return message.into_data();
+            return message.into_data().to_vec();
         }
     }
 }

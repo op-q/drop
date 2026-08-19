@@ -106,7 +106,8 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                 "type": "status",
                 "status": "waiting_for_sender"
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await;
 
@@ -122,7 +123,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
             loop {
                 tokio::select! {
                     _ = heartbeat.tick() => {
-                        if ws_sender.send(Message::Ping(Vec::new())).await.is_err() {
+                        if ws_sender.send(Message::Ping(Vec::new().into())).await.is_err() {
                             break;
                         }
                     }
@@ -140,7 +141,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                 });
 
                                 if ws_sender
-                                    .send(Message::Text(msg.to_string()))
+                                    .send(Message::Text(msg.to_string().into()))
                                     .await
                                     .is_err()
                                 {
@@ -158,7 +159,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                 });
 
                                 if ws_sender
-                                    .send(Message::Text(msg.to_string()))
+                                    .send(Message::Text(msg.to_string().into()))
                                     .await
                                     .is_err()
                                 {
@@ -179,7 +180,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                 });
 
                                 if ws_sender
-                                    .send(Message::Text(msg.to_string()))
+                                    .send(Message::Text(msg.to_string().into()))
                                     .await
                                     .is_err()
                                 {
@@ -189,7 +190,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                             DownloadEvent::Chunk { data, reservation } => {
                                 let sent = timeout(
                                     send_timeout,
-                                    ws_sender.send(Message::Binary(data)),
+                                    ws_sender.send(Message::Binary(data.into())),
                                 )
                                 .await;
 
@@ -236,7 +237,8 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                     serde_json::json!({
                                         "type": "complete"
                                     })
-                                    .to_string(),
+                                    .to_string()
+                                    .into(),
                                 );
 
                                 match timeout(send_timeout, ws_sender.send(complete_message)).await {
@@ -261,7 +263,8 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                             "type": "error",
                                             "message": message
                                         })
-                                        .to_string(),
+                                        .to_string()
+                                        .into(),
                                     ))
                                     .await;
                                 let _ = ws_sender.send(Message::Close(None)).await;

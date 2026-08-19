@@ -52,8 +52,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/ready", get(readiness))
         .route("/metrics", get(metrics))
         .route("/api/session/create", post(create_session))
-        .route("/ws/upload/:code", get(upload_ws))
-        .route("/ws/download/:code", get(download_ws))
+        .route("/ws/upload/{code}", get(upload_ws))
+        .route("/ws/download/{code}", get(download_ws))
         .nest_service("/assets", ServeDir::new("web/dist/assets"))
         .layer(
             TraceLayer::new_for_http()
