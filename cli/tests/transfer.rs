@@ -357,6 +357,44 @@ async fn a_hostile_archive_cannot_write_outside_the_receivers_directory() {
     fs::remove_dir_all(&base).ok();
 }
 
+/// A second copy of the same file lands beside the first rather than replacing
+/// it or failing the transfer outright.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_colliding_file_is_numbered_rather_than_refused() {
+    let base = scratch("collide-e2e");
+
+    let source = base.join("outgoing");
+    write_file(&source.join("report.pdf"), b"from the sender");
+    let file = source.join("report.pdf");
+
+    let destination = base.join("destination");
+
+    let origin = spawn_relay().await;
+    transfer_forcing(&origin, &file, &destination, None, false)
+        .await
+        .expect("the first transfer should succeed");
+
+    // This used to abort the receiver before a byte moved, which dropped the
+    // socket and told the sender its peer had disconnected.
+    let origin = spawn_relay().await;
+    transfer_forcing(&origin, &file, &destination, None, false)
+        .await
+        .expect("a name collision must not fail the transfer");
+
+    assert_eq!(
+        fs::read_to_string(destination.join("report.pdf")).expect("the first copy"),
+        "from the sender",
+        "the file already on disk must be left alone"
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("report-1.pdf")).expect("the numbered copy"),
+        "from the sender",
+        "the second copy must land beside it"
+    );
+
+    fs::remove_dir_all(&base).ok();
+}
+
 /// The receiver's existing files survive a transfer that did not ask to
 /// replace them, and are replaced when it did.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
