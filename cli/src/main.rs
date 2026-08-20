@@ -18,7 +18,7 @@ COMMANDS
 
 OPTIONS
     -s, --server <URL>   Relay to use [env: DROP_SERVER]
-                         [default: https://drop.lifbom.com]
+                         [default: https://api.drop.lifbom.com]
     -c, --compress       (send) Compress before sending. Useful for source
                          trees and documents; skip it for media that is already
                          compressed.

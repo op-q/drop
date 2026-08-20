@@ -11,7 +11,13 @@ use tokio_tungstenite::{
 
 pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-pub const DEFAULT_SERVER: &str = "https://drop.lifbom.com";
+/// The hosted relay's API origin.
+///
+/// This is deliberately not `drop.lifbom.com`. The hosted instance is a split
+/// deployment: that host serves the browser client and `install.sh` as static
+/// files, while the relay itself answers on the API origin. Pointing the CLI at
+/// the site host makes `POST /api/session/create` return the static host's 404.
+pub const DEFAULT_SERVER: &str = "https://api.drop.lifbom.com";
 
 #[derive(Debug)]
 pub enum ClientError {
