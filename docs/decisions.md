@@ -142,3 +142,32 @@ API hostname therefore has to stay stable once binaries ship.
 The failure mode when it is wrong is at least loud and safe: pointing the CLI
 at the static host returns 404 from `POST /api/session/create` rather than
 silently transferring somewhere unexpected.
+
+## 9. A colliding single file is numbered; a colliding archive entry is skipped
+
+**Decision.** When a received file's name is already taken, the receiver saves
+it beside the original with a number added — `report.pdf` becomes
+`report-1.pdf`. When an entry inside a tar collides, that entry is skipped and
+reported while the rest of the extraction continues. Neither replaces what the
+receiver already has unless `--force` was given.
+
+**Why.** Refusing was the old behaviour for a single file, and it failed both
+peers: the receiver gave up before a byte moved, dropped the socket, and the
+relay could only tell the sender its peer had disconnected. The session was
+consumed either way, so a filename collision cost both people the whole
+transfer and told them almost nothing about why.
+
+Protecting the receiver's existing files never required refusing the transfer.
+Numbering upholds the invariant and completes the transfer.
+
+**Why the two halves differ.** The asymmetry is deliberate and reads as an
+inconsistency, which is why it is recorded here. A single file is one object
+the receiver asked for; giving it a free name delivers exactly what was sent. An
+archive is a tree the sender laid out, and renaming individual files inside it
+produces a directory matching neither what was sent nor what was already there
+— a half-merged tree is harder to reason about than a reported skip.
+
+**Consequences.** A receiver that repeatedly accepts the same file accumulates
+numbered copies rather than being told to intervene, so the disk fills quietly.
+The name is claimed with `create_new` rather than an `exists` check followed by
+a create, so two receivers running side by side cannot settle on the same path.
