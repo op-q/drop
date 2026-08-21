@@ -97,6 +97,14 @@ The two peers may connect in either order. A sender that connects first is told
 `waiting_for_receiver`; a receiver that connects first is told
 `waiting_for_sender`.
 
+**A `key_exchange` is forwarded, not buffered.** The relay hands it to a peer
+that is already connected and drops one that arrives before the peer exists. A
+sender must therefore wait for `receiver_connected` before sending its half; a
+sender that sends on connect strands the receiver waiting for a message that
+was discarded, and the transfer stalls with no error on either side. The
+receiver's half is sent in reply and is safe to send as soon as the sender's
+arrives.
+
 ## Sender to relay
 
 Text frames, tagged JSON:

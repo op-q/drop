@@ -13,7 +13,7 @@ use aes_gcm::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{CryptoError, handshake::SessionKeys};
+use crate::{CryptoError, handshake::SessionKeys};
 
 /// Bumped when the framing changes in a way an older build cannot read. A
 /// mismatch is a hard failure: a version that is negotiated downward is a
@@ -248,7 +248,7 @@ impl Opener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{Handshake, TransferCode};
+    use crate::{Handshake, TransferCode};
 
     fn keys_for(code: &str) -> (SessionKeys, SessionKeys) {
         let code = TransferCode::parse(code).unwrap();
@@ -491,16 +491,8 @@ mod tests {
         // The metadata counter is only safe because the chunk counter can
         // never reach it. Hold that to the transfer limit rather than to a
         // comment: 4 GiB of 1 MiB chunks is nowhere near u64::MAX.
-        let max_chunks = total_chunks(4 * 1024 * 1024 * 1024);
+        let max_chunks = total_chunks(crate::MAX_TRANSFER_BYTES);
         assert!(max_chunks < METADATA_COUNTER);
-    }
-
-    /// The sealer's chunk indices only line up with what the sender actually
-    /// reads off disk while these two agree. They live in different modules,
-    /// so pin them together.
-    #[test]
-    fn the_envelope_chunk_size_matches_the_payload_reader() {
-        assert_eq!(CHUNK_PLAINTEXT_BYTES, crate::payload::CHUNK_BYTES as u64);
     }
 
     #[test]

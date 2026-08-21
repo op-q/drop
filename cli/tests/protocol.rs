@@ -47,3 +47,21 @@ fn a_sealed_metadata_blob_fits_well_inside_the_relays_opaque_field_limit() {
         "a metadata blob with a maximum-length filename exceeds the relay's limit"
     );
 }
+
+/// `drop_crypto::CHUNK_PLAINTEXT_BYTES` and `drop_cli::payload::CHUNK_BYTES`
+/// are the same number in two crates. The sealer's chunk indices only line up
+/// with what the sender actually reads off disk while these two agree.
+///
+/// This assertion used to live inside the envelope's own tests, where both
+/// values were reachable as modules of one crate. The envelope became a
+/// separate crate so the browser client could compile it to WebAssembly, which
+/// put the payload reader out of its reach — so the guard moves up to the
+/// layer that can still see both, rather than being dropped.
+#[test]
+fn the_envelope_chunk_size_matches_the_payload_reader() {
+    assert_eq!(
+        drop_cli::crypto::CHUNK_PLAINTEXT_BYTES,
+        drop_cli::payload::CHUNK_BYTES as u64,
+        "the envelope and the payload reader disagree on the chunk size"
+    );
+}

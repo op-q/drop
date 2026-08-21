@@ -261,3 +261,43 @@ Peer discovery through third-party infrastructure — the mainline DHT and n0's
 relays — replaces a dependency on the operator's own server with a dependency
 on public networks the project does not control. Availability of a transfer now
 depends on infrastructure nobody involved is paying for.
+
+## 11. The browser runs the envelope as WebAssembly, not a second implementation
+
+**Decision.** The envelope is its own crate, `crypto/`, and `crypto-wasm/`
+compiles it to WebAssembly for the browser. The web client implements no
+cryptography of its own: the SPAKE2 transcript, the chunk framing, the HKDF
+info strings, the nonce layout, and the 2048-word list all come from the same
+Rust the CLI runs.
+
+**Why not TypeScript.** WebCrypto covers AES-256-GCM and HKDF — that is why
+entry 7 chose AES-GCM over XChaCha20. It does not cover SPAKE2, and no browser
+primitive does. So the choice was between writing a PAKE by hand over an
+elliptic-curve library and compiling the one that already exists. Writing one
+would have created a standing obligation: every item listed above would have to
+stay byte-identical across two languages, indefinitely, and a mismatch would
+surface as transfers failing in the field rather than as a build error. Entry 7
+names overclaiming as the largest risk in this work, and two implementations
+that almost agree is the same class of problem.
+
+**What it costs.** The web build now needs a Rust toolchain and the
+`wasm32-unknown-unknown` target, so it is no longer a pure Node build. The
+module is 251 KB, 108 KB compressed, against roughly 40 KB for a hand-written
+equivalent. That is small beside the payload of a file transfer and is paid
+once per visit rather than once per transfer.
+
+**What it does not buy.** It does not make a browser transfer as strong as a
+CLI one. The page fetches this module from the same origin that serves the
+JavaScript, so a server willing to serve modified client code will serve a
+modified envelope just as easily. The limit entry 7 draws sits exactly where it
+did; this decision is about correctness and maintenance, not about trust.
+
+**Consequences.** `cli/src/crypto/` became the `drop-crypto` crate, re-exported
+by the CLI under the same name so its call sites read unchanged. Two
+generations of `getrandom` reach the wasm target by different dependency paths
+and each needs its backend named explicitly; missing one fails the build rather
+than yielding a module with no entropy, and `web/tests/envelope.test.mjs` pins
+that property by asserting two handshakes differ. Interoperation in both
+directions is held by `web/tests/interop.test.mjs`, which runs a real relay and
+the real CLI.
+

@@ -166,27 +166,29 @@ Phase 2 relay and a Phase 1 client.
       and deleting a tree the receiver may already have had files in is worse
       than reporting the stop.
 
-### Phase 4 — Web — **not started, and the web client is currently broken**
+### Phase 4 — Web — **done**
 
-The browser client still speaks the pre-encryption protocol. It builds, because
-nothing type-checks the wire shape, but it cannot complete a transfer against a
-Phase 2 relay. This is the expected consequence of a breaking protocol change
-landing in phases, and it is why nothing here should be deployed until this
-phase is done.
+Resolved by compiling the envelope rather than reimplementing it. `crypto/` is
+now its own crate and `crypto-wasm/` builds it for the browser, so there is no
+second implementation to keep byte-identical. The reasoning and its cost are in
+[`../decisions.md`](../decisions.md) entry 11.
 
-- [ ] AES-GCM via WebCrypto; SPAKE2 via WASM or JS, the one place this costs
-      the browser more than the CLI.
-- [ ] Interoperate both directions with the CLI over the relay.
-- [ ] A receiver holding a malformed code fails with a message that says so.
+- [x] The whole envelope via WebAssembly, not just SPAKE2. WebCrypto would have
+      covered AES-GCM and HKDF, but splitting the envelope across two
+      implementations was the risk worth removing.
+- [x] Interoperate both directions with the CLI over the relay.
+      `web/tests/interop.test.mjs` runs a real relay and the real CLI binary.
+- [x] A receiver holding a malformed code fails with a message that says so,
+      before the relay is contacted.
 
 ### Phase 5 — Documentation
 
 - [ ] Replace the AGENTS.md invariant with the claim agreed in Phase 0. Held
       until Phase 4: while the browser client cannot do a sealed transfer at
       all, a claim covering it would be false.
-- [ ] Rewrite the README privacy section and
+- [x] Rewrote the README privacy section and
       [`../security.md`](../security.md), CLI and browser cases separated.
-      `security.md` still describes the relay as trusted with plaintext.
+- [x] Replaced the AGENTS.md invariant with the narrower claim from entry 7.
 - [x] Update [`../protocol.md`](../protocol.md).
 
 ## Risks
@@ -223,9 +225,17 @@ phase is done.
 - [x] Version mismatch fails cleanly: the relay refuses a `meta` whose version
       it does not know, and the receiver refuses one it cannot speak.
       `envelope_version_matches_the_client` guards the duplicated constant.
-- [ ] Browser-to-CLI and CLI-to-browser interoperate.
-- [ ] Relay logs, tracing, and `/metrics` contain no plaintext filename.
-- [ ] Full validation command set passes.
+- [x] Browser-to-CLI and CLI-to-browser interoperate, over a real relay with
+      the real CLI binary, at sizes spanning a chunk boundary.
+- [x] Relay logs, tracing, and `/metrics` contain no plaintext filename;
+      checked against a live relay at `RUST_LOG=info` during interop.
+- [x] Full validation command set passes: 100 Rust tests, fmt, clippy, the
+      secret scan, the web build, `tsc --noEmit`, and 16 Node tests.
+
+Not covered: `App.svelte` is checked by neither `tsc` nor a browser test. The
+interop tests exercise the envelope and the wire protocol from Node. The Svelte
+flows were changed to match and build clean, but "builds" is the evidence for
+the UI layer, not "works".
 
 ## Open questions
 

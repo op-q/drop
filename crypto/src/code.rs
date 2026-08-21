@@ -26,7 +26,7 @@
 
 use std::fmt;
 
-use crate::crypto::wordlist::WORDS;
+use crate::wordlist::WORDS;
 
 /// Secret words per code. Three gives 33 bits.
 ///

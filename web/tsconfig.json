@@ -1,6 +1,10 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    // The generated wasm bindings declare `[Symbol.dispose]()` on every
+    // exported handle, which needs the disposable library even though the
+    // target stays at ES2022.
+    "lib": ["ES2022", "ESNext.Disposable", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowJs": false,

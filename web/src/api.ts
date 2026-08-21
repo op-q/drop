@@ -38,15 +38,20 @@ async function readErrorMessage(response: Response): Promise<string> {
   return text || `request failed with status ${response.status}`;
 }
 
-export async function createSession(file: File): Promise<SessionResponse> {
+// Takes the sealed size rather than the file, because the relay is told
+// neither the name nor the real length. The sealed length is a deterministic
+// function of the plaintext length, so an exact total can still be declared
+// before a byte moves. See `docs/protocol.md`.
+export async function createSession(
+  ciphertextSize: number
+): Promise<SessionResponse> {
   const response = await fetch(`${API_BASE}/api/session/create`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      filename: file.name,
-      file_size: file.size,
+      ciphertext_size: ciphertextSize,
     }),
   });
 

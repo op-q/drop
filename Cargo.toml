@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli"]
+members = ["cli", "crypto", "crypto-wasm"]
 
 [package]
 name = "api"

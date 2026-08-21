@@ -1,9 +1,12 @@
 # Rust and web build state
 /target/
+# Built from `crypto-wasm/` by `npm --prefix web run build:wasm`.
+/web/src/wasm/
 /node_modules/
 /web/node_modules/
 
 # Local tools, editors, and operating-system state
+/.claude/settings.local.json
 /.codex/
 /.idea/
 /.vscode/

@@ -1,7 +1,7 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[end-to-end encryption](plans/end-to-end-encryption-plan-2026-08-19.md), Phase 4 — the web client is broken until it lands**
+Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — end-to-end encryption is complete across both clients
 Last updated: **2026-08-21**
 
 The tactical view of what is being built and what state it is in. The detailed
@@ -49,7 +49,7 @@ Gate met: 80 runs clean, against 3 failures in 30 on unfixed `main`.
 ## 2. End-to-end encryption
 
 Plan: [`end-to-end-encryption-plan-2026-08-19.md`](plans/end-to-end-encryption-plan-2026-08-19.md)
-Status: **active**
+Status: **done**
 
 The relay forwards bytes it cannot read. Both peers derive the key from the
 short code by SPAKE2; it never crosses the wire.
@@ -67,15 +67,23 @@ short code by SPAKE2; it never crosses the wire.
 - [x] Phase 3 — CLI: encrypt, decrypt, distinct failure modes, and a partly
       written file removed rather than left looking whole. Landed with Phase 2,
       because a breaking protocol change has no green intermediate state.
-- [ ] Phase 4 — web: WebCrypto AES-GCM plus a SPAKE2 implementation.
-      **The browser client is broken until this lands** — it still speaks the
-      pre-encryption protocol. Do not deploy before it is done.
-- [ ] Phase 5 — documentation, including the browser caveat. `protocol.md` is
-      updated; README, `security.md`, and the AGENTS.md invariant are not.
+- [x] Phase 4 — web: the envelope compiled to WebAssembly rather than
+      reimplemented, so both clients run one implementation. Recorded in
+      [`decisions.md`](decisions.md) entry 11. Interoperation with the CLI is
+      covered in both directions against a real relay by
+      `web/tests/interop.test.mjs`.
+- [x] Phase 5 — documentation. `protocol.md`, README, `security.md`, and the
+      AGENTS.md invariant now separate the CLI case from the browser case.
 
-Gate: tampering, reordering, and truncation are all detected; a wrong code
+Gate met: tampering, reordering, and truncation are all detected; a wrong code
 fails cleanly and burns the session; no plaintext filename reaches logs or
-`/metrics`.
+`/metrics`; and the CLI and the browser envelope open each other's transfers
+over a real relay.
+
+Not covered: `App.svelte` itself. `tsc` does not check `.svelte` files and the
+interop tests drive the envelope and the protocol from Node, not the UI. The
+browser flows have been exercised by the build and by their shared envelope,
+not by a browser.
 
 ## 3. Peer-to-peer transport
 

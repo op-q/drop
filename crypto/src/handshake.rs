@@ -16,7 +16,7 @@ use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::crypto::{CryptoError, code::TransferCode};
+use crate::{CryptoError, code::TransferCode};
 
 /// Domain separator prefix, so a Drop handshake can never be replayed into
 /// another protocol that happens to use SPAKE2 with the same group. The

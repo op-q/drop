@@ -1,0 +1,29 @@
+[package]
+name = "drop-crypto"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Transfer codes, SPAKE2 key agreement, and chunk sealing for Drop"
+license = "MIT"
+repository = "https://github.com/op-q/drop"
+publish = false
+
+[lib]
+name = "drop_crypto"
+path = "src/lib.rs"
+
+# Its own crate rather than a module inside the CLI so the browser client can
+# compile the same code to WebAssembly. The alternative was a second
+# implementation in TypeScript, which would have meant the SPAKE2 transcript,
+# the chunk framing, the HKDF info strings, the nonce layout, and the 2048-word
+# list all having to stay byte-identical across two languages by hand, forever.
+# See docs/decisions.md entry 11.
+[dependencies]
+aes-gcm = "0.11"
+hkdf = "0.13"
+sha2 = "0.11"
+spake2 = "0.4"
+rand = "0.10"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

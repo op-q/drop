@@ -364,20 +364,39 @@ dependencies = [
 name = "drop-cli"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "api",
+ "drop-crypto",
  "flate2",
  "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "ureq",
+]
+
+[[package]]
+name = "drop-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
  "hkdf 0.13.0",
  "rand 0.10.2",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "spake2",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "ureq",
  "zeroize",
+]
+
+[[package]]
+name = "drop-crypto-wasm"
+version = "0.1.0"
+dependencies = [
+ "drop-crypto",
+ "getrandom 0.2.17",
+ "getrandom 0.4.3",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -490,8 +509,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -513,9 +534,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
+ "wasm-bindgen",
 ]
 
 [[package]]
