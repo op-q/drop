@@ -79,12 +79,16 @@ fn websocket_origin(origin: &str) -> String {
 }
 
 /// Asks the relay for a one-time session code.
-pub fn create_session(origin: &str, filename: &str, file_size: u64) -> Result<String, ClientError> {
+/// Reserves a session and returns its nameplate.
+///
+/// Only the sealed size crosses here. The filename now travels inside the
+/// encrypted metadata blob, so there is nothing to send that the relay would
+/// be able to read.
+pub fn create_session(origin: &str, ciphertext_size: u64) -> Result<String, ClientError> {
     let url = format!("{origin}/api/session/create");
 
     let response = ureq::post(&url).send_json(ureq::json!({
-        "filename": filename,
-        "file_size": file_size,
+        "ciphertext_size": ciphertext_size,
     }));
 
     match response {

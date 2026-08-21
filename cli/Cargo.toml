@@ -26,6 +26,15 @@ ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 # Pure-Rust deflate: the CLI ships as a prebuilt binary for four targets, and a
 # C dependency would require a cross C toolchain for each of them.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Encryption envelope. AES-GCM over XChaCha20 because the key is derived fresh
+# per transfer, so XChaCha's nonce headroom buys nothing, and AES-GCM is native
+# in WebCrypto for the browser client. See docs/decisions.md entry 7.
+aes-gcm = "0.11"
+hkdf = "0.13"
+sha2 = "0.11"
+spake2 = "0.4"
+rand = "0.10"
+zeroize = { version = "1", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 api = { path = ".." }

@@ -76,8 +76,7 @@ async fn upload_socket_rejects_chunks_over_the_message_cap() {
         .insert(
             code.to_string(),
             Session {
-                filename: "oversized.bin".into(),
-                file_size,
+                ciphertext_size: file_size,
                 created_at: Instant::now(),
                 last_activity: Instant::now(),
                 sender_tx: None,
@@ -113,9 +112,9 @@ async fn upload_socket_rejects_chunks_over_the_message_cap() {
         .send(Message::text(
             json!({
                 "type": "meta",
-                "filename": "oversized.bin",
-                "file_size": file_size,
-                "mime_type": "application/octet-stream",
+                "version": api::config::ENVELOPE_VERSION,
+                "ciphertext_size": file_size,
+                "metadata": "00",
             })
             .to_string(),
         ))
@@ -183,8 +182,7 @@ async fn upload_socket_relays_acknowledged_chunks_before_reporting_completion() 
         .insert(
             code.to_string(),
             Session {
-                filename: "sample.mkv".into(),
-                file_size,
+                ciphertext_size: file_size,
                 created_at: Instant::now(),
                 last_activity: Instant::now(),
                 sender_tx: None,
@@ -226,9 +224,9 @@ async fn upload_socket_relays_acknowledged_chunks_before_reporting_completion() 
         .send(Message::text(
             json!({
                 "type": "meta",
-                "filename": "sample.mkv",
-                "file_size": file_size,
-                "mime_type": "video/x-matroska",
+                "version": api::config::ENVELOPE_VERSION,
+                "ciphertext_size": file_size,
+                "metadata": "00",
             })
             .to_string(),
         ))
@@ -238,8 +236,16 @@ async fn upload_socket_relays_acknowledged_chunks_before_reporting_completion() 
     let receiver_meta =
         next_json_message_matching(&mut receiver_ws, |payload| payload["type"] == "meta").await;
     assert_eq!(receiver_meta["type"], "meta");
-    assert_eq!(receiver_meta["filename"], "sample.mkv");
-    assert_eq!(receiver_meta["file_size"], file_size);
+    assert_eq!(receiver_meta["version"], api::config::ENVELOPE_VERSION);
+    assert_eq!(receiver_meta["ciphertext_size"], file_size);
+    assert_eq!(receiver_meta["metadata"], "00");
+
+    // The relay forwards the blob without being able to read it, and carries
+    // no cleartext description of the payload at all. These two fields are the
+    // ones encryption removed; their absence is the property, so assert it
+    // rather than trusting that nobody adds them back.
+    assert!(receiver_meta.get("filename").is_none());
+    assert!(receiver_meta.get("mime_type").is_none());
 
     let sender_sending_status = next_json_message_matching(&mut sender_ws, |payload| {
         payload["type"] == "status" && payload["status"] == "sending"
@@ -352,8 +358,7 @@ async fn returns_the_relay_budget_after_a_receiver_abandons_a_transfer() {
         .insert(
             code.to_string(),
             Session {
-                filename: "abandoned.bin".into(),
-                file_size,
+                ciphertext_size: file_size,
                 created_at: Instant::now(),
                 last_activity: Instant::now(),
                 sender_tx: None,
@@ -389,9 +394,9 @@ async fn returns_the_relay_budget_after_a_receiver_abandons_a_transfer() {
         .send(Message::text(
             json!({
                 "type": "meta",
-                "filename": "abandoned.bin",
-                "file_size": file_size,
-                "mime_type": "application/octet-stream",
+                "version": api::config::ENVELOPE_VERSION,
+                "ciphertext_size": file_size,
+                "metadata": "00",
             })
             .to_string(),
         ))

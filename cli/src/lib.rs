@@ -4,6 +4,7 @@
 //! safety rules, and transport can be exercised directly by tests.
 
 pub mod client;
+pub mod crypto;
 pub mod payload;
 pub mod progress;
 pub mod recv;

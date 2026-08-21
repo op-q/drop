@@ -99,27 +99,71 @@ decision above much harder.
 where the extraction rules in [`security.md`](security.md) come from. Sockets,
 FIFOs, and device nodes are skipped. The whole transfer fails as a unit.
 
-## 7. End-to-end encryption (pending)
+## 7. End-to-end encryption, with the key derived from the code by a PAKE
 
-**Status.** Not decided. Recorded here because it changes a stated invariant and
-should not be made incidentally inside an implementation branch.
+**Decision.** Payloads are encrypted client-side with AES-256-GCM. The key is
+never transmitted and is never derived from anything the relay holds: both
+peers run a SPAKE2 password-authenticated key exchange seeded by the secret
+half of the transfer code, and derive the session key from its output via HKDF.
+A relay, or anyone who compromises one, sees ciphertext and a byte count.
 
-**What is being decided.** Whether Drop encrypts payloads client-side so the
-relay forwards bytes it cannot read, with the key carried beside the session
-code rather than inside it.
+**The code is split, and this is load-bearing.** A code reads
+`7F2A91-crossover-clockwork-ridge`. The leading nameplate is allocated by the
+relay and is the only part sent to it; the three words are the PAKE password
+and never leave either client.
 
-**What it changes.** AGENTS.md currently forbids describing Drop as end-to-end
-encrypted. That rule exists to stop the documentation overclaiming, and shipping
-this means deliberately replacing it with a precise claim rather than deleting
-it.
+The first draft of this entry made the whole code the password and also handed
+it to the relay for routing. That is broken, and was caught during
+implementation on 2026-08-21: SPAKE2 protects a transfer only while the
+attacker does not know the password, and the relay is an attacker here. A relay
+given the password can run the exchange against both peers at once and sit in
+the middle reading and rewriting everything. The same flaw would have applied
+to entry 10, where a DHT record keyed on a secret would let anyone grind the
+word space offline and recover it.
 
-**The claim has to stay honest.** Encryption in a browser is only as strong as
-the JavaScript the server delivered: it defeats a passive operator and stored
-traffic, but not a server that actively serves modified client code. The
-CLI-to-CLI case is the strong one. Any wording that blurs the two is worse than
-no claim.
+So the routing half and the authenticating half have to be different bytes.
+Only the routing half is ever published, and it carries nothing.
 
-Record the outcome here when it is made.
+**Why AES-256-GCM rather than XChaCha20-Poly1305.** The earlier draft leaned
+XChaCha for its 192-bit nonce, which is forgiving of random nonce generation.
+That hedge buys nothing here: the key is freshly derived per transfer and never
+reused, so a counter-based 96-bit nonce cannot collide within the only lifetime
+that matters. Against that, AES-GCM is native in WebCrypto — no bundled cipher
+in the browser client — and hardware-accelerated through AES-NI at both ends.
+
+**Why a PAKE rather than appending the key to the code.** A 256-bit key beside
+the code makes the shareable string roughly 52 base32 characters. That is
+pasteable but not speakable, and a transfer code that cannot be read aloud over
+a phone loses a real use case. SPAKE2 keeps the code short because an attacker
+gets exactly one guess: a wrong password yields a key that fails the first
+authenticated frame, and the session is burned. Guessing is online-only and
+non-repeatable, so code entropy no longer has to carry the security of the
+payload.
+
+Three words, 33 bits. That is not a lot, and it does not need to be: the
+comparison is against a single online try, not an offline cracking rate. What
+enforces the single try is that the relay consumes a session when the first
+receiver claims it, so a wrong guess costs the attacker the session rather than
+letting them iterate.
+
+**Consequences.** A handshake round trip is added before the first byte moves.
+The browser client needs a SPAKE2 implementation, which WebCrypto does not
+provide — a WASM or JavaScript dependency, and the one place this decision
+costs the web client more than the CLI. A failed handshake must consume the
+session rather than allow a retry, or the one-guess property is lost.
+
+The envelope is deliberately transport-independent: the same encrypted chunk
+format is carried over the peer-to-peer transport in entry 10 and over the
+WebSocket relay. That is what lets the relay become an untrusted fallback
+rather than a component to be removed.
+
+**The claim this authorises.** AGENTS.md previously forbade describing Drop as
+end-to-end encrypted. That rule is replaced, not deleted, by a narrower one:
+CLI-to-CLI transfers are end-to-end encrypted; browser transfers are encrypted
+in the browser but are only as strong as the JavaScript the site delivered,
+which defeats a passive operator and stored traffic but not a server that
+actively serves modified client code. The two cases must never be described in
+wording that blurs them.
 
 ## 8. The hosted instance is a split deployment
 
@@ -171,3 +215,49 @@ produces a directory matching neither what was sent nor what was already there
 numbered copies rather than being told to intervene, so the disk fills quietly.
 The name is claimed with `create_new` rather than an `exists` check followed by
 a create, so two receivers running side by side cannot settle on the same path.
+
+## 10. Peer-to-peer by default, with the relay kept as an untrusted fallback
+
+**Decision.** The CLI connects the two peers directly over QUIC using `iroh`,
+with NAT hole-punching and n0's public relay infrastructure for the cases where
+a direct path cannot be established. Peers find each other from the short code
+alone: an ed25519 keypair is derived from the code, the sender publishes its
+signed node address to the mainline DHT under that key via `pkarr`, and the
+receiver resolves it. No Drop-operated server is involved in a peer-to-peer
+transfer.
+
+The existing WebSocket relay is not removed. It becomes the fallback path for
+the cases the peer-to-peer path cannot serve, and it is no longer trusted with
+plaintext because of entry 7.
+
+**Why.** Relaying every byte is the project's only unavoidable running cost and
+its only unavoidable hosting dependency. Hole-punching removes both for the
+common case. It also removes the relay's bandwidth ceiling as a limit on
+transfer speed, and the single-replica constraint in entry 4 stops applying to
+peer-to-peer transfers because there is no session in any Drop process.
+
+**Why the relay survives anyway.** Three cases need it, and none of them are
+rare enough to drop:
+
+- browsers cannot speak QUIC to an arbitrary peer, so the web client keeps the
+  WebSocket path;
+- networks that block UDP or the mainline DHT — a common corporate shape —
+  cannot do rendezvous or hole-punching;
+- a peer behind a symmetric NAT on both ends may never establish a direct path.
+
+**Consequences.** Two transports must be kept interoperable at the envelope
+level, which is the cost entry 7's transport-independent chunk format is paying
+for. The dependency footprint of the CLI grows substantially — QUIC, DHT, and
+PAKE are all new — against a binary that ships prebuilt for four targets.
+
+Publishing to a public DHT under a key derived from a low-entropy code means an
+attacker who enumerates codes can learn a sender's IP address and node
+identity, even though the PAKE stops them reading any bytes. That is a new
+disclosure with no counterpart in the relay-only design, and it is the reason
+the code needs materially more entropy than the six hexadecimal characters used
+today. It must be recorded in `security.md` rather than discovered later.
+
+Peer discovery through third-party infrastructure — the mainline DHT and n0's
+relays — replaces a dependency on the operator's own server with a dependency
+on public networks the project does not control. Availability of a transfer now
+depends on infrastructure nobody involved is paying for.

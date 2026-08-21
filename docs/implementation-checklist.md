@@ -1,8 +1,8 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[receiver confirmation](plans/receiver-confirmation-plan-2026-08-19.md) is next**
-Last updated: **2026-08-19**
+Current work: **[end-to-end encryption](plans/end-to-end-encryption-plan-2026-08-19.md), Phase 4 — the web client is broken until it lands**
+Last updated: **2026-08-21**
 
 The tactical view of what is being built and what state it is in. The detailed
 reasoning, risks, and validation for each item live in its plan under
@@ -23,8 +23,10 @@ complete when its evidence exists, not when the code compiles.
 
 ## Work order
 
-Teardown, then confirmation, then encryption. The reasoning — and the one cost
-of that order — is in
+Teardown, then encryption, then peer-to-peer transport, then confirmation.
+Reordered 2026-08-20 at the user's direction: encryption moved ahead of
+confirmation, and transport was added. The reasoning and the cost of the swap
+are in
 [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law).
 
 ## 1. Relay teardown reset
@@ -44,10 +46,64 @@ socket is dropped with data queued, producing RST instead of FIN.
 
 Gate met: 80 runs clean, against 3 failures in 30 on unfixed `main`.
 
-## 2. Receiver preview and confirmation
+## 2. End-to-end encryption
+
+Plan: [`end-to-end-encryption-plan-2026-08-19.md`](plans/end-to-end-encryption-plan-2026-08-19.md)
+Status: **active**
+
+The relay forwards bytes it cannot read. Both peers derive the key from the
+short code by SPAKE2; it never crosses the wire.
+
+- [x] Phase 0 — decided 2026-08-20: AES-256-GCM, SPAKE2 key agreement, and the
+      narrower claim that separates the CLI case from the browser case.
+      Recorded in [`decisions.md`](decisions.md) entry 7.
+- [x] Phase 1 — envelope: wordlist codes, handshake, HKDF, chunk framing, AAD,
+      metadata blob, version. Transport-independent by requirement.
+      25 tests; tamper, reorder, truncate, duplicate, and wrong code all
+      covered at the envelope level.
+- [x] Phase 2 — relay carries the envelope; no plaintext in logs. Cleartext
+      `meta` is now version, sealed size, and an opaque blob; `Session` has no
+      filename field at all.
+- [x] Phase 3 — CLI: encrypt, decrypt, distinct failure modes, and a partly
+      written file removed rather than left looking whole. Landed with Phase 2,
+      because a breaking protocol change has no green intermediate state.
+- [ ] Phase 4 — web: WebCrypto AES-GCM plus a SPAKE2 implementation.
+      **The browser client is broken until this lands** — it still speaks the
+      pre-encryption protocol. Do not deploy before it is done.
+- [ ] Phase 5 — documentation, including the browser caveat. `protocol.md` is
+      updated; README, `security.md`, and the AGENTS.md invariant are not.
+
+Gate: tampering, reordering, and truncation are all detected; a wrong code
+fails cleanly and burns the session; no plaintext filename reaches logs or
+`/metrics`.
+
+## 3. Peer-to-peer transport
+
+Plan: [`peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md)
+Status: **proposed**
+
+Two CLIs connect directly over QUIC and find each other through a mainline-DHT
+record derived from the code, so a transfer needs no Drop-operated server. The
+relay stays as an untrusted fallback for browsers and for networks where this
+cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
+
+- [ ] Phase 1 — transport abstraction, existing WebSocket path moved behind it
+- [ ] Phase 2 — `iroh` QUIC transport
+- [ ] Phase 3 — rendezvous: code-derived keypair, `pkarr` publish and resolve
+- [ ] Phase 4 — selection, automatic fallback, and reporting the path taken
+- [ ] Phase 5 — documentation, including the DHT address-disclosure weakness
+
+Gate: two CLIs transfer with no Drop server reachable; a UDP-blocked network
+still completes over the relay and says so.
+
+## 4. Receiver preview and confirmation
 
 Plan: [`receiver-confirmation-plan-2026-08-19.md`](plans/receiver-confirmation-plan-2026-08-19.md)
-Status: **proposed**
+Status: **proposed — needs revision**
+
+Moved behind encryption on 2026-08-20. Its plan is written against a cleartext
+`meta` that encryption seals, so it must be revised before it is implemented,
+not followed as written.
 
 The receiver sees name, size, type, and destination, and answers y/n before any
 bytes move.
@@ -63,25 +119,6 @@ Gate: declining leaves nothing on disk and is not counted as a failure; a
 filename carrying escape sequences renders inert; a non-TTY without `--yes`
 fails clearly.
 
-## 3. End-to-end encryption
-
-Plan: [`end-to-end-encryption-plan-2026-08-19.md`](plans/end-to-end-encryption-plan-2026-08-19.md)
-Status: **proposed — blocked on a decision**
-
-The relay forwards bytes it cannot read. Phase 0 is a product decision recorded
-in [`decisions.md`](decisions.md) entry 7, because it replaces a stated
-invariant in [AGENTS.md](../AGENTS.md). Do not start implementing before it is
-resolved.
-
-- [ ] Phase 0 — decide: adopt the model, choose the cipher, agree the claim
-- [ ] Phase 1 — envelope: key, chunk framing, AAD, metadata blob, version
-- [ ] Phase 2 — relay: cleartext reduced to a byte total, no plaintext in logs
-- [ ] Phase 3 — clients: CLI and web, interoperating both directions
-- [ ] Phase 4 — documentation, including the browser caveat
-
-Gate: tampering, reordering, and truncation are all detected; a wrong key fails
-cleanly; no plaintext filename reaches logs or `/metrics`.
-
 ## Not scheduled
 
 Recorded so they are not rediscovered as new ideas. None are committed work.
@@ -92,9 +129,6 @@ Recorded so they are not rediscovered as new ideas. None are committed work.
   [`decisions.md`](decisions.md) entry 1 rules out.
 - **Horizontal scaling.** Needs shared session coordination and transfer-aware
   routing; session affinity alone cannot recover a live WebSocket.
-- **A direct peer-to-peer data channel** with relay fallback. Larger than
-  encryption, needs signaling and a TURN dependency, and does not remove the
-  relay path because TURN-blocked networks fall back to it.
 - **The download socket's teardown**, which carries the same shape the upload
   socket had: its receive task stops reading before the send task writes a
   `Close`. It produces no user-visible symptom, because the receiving client
@@ -102,11 +136,6 @@ Recorded so they are not rediscovered as new ideas. None are committed work.
   Fixing it needs a way to show the change worked, which the upload side had
   and this side does not. See the Phase 3 finding in
   [`plans/relay-teardown-drain-plan-2026-08-19.md`](plans/relay-teardown-drain-plan-2026-08-19.md).
-- **Lowercase session codes are rejected.** `drop recv 4607f9` returns
-  `invalid session code` while `4607F9` succeeds. The relay stores codes
-  uppercase and `encode_code` in [`client.rs`](../cli/src/client.rs) filters to
-  alphanumerics without normalising case. A two-line client-side fix, and one
-  every user hits once.
 - **`receiver disconnected` is the sender's message for any receiver-side
   failure.** The receiver returns an error and drops the socket, so the relay
   can only report a disconnect — the sender learns nothing about what actually

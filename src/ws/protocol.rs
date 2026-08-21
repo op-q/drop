@@ -7,17 +7,28 @@ use crate::domain::{
 
 pub fn log_incoming_sender_message(code: &str, message: &SenderMessage) {
     match message {
+        // Deliberately logs the sealed size and nothing else. The filename and
+        // MIME type used to be logged here at debug; they are now inside the
+        // sealed metadata blob, and the blob itself is never logged — a
+        // ciphertext in a log file is still an artefact of a user's transfer,
+        // and debug logs are the easiest place for one to be retained.
         SenderMessage::Meta {
-            filename,
-            file_size,
-            mime_type,
+            version,
+            ciphertext_size,
+            metadata: _,
         } => {
             debug!(
                 session_code = %code,
                 event = "sender_meta",
-                filename,
-                file_size,
-                mime_type,
+                version,
+                ciphertext_size,
+                "received sender control message"
+            );
+        }
+        SenderMessage::KeyExchange { .. } => {
+            debug!(
+                session_code = %code,
+                event = "sender_key_exchange",
                 "received sender control message"
             );
         }
@@ -42,14 +53,14 @@ pub fn log_incoming_upload_chunk(
     code: &str,
     chunk_len: usize,
     bytes_received: u64,
-    expected_file_size: Option<u64>,
+    expected_ciphertext_size: Option<u64>,
 ) {
     debug!(
         session_code = %code,
         event = "upload_chunk",
         chunk_len,
         bytes_received,
-        expected_file_size,
+        expected_ciphertext_size,
         "received upload chunk"
     );
 }
@@ -81,6 +92,13 @@ pub fn log_sender_event(code: &str, event: &SenderEvent) {
                 session_code = %code,
                 event = "receiver_acknowledgement",
                 bytes_received,
+                "dispatching sender event"
+            );
+        }
+        SenderEvent::KeyExchange(_) => {
+            debug!(
+                session_code = %code,
+                event = "sender_key_exchange_forwarded",
                 "dispatching sender event"
             );
         }
@@ -118,16 +136,22 @@ pub fn log_download_event(code: &str, event: &DownloadEvent) {
             );
         }
         DownloadEvent::Meta {
-            filename,
-            file_size,
-            mime_type,
+            version,
+            ciphertext_size,
+            metadata: _,
         } => {
             debug!(
                 session_code = %code,
                 event = "receiver_meta",
-                filename,
-                file_size,
-                mime_type,
+                version,
+                ciphertext_size,
+                "dispatching receiver event"
+            );
+        }
+        DownloadEvent::KeyExchange(_) => {
+            debug!(
+                session_code = %code,
+                event = "receiver_key_exchange",
                 "dispatching receiver event"
             );
         }

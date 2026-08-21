@@ -243,10 +243,12 @@ async fn reports_a_clear_error_for_an_unknown_code() {
     let origin = spawn_relay().await;
     let base = scratch("badcode");
 
+    // Well formed, so it gets past the client-side parse and is actually put
+    // to the relay — which is the path this test exists to cover.
     let error = recv::run(
-        "ZZZZZZ",
+        "ZZZZZZ-abandon-ability-able",
         ReceiveOptions {
-            origin,
+            origin: origin.clone(),
             out_dir: base.clone(),
             extract: true,
             force: true,
@@ -257,6 +259,34 @@ async fn reports_a_clear_error_for_an_unknown_code() {
 
     assert!(
         error.to_string().contains("invalid session code"),
+        "unexpected error: {error}"
+    );
+
+    fs::remove_dir_all(&base).ok();
+}
+
+/// A code that cannot be a code is rejected here rather than spent against the
+/// relay. It matters because a session is consumed by the first receiver to
+/// claim it: a typo that reached the relay would burn the transfer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_malformed_code_fails_before_the_relay_is_contacted() {
+    let base = scratch("malformedcode");
+
+    let error = recv::run(
+        "7F2A91-abandon-ability-frobnicate",
+        ReceiveOptions {
+            // Nothing is listening here. Reaching it at all is the failure.
+            origin: "http://127.0.0.1:1".to_string(),
+            out_dir: base.clone(),
+            extract: true,
+            force: true,
+        },
+    )
+    .await
+    .expect_err("a malformed code must fail");
+
+    assert!(
+        error.to_string().contains("frobnicate"),
         "unexpected error: {error}"
     );
 
@@ -434,5 +464,93 @@ async fn extraction_replaces_existing_files_only_when_forced() {
         "--force must replace the file: {forced:?}"
     );
 
+    fs::remove_dir_all(&base).ok();
+}
+
+/// The property the short code depends on: a receiver who mistypes a word
+/// derives a different key, cannot open the transfer details, and writes
+/// nothing. It also does not get to try again — the relay consumed the session
+/// when this receiver claimed it — which is what holds an attacker to a single
+/// online guess against the words.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wrong_code_is_refused_and_leaves_nothing_on_disk() {
+    let origin = spawn_relay().await;
+    let base = scratch("wrongcode");
+
+    let source = base.join("source/secret.bin");
+    write_file(&source, &vec![7_u8; 64 * 1024]);
+    let destination = base.join("destination");
+
+    let (code_tx, code_rx) = oneshot::channel();
+    let mut code_tx = Some(code_tx);
+
+    let sender = tokio::spawn({
+        let origin = origin.clone();
+        let source = source.clone();
+
+        async move {
+            send::run(
+                &source,
+                SendOptions {
+                    origin,
+                    compress: None,
+                    on_code: Box::new(move |code| {
+                        if let Some(sender) = code_tx.take() {
+                            let _ = sender.send(code.to_string());
+                        }
+                    }),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+    });
+
+    let code = tokio::time::timeout(Duration::from_secs(10), code_rx)
+        .await
+        .expect("the sender never produced a session code")
+        .expect("the sender failed before producing a session code");
+
+    // Keep the nameplate, so the receiver reaches the right session, and
+    // change one word so only the password is wrong.
+    let mut parts: Vec<String> = code.split('-').map(str::to_string).collect();
+    let last = parts.len() - 1;
+    parts[last] = if parts[last] == "zoo" { "zebra" } else { "zoo" }.to_string();
+    let wrong_code = parts.join("-");
+    assert_ne!(wrong_code, code, "the mangled code must actually differ");
+
+    let error = recv::run(
+        &wrong_code,
+        ReceiveOptions {
+            origin: origin.clone(),
+            out_dir: destination.clone(),
+            extract: true,
+            force: true,
+        },
+    )
+    .await
+    .expect_err("a wrong code must fail");
+
+    assert!(
+        error.to_string().contains("check the code"),
+        "unexpected error: {error}"
+    );
+
+    // Nothing was written, because the failure happens on the sealed transfer
+    // details — before a destination file is opened.
+    let leftovers: Vec<_> = fs::read_dir(&destination)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        leftovers.is_empty(),
+        "a refused transfer left files behind: {leftovers:?}"
+    );
+
+    let _ = sender.await;
     fs::remove_dir_all(&base).ok();
 }

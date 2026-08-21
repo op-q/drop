@@ -8,6 +8,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
     client::{self, Socket},
+    crypto,
     payload::{self, Payload},
     progress::Progress,
 };
@@ -68,36 +69,55 @@ pub async fn run(
     eprintln!("Sending {}", payload.summary);
     eprintln!("Size    {}", crate::progress::format_bytes(payload.size));
 
+    // The relay bounds and accounts for what actually crosses it, which is
+    // ciphertext, so that is what the session reserves.
+    let sealed_size = crypto::ciphertext_len(payload.size);
+
     // Session creation is a blocking HTTP call, so it runs on the blocking
     // pool rather than stalling a runtime worker.
-    let code = {
+    let nameplate = {
         let origin = options.origin.clone();
-        let filename = payload.filename.clone();
-        let size = payload.size;
 
-        tokio::task::spawn_blocking(move || client::create_session(&origin, &filename, size))
-            .await??
+        tokio::task::spawn_blocking(move || client::create_session(&origin, sealed_size)).await??
     };
 
-    (options.on_code)(&code);
+    // The relay allocated the nameplate; the words are drawn here and never
+    // sent anywhere. Together they are what the receiver types.
+    let code = crypto::TransferCode::generate_for(&nameplate)?;
+    let shareable = code.to_shareable();
+
+    (options.on_code)(&shareable);
     eprintln!();
     eprintln!("  Run this on the other computer:");
     eprintln!();
-    eprintln!("      drop recv {code}");
+    eprintln!("      drop recv {shareable}");
     eprintln!();
     eprintln!("Waiting for the receiver to connect...");
 
-    let mut socket = client::open_upload(&options.origin, &code).await?;
+    let mut socket = client::open_upload(&options.origin, code.nameplate()).await?;
 
     wait_for_receiver(&mut socket).await?;
+
+    let keys = exchange_keys(&mut socket, &code).await?;
+    let mut sealer = crypto::Sealer::new(&keys, payload.size);
+
+    let metadata = crypto::seal_metadata(
+        &keys,
+        sealed_size,
+        &crypto::Metadata {
+            filename: payload.filename.clone(),
+            mime_type: payload.mime_type.clone(),
+            plaintext_size: payload.size,
+        },
+    )?;
 
     socket
         .send(Message::Text(
             json!({
                 "type": "meta",
-                "filename": payload.filename,
-                "file_size": payload.size,
-                "mime_type": payload.mime_type,
+                "version": crypto::ENVELOPE_VERSION,
+                "ciphertext_size": sealed_size,
+                "metadata": crypto::to_hex(&metadata),
             })
             .to_string()
             .into(),
@@ -105,7 +125,7 @@ pub async fn run(
         .await?;
 
     let total = payload.size;
-    let result = stream_payload(&mut socket, payload).await;
+    let result = stream_payload(&mut socket, payload, &mut sealer, sealed_size).await;
 
     if let Err(error) = result {
         // Tell the relay this transfer is over so the receiver is not left
@@ -153,12 +173,61 @@ async fn wait_for_receiver(socket: &mut Socket) -> Result<(), Box<dyn Error + Se
     Err("the relay closed the connection before a receiver joined".into())
 }
 
+/// Runs the key exchange and returns the derived session keys.
+///
+/// The relay carries both messages without being able to use either: the
+/// password they authenticate against never leaves this process.
+async fn exchange_keys(
+    socket: &mut Socket,
+    code: &crypto::TransferCode,
+) -> Result<crypto::SessionKeys, Box<dyn Error + Send + Sync>> {
+    let (handshake, outbound) = crypto::Handshake::start(code);
+
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "key_exchange",
+                "message": crypto::to_hex(&outbound),
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+
+    while let Some(message) = socket.next().await {
+        let Message::Text(text) = message? else {
+            continue;
+        };
+
+        let payload: Value = serde_json::from_str(&text)?;
+
+        match payload["type"].as_str() {
+            Some("key_exchange") => {
+                let peer = payload["message"]
+                    .as_str()
+                    .ok_or("the receiver sent a malformed key exchange message")?;
+
+                return Ok(handshake.finish(&crypto::from_hex(peer)?)?);
+            }
+            Some("error") => return Err(relay_error(&payload).into()),
+            _ => {}
+        }
+    }
+
+    Err("the connection closed before the receiver completed the key exchange".into())
+}
+
 /// Streams the payload, keeping at most [`WINDOW_BYTES`] unacknowledged.
+///
+/// The window and the acknowledgements are counted in sealed bytes, because
+/// that is what the relay sees and meters. Progress is reported against the
+/// same scale so the two never disagree on screen.
 async fn stream_payload(
     socket: &mut Socket,
     payload: Payload,
+    sealer: &mut crypto::Sealer,
+    total: u64,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let total = payload.size;
     let mut chunks = payload.into_chunks();
 
     let mut progress = Progress::new("Sending ", total);
@@ -177,9 +246,9 @@ async fn stream_payload(
             break;
         };
 
-        let chunk = chunk?;
-        sent += chunk.len() as u64;
-        socket.send(Message::Binary(chunk.into())).await?;
+        let sealed = sealer.seal_chunk(&chunk?)?;
+        sent += sealed.len() as u64;
+        socket.send(Message::Binary(sealed.into())).await?;
         progress.update(acknowledged);
     }
 

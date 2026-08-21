@@ -32,20 +32,15 @@ impl SessionService {
     pub async fn create_session(
         state: &AppState,
         client_ip: IpAddr,
-        filename: String,
-        file_size: u64,
+        ciphertext_size: u64,
     ) -> Result<String, AppError> {
-        if filename.trim().is_empty() {
-            return Err(AppError::BadRequest("filename is required".into()));
-        }
-
-        if file_size == 0 {
+        if ciphertext_size == 0 {
             return Err(AppError::BadRequest(
                 "file size must be greater than zero".into(),
             ));
         }
 
-        if file_size > MAX_UPLOAD_SIZE_BYTES {
+        if ciphertext_size > MAX_UPLOAD_SIZE_BYTES {
             return Err(AppError::PayloadTooLarge(format!(
                 "file size exceeds the {} upload limit ({} bytes max)",
                 MAX_UPLOAD_SIZE_LABEL, MAX_UPLOAD_SIZE_BYTES
@@ -79,8 +74,7 @@ impl SessionService {
             .insert(
                 code.clone(),
                 Session {
-                    filename,
-                    file_size,
+                    ciphertext_size,
                     created_at: now,
                     last_activity: now,
                     sender_tx: None,
@@ -95,7 +89,7 @@ impl SessionService {
             .await;
 
         state.metrics.record_session_created();
-        info!(session_code = %code, file_size, client_ip = %client_ip, "session created");
+        info!(session_code = %code, ciphertext_size, client_ip = %client_ip, "session created");
 
         Ok(code)
     }
@@ -144,12 +138,12 @@ impl SessionService {
             .unwrap_or(ReceiverClaimResult::InvalidCode)
     }
 
-    pub async fn session_file_size(state: &AppState, code: &str) -> Option<u64> {
+    pub async fn session_ciphertext_size(state: &AppState, code: &str) -> Option<u64> {
         state
             .sessions
             .get(code)
             .await
-            .map(|session| session.file_size)
+            .map(|session| session.ciphertext_size)
     }
 
     pub async fn sender_tx(state: &AppState, code: &str) -> Option<mpsc::Sender<SenderEvent>> {
@@ -191,7 +185,7 @@ impl SessionService {
         state
             .sessions
             .with_session_mut(code, |session| {
-                if total < session.bytes_relayed || total > session.file_size {
+                if total < session.bytes_relayed || total > session.ciphertext_size {
                     return false;
                 }
 
@@ -229,7 +223,7 @@ impl SessionService {
         state
             .sessions
             .with_session_mut(code, |session| {
-                if session.bytes_relayed != session.file_size {
+                if session.bytes_relayed != session.ciphertext_size {
                     return false;
                 }
 
@@ -250,7 +244,7 @@ impl SessionService {
             .sessions
             .with_session_mut(code, |session| {
                 if !session.sender_finished
-                    || bytes_received != session.file_size
+                    || bytes_received != session.ciphertext_size
                     || bytes_received != session.bytes_relayed
                     || bytes_received < session.receiver_acknowledged_bytes
                 {
