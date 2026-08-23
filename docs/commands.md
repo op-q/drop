@@ -13,12 +13,34 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets
 npm --prefix web ci
 npm --prefix web run build
+npm --prefix web run typecheck
+npm --prefix web test
 npm --prefix web audit --audit-level=high
 ```
 
-The repository is a Cargo workspace with two members, `api` and `drop-cli`. A
-root-package-only run misses the CLI, which is why every Rust command here is
-workspace-wide.
+The repository is a Cargo workspace with four members — `api`, `drop-cli`,
+`drop-crypto`, and `drop-crypto-wasm`. A root-package-only run misses all but
+the relay, which is why every Rust command here is workspace-wide.
+
+## The web build is not a pure Node build
+
+`npm run build` compiles `crypto-wasm/` before it runs Vite, because the
+browser runs the same envelope the CLI runs rather than a second
+implementation of it ([`decisions.md`](decisions.md) entry 11). That needs a
+Rust toolchain, the wasm32 target, and `wasm-pack`:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-pack        # or a release binary from rustwasm/wasm-pack
+```
+
+Without them `npm run build`, `npm test`, and `npm run dev` all fail at the
+`build:wasm` step rather than at anything that mentions the browser.
+
+`npm test` runs the envelope tests and, when `target/debug/api` and
+`target/debug/drop` exist, the CLI-to-browser interoperation tests against a
+real relay. It skips those rather than failing when the binaries are absent, so
+run `cargo build --workspace --bins` first if you mean to exercise them.
 
 ## Secret scan
 

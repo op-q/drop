@@ -51,7 +51,7 @@ jobs:
   web:
     name: Web
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: web
@@ -66,12 +66,39 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
+      # The web build compiles `crypto-wasm/` instead of reimplementing the
+      # envelope in TypeScript, so this is no longer a pure Node build.
+      # See decisions.md entry 11.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # Downloaded at a pinned version and checked against its digest, rather
+      # than piped from an installer script or compiled from source on every
+      # run.
+      - name: Install wasm-pack
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL -o wasm-pack.tar.gz \
+            https://github.com/rustwasm/wasm-pack/releases/download/v0.15.0/wasm-pack-v0.15.0-x86_64-unknown-linux-musl.tar.gz
+          echo "c09f971ecaed9a2efc80fdcea7a00ef6b53c7fadc8c57d1f61b53a6aa66b668a  wasm-pack.tar.gz" | sha256sum -c -
+          tar -xzf wasm-pack.tar.gz --strip-components=1
+          sudo install -m 0755 wasm-pack /usr/local/bin/wasm-pack
       - name: Install dependencies
         run: npm ci
       - name: Audit dependencies
         run: npm audit --audit-level=high
       - name: Build
         run: npm run build
+      # `web/tests/interop.test.mjs` drives a real relay and the real CLI, and
+      # skips itself when those binaries are absent. Building them here is what
+      # keeps it from skipping silently, which would be worse than not having
+      # the test at all.
+      - name: Build the relay and CLI for the interoperation test
+        working-directory: ${{ github.workspace }}
+        run: cargo build --workspace --bins
+      - name: Test
+        run: npm test
 
   kubernetes:
     name: Kubernetes manifests
