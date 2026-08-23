@@ -308,4 +308,3 @@ than yielding a module with no entropy, and `web/tests/envelope.test.mjs` pins
 that property by asserting two handshakes differ. Interoperation in both
 directions is held by `web/tests/interop.test.mjs`, which runs a real relay and
 the real CLI.
-
