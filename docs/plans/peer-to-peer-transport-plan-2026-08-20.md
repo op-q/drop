@@ -2,7 +2,7 @@
 
 Status: **proposed**
 Created: **2026-08-20**
-Last updated: **2026-08-20**
+Last updated: **2026-08-23**
 
 ## Goal
 
@@ -21,22 +21,30 @@ characters. Handing that to a person defeats the point of a short code. So the
 real work here is not the QUIC connection, it is **rendezvous**: turning four
 spoken words into a routable peer.
 
-The answer is to derive a keypair from the code itself:
+The answer is to derive a keypair from the code's public half:
 
 ```text
-code ──HKDF──▶ ed25519 keypair ──▶ pkarr record on the mainline DHT
-                                     └─ value: sender's iroh NodeAddr
+nameplate ──HKDF──▶ ed25519 keypair ──▶ pkarr record on the mainline DHT
+                                          └─ value: sender's iroh NodeAddr
 ```
 
 The sender publishes, the receiver derives the same keypair and resolves. Both
-sides compute the DHT location from the code alone, so nothing has to be
-exchanged out of band beyond the words themselves.
+sides compute the DHT location from the nameplate alone, so nothing has to be
+exchanged out of band beyond the code itself.
 
-**This is why the PAKE is load-bearing.** The DHT record is public and the code
-is low-entropy, so an attacker who enumerates codes can resolve the record and
-attempt a connection. SPAKE2 is what stops them getting bytes, and the
-one-guess property is what stops them grinding. Without the PAKE this design
-would be unshippable.
+**The key is derived from the nameplate, never from the words.** This plan was
+written before the code was split, and said "from the code". That is unsafe:
+a DHT record keyed on the secret lets anyone grind the 33-bit word space
+offline against a public record and recover the PAKE password, which is exactly
+the failure [`../decisions.md`](../decisions.md) entry 7 records being caught on
+2026-08-21. The nameplate is public, carries nothing, and is the only half that
+may ever be published.
+
+**This is why the PAKE is load-bearing.** The DHT record is public and the
+nameplate is enumerable, so an attacker can resolve the record and attempt a
+connection. SPAKE2 is what stops them getting bytes, and the one-guess property
+is what stops them grinding. Without the PAKE this design would be
+unshippable.
 
 ## Constraints and invariants
 
@@ -76,8 +84,8 @@ would be unshippable.
 
 ### Phase 3 — Rendezvous
 
-- [ ] Derive an ed25519 keypair from the code by HKDF, domain-separated from
-      every key in the encryption plan.
+- [ ] Derive an ed25519 keypair from the **nameplate** by HKDF, domain-separated
+      from every key in the encryption plan. Never from the words: see above.
 - [ ] Sender publishes its `NodeAddr` as a `pkarr` record; receiver resolves.
 - [ ] Handle the publish/resolve latency honestly in the UI — this is seconds,
       not milliseconds, and the sender must not print "waiting" before the
@@ -103,9 +111,11 @@ would be unshippable.
 
 ## Risks
 
-- **DHT address disclosure.** Enumerating codes reveals sender IP and node
-  identity to anyone, without revealing bytes. New weakness with no counterpart
-  in the relay design. Must be documented, not discovered.
+- **DHT address disclosure.** The nameplate is six hex characters, so
+  enumerating it is cheap and reveals sender IP and node identity to anyone,
+  without revealing bytes. New weakness with no counterpart in the relay
+  design. Must be documented, not discovered — and it is the reason the
+  nameplate's entropy is an open question below rather than a settled detail.
 - **Third-party infrastructure.** Transfers now depend on the mainline DHT and
   n0's relays — public networks nobody involved is paying for or operating. An
   outage there is an outage here, and there is no support relationship.
@@ -136,6 +146,10 @@ would be unshippable.
 
 ## Open questions
 
+- How much entropy does the nameplate need? It is 24 bits today, which is fine
+  for naming a relay session and cheap to enumerate once it also keys a public
+  DHT record. Widening it is a change to what the relay allocates and to what a
+  person types, so it belongs here rather than in the encryption plan.
 - Does the 4 GiB limit apply peer-to-peer? Leaning yes for consistency, with
   the reasoning written down rather than left to the transport.
 - Should the sender publish to the DHT before or after the receiver is known to

@@ -32,10 +32,8 @@ the plan contract unmissable and indexes what is here.
 
 ## Active
 
-- [`end-to-end-encryption-plan-2026-08-19.md`](end-to-end-encryption-plan-2026-08-19.md)
-  — Phase 0 resolved 2026-08-20: AES-256-GCM under a key derived from the code
-  by SPAKE2, in a transport-independent envelope. Implementation started at
-  Phase 1.
+None. Encryption has landed; peer-to-peer transport is next and has not
+started.
 
 ## Proposed
 
@@ -49,6 +47,17 @@ the plan contract unmissable and indexes what is here.
 
 ## Done
 
+- [`end-to-end-encryption-plan-2026-08-19.md`](end-to-end-encryption-plan-2026-08-19.md)
+  — completed 2026-08-21: payloads are sealed with AES-256-GCM under a key both
+  peers derive from the code by SPAKE2, so the relay carries an envelope it
+  cannot read. The code is split into a public nameplate the relay routes on
+  and three secret words that are the PAKE password — a correction made during
+  implementation, because the first design handed the relay the password and so
+  let it sit in the middle. The browser runs the same envelope compiled to
+  WebAssembly rather than a second implementation. Recorded in
+  [`../decisions.md`](../decisions.md) entries 7 and 11. Not covered:
+  `App.svelte`, which is exercised by its build and its shared envelope rather
+  than by a browser.
 - [`relay-teardown-drain-plan-2026-08-19.md`](relay-teardown-drain-plan-2026-08-19.md)
   — completed 2026-08-19: the upload receive task now stays alive through
   teardown and answers the sender's closing handshake, so a socket is no longer

@@ -1,8 +1,8 @@
 # End-to-end encryption plan
 
-Status: **active**
+Status: **done**
 Created: **2026-08-19**
-Last updated: **2026-08-21**
+Last updated: **2026-08-23**
 
 ## Goal
 
@@ -36,17 +36,27 @@ untrusted fallback instead of a component to be deleted.
 
 ### The code
 
-Four words from the BIP-39 English wordlist: `crossover-clockwork-ridge-atlas`.
+A code reads `7F2A91-crossover-clockwork-ridge`: a nameplate the relay
+allocates, followed by three words from the BIP-39 English wordlist.
 
-- 2048^4 ≈ 44 bits. Well above the 24 bits of today's six hex characters, which
-  matters more than it used to: [`../decisions.md`](../decisions.md) entry 10
-  publishes a DHT record under a key derived from this code, so a guessable
-  code leaks the sender's address even though the PAKE protects the bytes.
+**The two halves have to be different bytes.** Only the nameplate is sent to
+the relay, and it carries nothing but routing. The words are the PAKE password
+and never leave either client. This section originally made the whole code the
+password and also handed it to the relay, which is broken — a relay holding the
+password runs the exchange against both peers at once and reads and rewrites
+everything in the middle. Caught during implementation on 2026-08-21 and
+recorded in [`../decisions.md`](../decisions.md) entry 7.
+
+- 2048^3 = 33 bits in the words. That is small, and it is sufficient only
+  because the PAKE gives an attacker one online guess before the session burns.
 - BIP-39 is chosen for speakability and because every word has a unique 4-letter
   prefix, which makes prefix-completion on entry possible later.
 - Case-insensitive on entry, and normalised before use as the PAKE password.
   This also fixes the recorded bug where `drop recv 4607f9` is rejected while
   `4607F9` succeeds.
+- The nameplate stays the relay's existing six uppercase hex characters,
+  allocated in
+  [`session_service.rs`](../../src/services/session_service.rs).
 
 ### Handshake
 
@@ -183,12 +193,11 @@ second implementation to keep byte-identical. The reasoning and its cost are in
 
 ### Phase 5 — Documentation
 
-- [ ] Replace the AGENTS.md invariant with the claim agreed in Phase 0. Held
-      until Phase 4: while the browser client cannot do a sealed transfer at
-      all, a claim covering it would be false.
+- [x] Replaced the AGENTS.md invariant with the narrower claim from entry 7.
+      Held until Phase 4: while the browser client could not do a sealed
+      transfer at all, a claim covering it would have been false.
 - [x] Rewrote the README privacy section and
       [`../security.md`](../security.md), CLI and browser cases separated.
-- [x] Replaced the AGENTS.md invariant with the narrower claim from entry 7.
 - [x] Update [`../protocol.md`](../protocol.md).
 
 ## Risks
@@ -198,7 +207,7 @@ second implementation to keep byte-identical. The reasoning and its cost are in
   implies browser transfers are as strong as CLI transfers is worse than
   claiming nothing.
 - **Retry defeats the PAKE.** If a failed handshake leaves the code usable, an
-  attacker gets unlimited guesses against 44 bits. The session must burn.
+  attacker gets unlimited guesses against 33 bits. The session must burn.
 - **Nonce reuse** is catastrophic. The counter must be structurally incapable
   of wrapping and must never restart within a session — this constrains the
   resume design, which cannot simply reset the counter on reconnect.
@@ -243,6 +252,8 @@ the UI layer, not "works".
   the name is hidden.
 - Should a receiver that has the code but meets a version it cannot speak be
   told to upgrade, naming the version it saw?
-- Four words is a guess at the speakability/entropy balance. Three (33 bits) is
-  meaningfully easier to read aloud and probably still enough given the PAKE;
-  revisit once the DHT exposure in entry 10 is measured rather than assumed.
+- The nameplate is 24 bits and public, so it is enumerable. That costs nothing
+  while it only names a relay session, but
+  [`peer-to-peer-transport-plan-2026-08-20.md`](peer-to-peer-transport-plan-2026-08-20.md)
+  publishes a DHT record under it, and enumeration there discloses the sender's
+  address. Settle the nameplate's entropy in that plan, not this one.

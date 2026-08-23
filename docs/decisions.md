@@ -226,6 +226,14 @@ signed node address to the mainline DHT under that key via `pkarr`, and the
 receiver resolves it. No Drop-operated server is involved in a peer-to-peer
 transfer.
 
+**Amended 2026-08-23: the keypair is derived from the nameplate, not the whole
+code.** Entry 7 splits the code into a public nameplate and secret words, and a
+DHT record keyed on the secret half would let anyone grind the word space
+offline against a public record. Only the nameplate may be published. The
+consequences paragraph below still describes the pre-split design where the
+whole code is the DHT key; the disclosure it names is real either way, but it
+is enumeration of the nameplate that causes it.
+
 The existing WebSocket relay is not removed. It becomes the fallback path for
 the cases the peer-to-peer path cannot serve, and it is no longer trusted with
 plaintext because of entry 7.
