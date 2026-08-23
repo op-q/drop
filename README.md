@@ -83,9 +83,12 @@ written straight to disk. The code is printed on stdout by itself, so it can be
 piped, while the progress display goes to stderr.
 
 Nothing that already exists in the destination is replaced unless `--force` is
-given: a skipped entry is reported and extraction continues. The sender picks
-the paths inside the archive, so overwriting what the receiver already has is
-not a decision the other end gets to make silently.
+given. A single file whose name is taken is saved beside the original with a
+number added, so `report.pdf` arriving twice leaves `report.pdf` and
+`report-1.pdf`; inside an archive, a colliding entry is skipped, reported, and
+extraction continues. The sender picks the paths, so overwriting what the
+receiver already has is not a decision the other end gets to make silently —
+and neither is abandoning a transfer that is otherwise fine.
 
 | Option | Applies to | Purpose |
 | --- | --- | --- |
@@ -121,7 +124,8 @@ every path inside it:
   the destination even when every path is lexically clean;
 - a symlink is refused if its target leaves the destination, evaluated against
   what is on disk rather than against the target's text alone;
-- existing files are kept unless `--force` is given;
+- existing files are kept unless `--force` is given, with a single file's name
+  numbered rather than the transfer refused;
 - permission bits are masked to the ownership bits, so an archive cannot set
   setuid, setgid, or sticky;
 - a compressed payload that expands more than a hundredfold is abandoned rather
