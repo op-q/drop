@@ -1,9 +1,15 @@
 [workspace]
 members = ["cli"]
 
+# One version for the whole workspace. Every member inherits it, so the relay
+# and the CLI cannot drift apart and there is a single line to bump before a
+# release.
+[workspace.package]
+version = "0.1.1"
+
 [package]
 name = "api"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 rust-version = "1.85"
 description = "An ephemeral real-time file-transfer relay built with Rust and WebSockets"
