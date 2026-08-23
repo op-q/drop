@@ -3,7 +3,7 @@
 use std::{
     error::Error,
     fs,
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -38,6 +38,13 @@ const MAX_EXPANSION_RATIO: u64 = 100;
 /// Expansion allowance for a payload small enough that the ratio would be
 /// needlessly strict.
 const MIN_EXPANSION_ALLOWANCE: u64 = 1024 * 1024 * 1024;
+
+/// How many numbered alternatives to try before refusing a name.
+///
+/// One collision is ordinary. A thousand means something is producing files
+/// faster than anyone is consuming them, and counting upwards forever would
+/// hide that rather than report it.
+const MAX_NAME_ATTEMPTS: u32 = 1000;
 
 /// How much compressed input is handed to the decompressor at a time.
 ///
@@ -262,18 +269,84 @@ fn open_target(
         safe_name = strip_gz(&safe_name).to_string();
     }
 
-    let path = options.out_dir.join(&safe_name);
+    let requested = options.out_dir.join(&safe_name);
 
-    if path.exists() && !options.force {
-        return Err(format!(
-            "{} already exists; pass --force to overwrite it or --out to choose another directory",
-            path.display()
-        )
-        .into());
+    if options.force {
+        let file = fs::File::create(&requested)?;
+        return Ok(Target::File {
+            path: requested,
+            file,
+        });
     }
 
-    let file = fs::File::create(&path)?;
+    let (path, file) = create_new_file(&options.out_dir, &safe_name)?;
+
+    if path != requested {
+        eprintln!(
+            "{} already exists; saving as {} instead",
+            safe_name,
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+        );
+    }
+
     Ok(Target::File { path, file })
+}
+
+/// Creates the destination file, adding `-1`, `-2`, and so on to the name when
+/// it is already taken.
+///
+/// The sender chooses this name and the receiver is often not watching the
+/// terminal, so a collision must neither replace what is already on disk nor
+/// abandon a transfer that is otherwise fine. Refusing used to do the latter:
+/// the receiver gave up before a byte moved, dropped the socket, and the sender
+/// was told its peer had disconnected.
+///
+/// `create_new` makes the test and the creation one atomic step, so two
+/// receives running side by side cannot settle on the same path — which the
+/// previous `exists()` check could not guarantee.
+fn create_new_file(dir: &Path, name: &str) -> io::Result<(PathBuf, fs::File)> {
+    for attempt in 0..=MAX_NAME_ATTEMPTS {
+        let candidate = if attempt == 0 {
+            name.to_string()
+        } else {
+            numbered_name(name, attempt)
+        };
+        let path = dir.join(candidate);
+
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!("{name} and its first {MAX_NAME_ATTEMPTS} numbered alternatives all exist"),
+    ))
+}
+
+/// Turns `report.pdf` into `report-1.pdf`.
+///
+/// The number goes before the extension so the file still opens with the
+/// application the receiver expects.
+fn numbered_name(name: &str, attempt: u32) -> String {
+    let path = Path::new(name);
+
+    match (
+        path.file_stem().and_then(|stem| stem.to_str()),
+        path.extension().and_then(|extension| extension.to_str()),
+    ) {
+        (Some(stem), Some(extension)) => format!("{stem}-{attempt}.{extension}"),
+        (Some(stem), None) => format!("{stem}-{attempt}"),
+        _ => format!("{name}-{attempt}"),
+    }
 }
 
 /// Feeds received bytes through the optional decompressor into the target.
@@ -360,6 +433,61 @@ fn report(target: &Target, received: u64) {
 
 fn strip_gz(filename: &str) -> &str {
     filename.strip_suffix(".gz").unwrap_or(filename)
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::{create_new_file, numbered_name};
+
+    #[test]
+    fn puts_the_number_before_the_extension() {
+        assert_eq!(numbered_name("report.pdf", 1), "report-1.pdf");
+        assert_eq!(numbered_name("archive.tar.gz", 2), "archive.tar-2.gz");
+    }
+
+    #[test]
+    fn numbers_a_name_that_has_no_extension() {
+        assert_eq!(numbered_name("notes", 3), "notes-3");
+    }
+
+    #[test]
+    fn treats_a_leading_dot_as_part_of_the_name() {
+        assert_eq!(numbered_name(".bashrc", 1), ".bashrc-1");
+    }
+
+    #[test]
+    fn walks_past_every_taken_name() {
+        let dir = std::env::temp_dir().join(format!("drop-name-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+
+        let (first, _) = create_new_file(&dir, "report.pdf").expect("first");
+        let (second, _) = create_new_file(&dir, "report.pdf").expect("second");
+        let (third, _) = create_new_file(&dir, "report.pdf").expect("third");
+
+        assert_eq!(first.file_name().unwrap(), "report.pdf");
+        assert_eq!(second.file_name().unwrap(), "report-1.pdf");
+        assert_eq!(third.file_name().unwrap(), "report-2.pdf");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn never_replaces_an_existing_file() {
+        let dir = std::env::temp_dir().join(format!("drop-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        std::fs::write(dir.join("report.pdf"), b"mine, already here").expect("existing file");
+
+        let (path, _) = create_new_file(&dir, "report.pdf").expect("a free name");
+
+        assert_ne!(path.file_name().unwrap(), "report.pdf");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("report.pdf")).expect("read"),
+            "mine, already here",
+            "the receiver's own file must survive"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 #[cfg(test)]

@@ -102,6 +102,24 @@ Recorded so they are not rediscovered as new ideas. None are committed work.
   Fixing it needs a way to show the change worked, which the upload side had
   and this side does not. See the Phase 3 finding in
   [`plans/relay-teardown-drain-plan-2026-08-19.md`](plans/relay-teardown-drain-plan-2026-08-19.md).
+- **Lowercase session codes are rejected.** `drop recv 4607f9` returns
+  `invalid session code` while `4607F9` succeeds. The relay stores codes
+  uppercase and `encode_code` in [`client.rs`](../cli/src/client.rs) filters to
+  alphanumerics without normalising case. A two-line client-side fix, and one
+  every user hits once.
+- **`receiver disconnected` is the sender's message for any receiver-side
+  failure.** The receiver returns an error and drops the socket, so the relay
+  can only report a disconnect — the sender learns nothing about what actually
+  went wrong. Numbering colliding filenames removed the most common trigger,
+  but the message is still misleading for every other receiver-side failure.
+  The fix is for the receiver to send an `error` control frame before closing;
+  it overlaps with the decline path in
+  [`plans/receiver-confirmation-plan-2026-08-19.md`](plans/receiver-confirmation-plan-2026-08-19.md),
+  which also needs the sender to distinguish outcomes it currently cannot.
+- **The published binary reports the wrong version.** `v0.1.1` shipped while
+  `version` in `Cargo.toml` still reads `0.1.0`, so `drop --version` disagrees
+  with the tag it was built from. Worth a version bump plus a release-workflow
+  check that the tag and the manifest match, since this recurs every release.
 - **Prometheus text** from `/metrics`, which currently returns a JSON snapshot.
 - **A first transfer shakeout run** using
   [`validation/transfer-shakeout-template.md`](validation/transfer-shakeout-template.md).

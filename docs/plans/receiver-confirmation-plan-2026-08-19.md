@@ -45,10 +45,16 @@ misleading the reader changes what they authorize. The web client escapes by
 default; a terminal does not.
 
 **The destination file is created before any prompt could run.** `open_target`
-at [`recv.rs:117`](../../cli/src/recv.rs#L117) runs as soon as metadata
-arrives, and it also performs the exists-check and honors `--force`. A prompt
-placed after it would leave a zero-byte file behind on decline and would run
-the overwrite logic before the user agreed to anything.
+in [`recv.rs`](../../cli/src/recv.rs) runs as soon as metadata arrives, and it
+also resolves the final name and honors `--force`. A prompt placed after it
+would leave a zero-byte file behind on decline and would run the overwrite
+logic before the user agreed to anything.
+
+Name-collision handling makes this sharper rather than softer. The receiver now
+creates the file with `create_new`, numbering the name when it is taken, so a
+prompt placed after `open_target` would leave an empty `report-1.pdf` behind on
+decline *and* consume that name. The prompt has to come first, and the preview
+should show the name the file will actually be saved under.
 
 **A human pause outlives the session, not the socket.** The socket survives
 fine: the 45-second idle timeout at
