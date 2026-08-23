@@ -19,8 +19,33 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # v0.1.1 shipped a binary that reports 0.1.0, because the manifest was never
+  # bumped and nothing compared the two. A `drop --version` that disagrees with
+  # the tag it was built from is only ever discovered by a user, so the release
+  # stops here rather than producing one.
+  verify:
+    name: Tag matches the manifest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Compare the tag with the workspace version
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "tag=$tag manifest=$version"
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::tag $tag does not match the workspace version $version in Cargo.toml. Bump the version before tagging."
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: verify
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
