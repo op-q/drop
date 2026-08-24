@@ -308,3 +308,53 @@ than yielding a module with no entropy, and `web/tests/envelope.test.mjs` pins
 that property by asserting two handshakes differ. Interoperation in both
 directions is held by `web/tests/interop.test.mjs`, which runs a real relay and
 the real CLI.
+
+## 12. The control vocabulary is the peer's, and a relay only embellishes it
+
+**Decision.** The transfer paths speak the vocabulary two peers use with each
+other. Anything a relay adds, renames, or invents is treated as that relay's
+embellishment: understood where it appears, never required.
+
+Concretely, the sender now accepts the receiver's own frames as well as the
+relay's rewording of them, and the wait for the peer to arrive stops being a
+frame at all:
+
+| The receiver sends | A relay turns it into | The sender accepts |
+| --- | --- | --- |
+| `chunk_ack` | `ack` | both |
+| `complete` with `bytes_received` | `status: transfer_complete` | both |
+| — | `status: receiver_connected` | neither — see below |
+| — | `status: sending` | neither; already ignored |
+
+`receiver_connected` is not a frame the sender waits for any more. Whether a
+peer must be waited for is a property of the carrier — a relay session exists
+before either side joins and can say so; a QUIC connection is a connection to
+somebody and cannot — so it is `Transport::await_peer`, a method the relay
+transport implements by waiting and a direct transport answers immediately.
+
+**Why this and not the alternative.** The other option was to have each new
+transport synthesize the relay's statuses, so every carrier presents one
+vocabulary. That is a smaller change and it keeps the relay path frozen, but it
+makes the relay's accidents into the protocol: a direct connection would be
+manufacturing a `receiver_connected` for nobody, and every future transport
+would inherit the obligation. The relay is meant to be the fallback, so its
+wording should not be the standard the fallback-free path has to imitate.
+
+**What it costs.** The sender validates the receiver's byte count itself when
+the count arrives directly. The relay was doing that check before it reworded
+the frame, and without it a direct transfer would report success on the
+receiver's unchecked word — a weaker promise than the relayed path already
+makes. That check now exists in two places, which is the price of the relay
+staying trustworthy about its own path while not being required for the other.
+
+**What it does not change.** Nothing on the wire. The relay sends exactly what
+it sent before and no released client is affected; this widens what a sender
+understands rather than narrowing what anything may send. It is not a breaking
+change and needs no version bump.
+
+**Consequences.** `protocol.md` now states the peer vocabulary and the relay's
+embellishments separately, so a third client written against it will
+interoperate over either carrier. `wait_for_receiver` is gone from the send
+path. The receive path needed no changes at all: the receiver was already
+speaking peer vocabulary, and only the sender was listening for things the
+relay had invented.

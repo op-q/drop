@@ -108,7 +108,8 @@ async fn send_transfer<T: Transport>(
     payload: Payload,
     sealed_size: u64,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    wait_for_receiver(transport).await?;
+    transport.await_peer().await?;
+    eprintln!("Receiver connected.");
 
     let keys = exchange_keys(transport, code).await?;
     let mut sealer = crypto::Sealer::new(&keys, payload.size);
@@ -143,36 +144,11 @@ async fn send_transfer<T: Transport>(
         return Err(error);
     }
 
-    await_completion(transport).await?;
+    await_completion(transport, sealed_size).await?;
     transport.close().await;
 
     eprintln!("Sent {}.", crate::progress::format_bytes(total));
     Ok(())
-}
-
-async fn wait_for_receiver<T: Transport>(
-    transport: &mut T,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    while let Some(frame) = transport.receive().await? {
-        let Frame::Control(payload) = frame else {
-            continue;
-        };
-
-        match payload["type"].as_str() {
-            Some("status") => {
-                if payload["status"].as_str() == Some("receiver_connected") {
-                    eprintln!("Receiver connected.");
-                    return Ok(());
-                }
-            }
-            Some("error") => {
-                return Err(relay_error(&payload).into());
-            }
-            _ => {}
-        }
-    }
-
-    Err("the relay closed the connection before a receiver joined".into())
 }
 
 /// Runs the key exchange and returns the derived session keys.
@@ -280,7 +256,10 @@ async fn next_acknowledgement<T: Transport>(
         };
 
         match payload["type"].as_str() {
-            Some("ack") => {
+            // `chunk_ack` is what the receiver actually sends. The relay
+            // renames it to `ack` on the way through, so both are the same
+            // sentence and which one arrives says only what carried it.
+            Some("ack") | Some("chunk_ack") => {
                 if let Some(bytes) = payload["bytes_received"].as_u64() {
                     return Ok(bytes.max(current));
                 }
@@ -293,8 +272,18 @@ async fn next_acknowledgement<T: Transport>(
     Err("the transfer connection closed before the receiver acknowledged the file".into())
 }
 
+/// Waits for the receiver to confirm it has the whole payload.
+///
+/// Two frames mean this, and which one arrives depends only on what carried
+/// the transfer. The receiver's own word is `complete`, carrying the count it
+/// wrote; a relay consumes that, checks the count itself, and reports
+/// `transfer_complete` instead. Over a direct connection there is nobody in
+/// between to do the checking, so this does it here — otherwise the direct
+/// path would report success on a receiver's word alone, which is a weaker
+/// promise than the relayed path already makes.
 async fn await_completion<T: Transport>(
     transport: &mut T,
+    declared: u64,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     eprintln!("Waiting for the receiver to finish writing...");
 
@@ -304,6 +293,18 @@ async fn await_completion<T: Transport>(
         };
 
         match payload["type"].as_str() {
+            Some("complete") => {
+                let confirmed = payload["bytes_received"].as_u64().unwrap_or(0);
+
+                if confirmed != declared {
+                    return Err(format!(
+                        "the receiver confirmed {confirmed} bytes but {declared} were sent"
+                    )
+                    .into());
+                }
+
+                return Ok(());
+            }
             Some("status") => match payload["status"].as_str() {
                 Some("transfer_complete") => return Ok(()),
                 Some("cancelled") => {
@@ -328,37 +329,31 @@ fn relay_error(payload: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{await_completion, next_acknowledgement, wait_for_receiver};
+    use super::{await_completion, next_acknowledgement};
     use crate::transport::scripted::ScriptedTransport;
     use serde_json::json;
 
     /// The sender's paths run over a transport that is not a socket, which is
     /// the whole claim the trait makes.
+    ///
+    /// `chunk_ack` is the receiver's own word and arrives unchanged over a
+    /// direct connection; `ack` is the relay's rewording of the same thing.
+    /// The sender must not care which one it got.
     #[tokio::test]
-    async fn waits_past_frames_that_are_not_the_one_it_needs() {
-        let mut transport = ScriptedTransport::saying(vec![
-            json!({ "type": "status", "status": "waiting_for_receiver" }),
-            json!({ "type": "progress", "bytes_transferred": 0 }),
-            json!({ "type": "status", "status": "receiver_connected" }),
-        ]);
+    async fn an_acknowledgement_counts_under_either_name() {
+        for name in ["ack", "chunk_ack"] {
+            let mut transport =
+                ScriptedTransport::saying(vec![json!({ "type": name, "bytes_received": 90 })]);
 
-        wait_for_receiver(&mut transport)
-            .await
-            .expect("the receiver did connect");
+            let acknowledged = next_acknowledgement(&mut transport, 40)
+                .await
+                .expect("an acknowledgement arrived");
+            assert_eq!(acknowledged, 90, "under the name {name}");
+        }
     }
 
-    #[tokio::test]
-    async fn a_peer_that_stops_before_the_receiver_arrives_is_an_error() {
-        let mut transport = ScriptedTransport::silent();
-
-        let error = wait_for_receiver(&mut transport)
-            .await
-            .expect_err("a peer that says nothing cannot have connected a receiver");
-        assert!(error.to_string().contains("before a receiver joined"));
-    }
-
-    /// Acknowledgements only ever move forward. A relayed one that is behind
-    /// what the sender already counted would otherwise reopen the window.
+    /// Acknowledgements only ever move forward. One that is behind what the
+    /// sender already counted would otherwise reopen the window.
     #[tokio::test]
     async fn an_acknowledgement_never_moves_backwards() {
         let mut transport =
@@ -370,13 +365,49 @@ mod tests {
         assert_eq!(acknowledged, 40);
     }
 
+    /// The relay checks the receiver's count before rewording it. Directly,
+    /// there is nobody in between, so the sender checks it.
+    #[tokio::test]
+    async fn a_receiver_confirming_the_whole_payload_completes_the_transfer() {
+        let mut transport =
+            ScriptedTransport::saying(vec![json!({ "type": "complete", "bytes_received": 4096 })]);
+
+        await_completion(&mut transport, 4096)
+            .await
+            .expect("the receiver confirmed everything that was sent");
+    }
+
+    #[tokio::test]
+    async fn a_receiver_confirming_less_than_was_sent_is_not_a_completion() {
+        let mut transport =
+            ScriptedTransport::saying(vec![json!({ "type": "complete", "bytes_received": 4000 })]);
+
+        let error = await_completion(&mut transport, 4096)
+            .await
+            .expect_err("a short confirmation is not a success");
+        assert!(error.to_string().contains("4000"), "unexpected: {error}");
+    }
+
+    /// The relay's rewording still means the same thing, and it carries no
+    /// count of its own because the relay already checked it.
+    #[tokio::test]
+    async fn the_relays_rewording_completes_the_transfer_too() {
+        let mut transport = ScriptedTransport::saying(vec![
+            json!({ "type": "status", "status": "transfer_complete" }),
+        ]);
+
+        await_completion(&mut transport, 4096)
+            .await
+            .expect("the relay confirmed the transfer");
+    }
+
     #[tokio::test]
     async fn an_error_frame_ends_the_wait_with_its_message() {
         let mut transport = ScriptedTransport::saying(vec![
             json!({ "type": "error", "message": "receiver disconnected" }),
         ]);
 
-        let error = await_completion(&mut transport)
+        let error = await_completion(&mut transport, 4096)
             .await
             .expect_err("an error frame is not a completion");
         assert!(error.to_string().contains("receiver disconnected"));
@@ -387,7 +418,7 @@ mod tests {
         let mut transport =
             ScriptedTransport::saying(vec![json!({ "type": "status", "status": "cancelled" })]);
 
-        let error = await_completion(&mut transport)
+        let error = await_completion(&mut transport, 4096)
             .await
             .expect_err("a cancellation is not a completion");
         assert!(error.to_string().contains("cancelled"));

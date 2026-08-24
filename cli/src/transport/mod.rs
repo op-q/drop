@@ -46,14 +46,19 @@ pub enum TransportError {
     /// The peer sent something this transport could not decode. Distinct from
     /// `Io` because it is a peer's mistake rather than the network's.
     Malformed(String),
+    /// The far side refused the transfer and said why. The message is theirs
+    /// and is passed through verbatim, because it is more specific than
+    /// anything this layer could say about it.
+    Refused(String),
 }
 
 impl fmt::Display for TransportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Connect(message) | Self::Io(message) | Self::Malformed(message) => {
-                write!(formatter, "{message}")
-            }
+            Self::Connect(message)
+            | Self::Io(message)
+            | Self::Malformed(message)
+            | Self::Refused(message) => write!(formatter, "{message}"),
         }
     }
 }
@@ -68,6 +73,22 @@ impl std::error::Error for TransportError {}
 /// future it returns, so leaving it out would make the caller's future
 /// unspawnable for reasons that point at the call site rather than at here.
 pub trait Transport {
+    /// Waits until the peer is present.
+    ///
+    /// A carrier that cannot exist without a peer answers immediately — a QUIC
+    /// connection is a connection to somebody — so that is the default. A
+    /// relay session exists before either side joins, and its transport waits
+    /// for the relay to say the other one arrived.
+    ///
+    /// This is a method rather than a frame the path waits for, and the
+    /// distinction is the point. `receiver_connected` is a sentence the relay
+    /// invents; no peer ever sends it. A path that blocked on it would be a
+    /// path that only works over a relay, which is exactly what this phase is
+    /// undoing.
+    fn await_peer(&mut self) -> impl Future<Output = Result<(), TransportError>> + Send {
+        async { Ok(()) }
+    }
+
     /// Sends a control frame.
     fn send_control(
         &mut self,

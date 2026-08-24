@@ -108,7 +108,10 @@ cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
       the plan: establishing a connection is deliberately not on the trait, and
       the relay turns out to rename and invent control frames, so Phase 2 has
       to decide who does that over a direct connection.
-- [ ] Phase 2 — `iroh` QUIC transport
+- [ ] Phase 2 — `iroh` QUIC transport. The control vocabulary it needs is
+      settled: [`decisions.md`](decisions.md) entry 12 makes the peer's frames
+      canonical and a relay's wording an embellishment, so the direct path has
+      nothing left to imitate. The connection itself is what remains.
 - [ ] Phase 3 — rendezvous: code-derived keypair, `pkarr` publish and resolve
 - [ ] Phase 4 — selection, automatic fallback, and reporting the path taken
 - [ ] Phase 5 — documentation, including the DHT address-disclosure weakness

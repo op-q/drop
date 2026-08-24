@@ -114,6 +114,37 @@ existed — the transfer stalled with no error on either side until the session
 expired. That is what the refusal replaces, and it is why the receiver replies
 rather than opens.
 
+## The peer vocabulary, and what the relay adds to it
+
+A transfer is a conversation between two peers. The relay carries it, and it
+also embellishes it: it renames two frames and invents two more. Both are
+listed here so a third client interoperates over either carrier, and so that
+nothing below is mistaken for something a peer said.
+
+| Frame | Who produces it | Meaning |
+| --- | --- | --- |
+| `key_exchange` | either peer | Forwarded verbatim |
+| `meta` | the sender | Forwarded verbatim |
+| binary chunks | the sender | Forwarded verbatim |
+| `chunk_ack` | the receiver | The relay renames it `ack` for the sender |
+| `complete` (sender) | the sender | All declared bytes are sent |
+| `complete` (receiver, with `bytes_received`) | the receiver | The relay checks the count, then reports `status: transfer_complete` instead |
+| `status: receiver_connected` | **the relay** | Invented. No peer sends it |
+| `status: waiting_for_sender` / `waiting_for_receiver` | **the relay** | Invented |
+| `status: sending` | **the relay** | Invented |
+| `progress` | **the relay** | Invented; advisory, and safe to ignore |
+
+A sender must accept the receiver's `chunk_ack` and `complete` as well as the
+relay's `ack` and `status: transfer_complete`, because which one arrives says
+only what carried the transfer. A sender that accepts a receiver's `complete`
+must check `bytes_received` against what it sent: over the relay that check is
+already done before the rewording, and skipping it directly would report
+success on an unchecked claim.
+
+A sender must **not** require `status: receiver_connected`. Whether the peer
+has to be waited for at all is a property of the carrier, not of the protocol.
+Recorded as entry 12 in [`decisions.md`](decisions.md).
+
 ## Sender to relay
 
 Text frames, tagged JSON:

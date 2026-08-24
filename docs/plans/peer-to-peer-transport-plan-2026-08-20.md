@@ -132,9 +132,28 @@ wrong rather than merely imprecise.
 
 ### Phase 2 — QUIC transport
 
+- [x] **Settle the control vocabulary first.** Decided 2026-08-24 and recorded
+      as [`../decisions.md`](../decisions.md) entry 12: the paths speak the
+      peer's vocabulary and a relay only embellishes it. The sender accepts
+      `chunk_ack` and the receiver's `complete` alongside the relay's `ack` and
+      `status: transfer_complete`, and checks the byte count itself when it
+      arrives directly. Waiting for the peer became `Transport::await_peer`,
+      because whether a peer must be waited for is a property of the carrier
+      rather than of the protocol. Nothing on the wire changed, so no released
+      client is affected.
+
+      The receive path needed no changes at all — the receiver already spoke
+      peer vocabulary, and only the sender was listening for things the relay
+      invented. That is the strongest evidence available that this was the
+      right half of the seam to move.
 - [ ] `iroh` (1.0) endpoint, one bidirectional stream per transfer.
 - [ ] Map the existing control messages onto the stream framing.
 - [ ] Direct connection and n0-relay-assisted connection both exercised.
+
+The remaining work is the connection itself. The framing question is now
+narrow: chunks and control frames share one bidirectional stream, so the
+transport needs a length-prefixed envelope that distinguishes the two — the
+WebSocket gave that away for free in its text/binary opcode, and QUIC does not.
 
 ### Phase 3 — Rendezvous
 

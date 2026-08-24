@@ -64,7 +64,53 @@ async fn open(origin: &str, path: &str) -> Result<RelayTransport, TransportError
     Ok(RelayTransport { socket })
 }
 
+/// What a frame means to a sender that is still waiting for its peer.
+enum WhileWaiting {
+    /// The receiver has joined.
+    PeerArrived,
+    /// The relay refused the transfer, and this is what it said.
+    Refused(String),
+    /// Progress, heartbeats, the relay narrating itself. Keep waiting.
+    KeepWaiting,
+}
+
+/// Split out from the wait so it can be tested without a relay to talk to.
+fn while_waiting(payload: &Value) -> WhileWaiting {
+    match payload["type"].as_str() {
+        Some("status") if payload["status"].as_str() == Some("receiver_connected") => {
+            WhileWaiting::PeerArrived
+        }
+        Some("error") => WhileWaiting::Refused(
+            payload["message"]
+                .as_str()
+                .unwrap_or("the relay reported an error")
+                .to_string(),
+        ),
+        _ => WhileWaiting::KeepWaiting,
+    }
+}
+
 impl Transport for RelayTransport {
+    /// A relay session outlives neither peer but precedes both, so the sender
+    /// has to be told when the other side turns up.
+    async fn await_peer(&mut self) -> Result<(), TransportError> {
+        while let Some(frame) = self.receive().await? {
+            let Frame::Control(payload) = frame else {
+                continue;
+            };
+
+            match while_waiting(&payload) {
+                WhileWaiting::PeerArrived => return Ok(()),
+                WhileWaiting::Refused(message) => return Err(TransportError::Refused(message)),
+                WhileWaiting::KeepWaiting => {}
+            }
+        }
+
+        Err(TransportError::Io(
+            "the relay closed the connection before a receiver joined".into(),
+        ))
+    }
+
     async fn send_control(&mut self, frame: Value) -> Result<(), TransportError> {
         self.socket
             .send(Message::Text(frame.to_string().into()))
@@ -131,7 +177,8 @@ fn websocket_origin(origin: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_nameplate, websocket_origin};
+    use super::{WhileWaiting, encode_nameplate, websocket_origin, while_waiting};
+    use serde_json::json;
 
     #[test]
     fn maps_origins_onto_matching_websocket_schemes() {
@@ -143,6 +190,36 @@ mod tests {
             websocket_origin("http://localhost:8080"),
             "ws://localhost:8080"
         );
+    }
+
+    #[test]
+    fn only_the_receivers_arrival_ends_the_wait() {
+        assert!(matches!(
+            while_waiting(&json!({ "type": "status", "status": "receiver_connected" })),
+            WhileWaiting::PeerArrived
+        ));
+
+        for narration in [
+            json!({ "type": "status", "status": "waiting_for_receiver" }),
+            json!({ "type": "progress", "bytes_transferred": 0 }),
+            json!({ "type": "status", "status": "sending" }),
+        ] {
+            assert!(
+                matches!(while_waiting(&narration), WhileWaiting::KeepWaiting),
+                "the relay narrating itself is not a receiver: {narration}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_is_passed_through_in_the_relays_own_words() {
+        let WhileWaiting::Refused(message) =
+            while_waiting(&json!({ "type": "error", "message": "invalid session code" }))
+        else {
+            panic!("an error frame is a refusal");
+        };
+
+        assert_eq!(message, "invalid session code");
     }
 
     #[test]
