@@ -234,6 +234,94 @@ reports success after the receiver's final count matches the declared size,
 which is why a transfer is confirmed by the receiver rather than assumed by the
 sender.
 
+## The envelope
+
+What is inside the frames above. A relay never needs this section; a second
+client implementation needs all of it.
+
+### Key schedule
+
+```text
+code = NAMEPLATE-word-word-word
+       ^^^^^^^^^ public, routes            ^^^^^^^^^^^^^^^ secret, authenticates
+
+password = the three words, ASCII, dash-separated, lowercase
+identity = "drop/v1/transfer/" + nameplate
+
+SPAKE2 (Ed25519 group, symmetric mode, password, identity)
+   └─ both peers exchange one message and agree on a shared secret
+
+HKDF-SHA256 over that secret, no salt, three expansions:
+   info "drop/v1/chunk" -> chunk_key  32 bytes
+   info "drop/v1/meta"  -> meta_key   32 bytes
+   info "drop/v1/salt"  -> salt        4 bytes
+```
+
+Symmetric mode is used because either peer may connect first and the protocol
+has no natural A/B assignment. The identity binds a handshake to one session:
+the nameplate is public so it adds no secrecy, but it stops a relay running two
+sessions from splicing a message from one into the other.
+
+Completing the handshake does **not** prove the peer knew the code. A wrong
+password yields a well-formed message and a different key, which is detected
+when the sealed metadata fails to open.
+
+### Sealing
+
+AES-256-GCM throughout. The 96-bit nonce is structural, never random:
+
+```text
+nonce = salt(4 bytes) || counter(8 bytes, big-endian)
+
+  chunks    counter = 0, 1, 2, ... in order
+  metadata  counter = 2^64 - 1        cannot collide with any chunk
+```
+
+Every sealed frame carries 17 bytes of additional authenticated data —
+authenticated, not encrypted, and not transmitted, because both sides
+reconstruct it:
+
+```text
+aad = version(1 byte) || index(8 bytes, BE) || total(8 bytes, BE)
+
+  chunks    index = the chunk's counter,  total = total chunk count
+  metadata  index = 2^64 - 1,             total = the declared ciphertext size
+```
+
+Binding every chunk to both its own index and the total count is what makes
+four different attacks detectable:
+
+| Attack | Caught by |
+| --- | --- |
+| Modified bytes | the GCM tag |
+| Reordered chunks | the index in the AAD does not match the expected counter |
+| Duplicated chunk | same |
+| Truncated stream | the count of chunks opened against the authenticated `total` |
+
+Truncation is the one a per-chunk tag cannot catch alone: every chunk that did
+arrive is perfectly authentic. Only counting them against the total detects a
+stream that simply stopped.
+
+A nonce must never repeat under one key. The key here is freshly derived per
+transfer and the counter cannot wrap within a transfer, so repetition is
+impossible by construction rather than by luck — which is why a counter is used
+instead of random nonces, and why a future resume feature cannot simply restart
+the counter on reconnect.
+
+### Sizes
+
+| Value | Size |
+| --- | --- |
+| Plaintext chunk | 1 MiB, the last one shorter |
+| Sealed chunk | plaintext + 16 tag bytes |
+| Metadata plaintext | JSON of `{filename, mime_type, plaintext_size}` |
+| Metadata on the wire | hex of the sealed blob, inside `meta.metadata` |
+
+`meta.ciphertext_size` is the total sealed size and is what the relay meters,
+bounds, and acknowledges. The plaintext size travels **inside** the sealed
+metadata. Confusing the two stalls a transfer one authentication tag short of
+finishing.
+
 ## Framing, flow control, and limits
 
 | Property | Value | Source |

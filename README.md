@@ -168,14 +168,19 @@ Please report vulnerabilities privately according to the
 
 ## Architecture
 
-| Layer | Technology | Responsibility |
+| Component | Technology | Responsibility |
 | --- | --- | --- |
-| API | Rust, Axum | HTTP endpoints, WebSocket upgrades, static frontend |
-| Runtime | Tokio | async connections, channels, timeouts, cleanup |
-| State | in-memory store | active session metadata and connection channels |
+| Relay (`api`) | Rust, Axum | HTTP endpoints, WebSocket upgrades, static frontend |
+| CLI (`drop-cli`) | Rust, Tokio | the `drop` binary: sending, receiving, archiving |
+| Envelope (`drop-crypto`) | Rust | codes, key agreement, and the sealed chunk format |
+| Browser envelope | the same crate, compiled to WebAssembly | one implementation, two clients |
 | Web | Svelte, TypeScript, Vite | sender and receiver browser flows |
-| Envelope | Rust, compiled to WebAssembly | the same encryption in both clients |
+| State | in-memory store | active session metadata and connection channels |
 | Edge | Caddy or GKE Ingress | optional HTTPS termination and reverse proxy |
+
+The CLI does not depend on the relay: an installed `drop` binary contains no
+server code. What the two halves share is the envelope crate.
+[`docs/architecture.md`](docs/architecture.md) has the full picture.
 
 Each session connects:
 
@@ -185,13 +190,17 @@ Each session connects:
 
 The transfer flow is:
 
-1. `POST /api/session/create` creates a temporary session code.
-2. The sender connects to `/ws/upload/:code`.
-3. The receiver connects to `/ws/download/:code`.
-4. The sender provides metadata and streams binary frames.
-5. Drop forwards those frames to the receiver using a bounded in-flight window.
-6. The receiver acknowledges chunks after successful file writes.
-7. Drop reports success and destroys the session only after the receiver closes
+1. `POST /api/session/create` reserves a session and returns its nameplate — the
+   public half of the code. The sender draws the secret words locally.
+2. The sender connects to `/ws/upload/:nameplate`.
+3. The receiver connects to `/ws/download/:nameplate`.
+4. Both derive a shared key from the words, exchanging messages the relay
+   forwards but cannot use.
+5. The sender streams sealed chunks, preceded by sealed transfer details. The
+   relay sees a byte count and an opaque blob, never a filename.
+6. Drop forwards those frames to the receiver using a bounded in-flight window.
+7. The receiver acknowledges chunks after successful file writes.
+8. Drop reports success and destroys the session only after the receiver closes
    the completed file and confirms the final byte count.
 
 ### Transfer throughput
