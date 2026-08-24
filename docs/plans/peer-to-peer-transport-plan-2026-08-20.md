@@ -189,8 +189,13 @@ it shipped.
 
 ### Phase 3 — Rendezvous
 
-- [ ] Derive an ed25519 keypair from the **nameplate** by HKDF, domain-separated
+- [x] Derive an ed25519 seed from the **nameplate** by HKDF, domain-separated
       from every key in the encryption plan. Never from the words: see above.
+      Done 2026-08-24 as `crypto/src/rendezvous.rs`, with
+      `the_meeting_point_ignores_the_words` holding that property open. The
+      derivation takes a whole `TransferCode` rather than a string so the
+      nameplate is normalised — a receiver retyping it in lowercase has to
+      arrive where the sender published.
 - [ ] Sender publishes its `NodeAddr` as a `pkarr` record; receiver resolves.
 - [ ] Handle the publish/resolve latency honestly in the UI — this is seconds,
       not milliseconds, and the sender must not print "waiting" before the
@@ -213,6 +218,60 @@ it shipped.
 - [ ] `security.md`: the DHT address-disclosure weakness from entry 10, stated
       plainly.
 - [ ] `protocol.md`: the QUIC framing, so a third client can interoperate.
+
+## The unsolved problem: who enforces one guess when there is no relay
+
+Found 2026-08-24 while deriving the rendezvous key, and it must be settled
+before Phase 4 lets anyone use this path.
+
+The whole security argument for a 33-bit password is that an attacker gets
+**one** attempt. The plan above already says so. What it does not say is what
+enforces it, and the answer today is the relay: `claim_receiver` refuses a
+second claim on a session, so a wrong guess consumes the session and the real
+receiver is turned away. That is a server-side mechanism, and a serverless
+transfer does not have it.
+
+Without it the attack is straightforward and cheap:
+
+1. Enumerate a nameplate — 24 bits, and the DHT answers.
+2. Derive the same rendezvous keypair; the input is public, so this is free.
+3. Connect to the sender and run SPAKE2 with a guessed password.
+4. SPAKE2 reveals nothing on failure, but the sealed metadata does: it either
+   opens or it does not. That is one bit per attempt.
+5. Disconnect and repeat.
+
+An online oracle with no limit is not 33 bits of security, it is 33 bits of
+work at network speed. Nothing in the envelope prevents this, because the
+envelope was never what was providing the guarantee.
+
+**The proposed answer is that the sender enforces it.** The first peer to
+complete a key exchange is the transfer's one counterpart. If that peer fails
+to produce a valid acknowledgement, or disconnects mid-handshake, the sender
+stops rather than waiting for another connection. That reproduces exactly what
+the relay's single claim provided, on the only participant that a direct
+transfer is guaranteed to have.
+
+It carries the same cost the relay design already carries and already
+documents: an attacker who guesses a nameplate can burn a transfer without
+learning anything, which is denial of service. `security.md` says that of the
+relay path today, and it stays true here.
+
+Two details need deciding with it, and neither is obvious:
+
+- **Does a genuine mistype cost the sender the transfer?** Over the relay it
+  does, and that is consistent. But a receiver who fat-fingers a word now has
+  to ask the sender to start again, and over a direct connection there is no
+  relay error to explain why. Whatever the answer, the sender's message has to
+  say what happened.
+- **When does the sender consider a peer to have committed?** Completing the
+  SPAKE2 exchange is the earliest point, but an attacker can complete it
+  trivially — completing it proves nothing, which is the whole reason a wrong
+  password fails later at the metadata rather than at the handshake. The
+  honest trigger is the first sealed frame the peer either opens or does not,
+  which means the sender learns the outcome from the peer's behaviour after
+  `meta`, not from the handshake.
+
+Until this is settled, the QUIC path must not be reachable by default.
 
 ## Risks
 

@@ -114,7 +114,14 @@ cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
       exists and carries a complete transfer over an in-memory pipe with no
       relay, socket, or server in the path. The `iroh` connection itself is
       what remains.
-- [ ] Phase 3 — rendezvous: code-derived keypair, `pkarr` publish and resolve
+- [ ] Phase 3 — rendezvous: nameplate-derived keypair (done), `pkarr` publish
+      and resolve. **Blocked on a security question the derivation surfaced:**
+      the one-guess property that makes 33 bits defensible was enforced by the
+      relay refusing a second claim, and a serverless transfer has no relay to
+      do it. Without an answer the direct path is an unlimited online oracle.
+      Proposed answer and the two details it needs are in the plan under
+      "The unsolved problem". The QUIC path must not be reachable by default
+      until it is settled.
 - [ ] Phase 4 — selection, automatic fallback, and reporting the path taken
 - [ ] Phase 5 — documentation, including the DHT address-disclosure weakness
 
