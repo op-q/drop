@@ -6,7 +6,7 @@
 //! rather than at the handshake, because SPAKE2 does not reveal whether the
 //! password matched.
 //!
-//! **A failed handshake must consume the session.** The security of a 44-bit
+//! **A failed handshake must consume the session.** The security of a 33-bit
 //! code rests entirely on an attacker getting one guess. That guarantee is a
 //! property of how the transports use this module, not something this module
 //! can enforce on its own; see `docs/decisions.md` entry 7.
