@@ -146,14 +146,46 @@ wrong rather than merely imprecise.
       peer vocabulary, and only the sender was listening for things the relay
       invented. That is the strongest evidence available that this was the
       right half of the seam to move.
-- [ ] `iroh` (1.0) endpoint, one bidirectional stream per transfer.
-- [ ] Map the existing control messages onto the stream framing.
+- [x] **Map the control messages onto stream framing.** Done 2026-08-24 as
+      `cli/src/transport/framed.rs`, ahead of the connection rather than after
+      it, because the framing is the part that needs no network to test:
+
+      ```text
+      ┌──────┬────────────────┬─────────────────┐
+      │ kind │ length (BE u32)│ payload         │
+      │ 1 B  │ 4 B            │ `length` bytes  │
+      └──────┴────────────────┴─────────────────┘
+        0x01 control — UTF-8 JSON
+        0x02 chunk   — sealed bytes, opaque to the transport
+      ```
+
+      Written against `AsyncRead`/`AsyncWrite` rather than against QUIC, so the
+      QUIC transport becomes a thin wrapper and the framing itself is exercised
+      over an in-memory pipe. The length is read before the payload, so it is
+      an allocation request from an unauthenticated peer: it is checked against
+      a ceiling of one sealed chunk before a byte is read.
+
+      A stream that ends **between** frames is the peer finishing; one that
+      ends **inside** a header is a truncation. `read_exact` reports both as
+      `UnexpectedEof`, so the header read counts bytes itself — reporting a
+      truncation as a clean end would turn a cut-off transfer into a
+      successful-looking short read.
+- [x] **A whole transfer over a bare byte pipe**, sender to receiver, with no
+      relay and no socket in the path —
+      `a_whole_transfer_crosses_a_bare_byte_pipe`. This is the first transfer
+      in the project involving no Drop-operated process at all, and it also
+      pins entry 12: over a pipe the sender is ready immediately, hears the
+      receiver's own `chunk_ack`, and finishes on the receiver's own `complete`
+      after checking the count itself. If the sender still required the relay's
+      wording, it would hang.
+- [ ] `iroh` (1.0.3) endpoint, one bidirectional stream per transfer.
 - [ ] Direct connection and n0-relay-assisted connection both exercised.
 
-The remaining work is the connection itself. The framing question is now
-narrow: chunks and control frames share one bidirectional stream, so the
-transport needs a length-prefixed envelope that distinguishes the two — the
-WebSocket gave that away for free in its text/binary opcode, and QUIC does not.
+What remains is the connection itself: obtaining a `SendStream`/`RecvStream`
+pair from `iroh` and handing it to `FramedTransport`. The framing goes into
+[`../protocol.md`](../protocol.md) when that lands — not before, because
+`docs/README.md` requires that planned behaviour is never written up as though
+it shipped.
 
 ### Phase 3 — Rendezvous
 

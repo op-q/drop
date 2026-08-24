@@ -121,7 +121,7 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
 ///
 /// Written against the conversation rather than against a socket, so a second
 /// carrier is a different `T` and not a second copy of this function.
-async fn receive_transfer<T: Transport>(
+pub(crate) async fn receive_transfer<T: Transport>(
     transport: &mut T,
     code: &crypto::TransferCode,
     options: &ReceiveOptions,
