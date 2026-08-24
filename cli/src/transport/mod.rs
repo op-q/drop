@@ -1,0 +1,96 @@
+//! What a transfer needs from whatever is carrying it.
+//!
+//! A transfer is a conversation: control frames in both directions, sealed
+//! chunks in one, and an end. Everything above this module is written against
+//! that conversation rather than against a WebSocket, so the same send and
+//! receive paths can run over a different carrier without being rewritten.
+//!
+//! **Establishing a connection is deliberately not part of the trait.** The
+//! relay is reached at an origin URL with a nameplate it allocated over HTTP;
+//! a direct connection is reached by resolving a record and punching a hole.
+//! Those take arguments with nothing in common, so each transport module owns
+//! its own constructor and the choice between them belongs at the one call
+//! site that makes it. Forcing them into a shared signature would produce a
+//! parameter bag that every implementation ignores half of.
+//!
+//! The envelope does not appear here. Chunks arrive sealed and leave sealed,
+//! and a transport that could tell the difference would be a transport that
+//! could read the payload.
+
+use std::{fmt, future::Future};
+
+use serde_json::Value;
+
+pub mod relay;
+#[cfg(test)]
+pub mod scripted;
+
+/// One thing a peer said.
+///
+/// Control frames are modelled as JSON values because that is what both sides
+/// of the relay protocol already speak; a transport whose wire format is not
+/// JSON is expected to map onto these values rather than to leak its framing
+/// upwards.
+#[derive(Debug)]
+pub enum Frame {
+    Control(Value),
+    Chunk(Vec<u8>),
+}
+
+#[derive(Debug)]
+pub enum TransportError {
+    /// The connection could not be established.
+    Connect(String),
+    /// The connection failed while a transfer was in progress.
+    Io(String),
+    /// The peer sent something this transport could not decode. Distinct from
+    /// `Io` because it is a peer's mistake rather than the network's.
+    Malformed(String),
+}
+
+impl fmt::Display for TransportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connect(message) | Self::Io(message) | Self::Malformed(message) => {
+                write!(formatter, "{message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TransportError {}
+
+/// A carrier for one transfer.
+///
+/// The futures are declared `Send` rather than left to inference. The transfer
+/// paths are spawned onto a multi-threaded runtime by the CLI's own tests, and
+/// an `async fn` in a trait promises nothing about the auto traits of the
+/// future it returns, so leaving it out would make the caller's future
+/// unspawnable for reasons that point at the call site rather than at here.
+pub trait Transport {
+    /// Sends a control frame.
+    fn send_control(
+        &mut self,
+        frame: Value,
+    ) -> impl Future<Output = Result<(), TransportError>> + Send;
+
+    /// Sends one sealed chunk.
+    fn send_chunk(
+        &mut self,
+        chunk: Vec<u8>,
+    ) -> impl Future<Output = Result<(), TransportError>> + Send;
+
+    /// Waits for the peer's next frame, or `None` once it has finished
+    /// speaking.
+    ///
+    /// A closed connection is not an error here. Every caller treats a peer
+    /// that stopped early as a failure of the transfer rather than of the
+    /// transport, and each has a more useful sentence to say about it than
+    /// this layer could.
+    fn receive(&mut self) -> impl Future<Output = Result<Option<Frame>, TransportError>> + Send;
+
+    /// Ends the conversation politely, ignoring whether the peer was still
+    /// listening. Every call site is on a path that has already decided the
+    /// transfer's outcome.
+    fn close(&mut self) -> impl Future<Output = ()> + Send;
+}

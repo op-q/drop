@@ -2,15 +2,13 @@
 
 use std::{error::Error, path::Path};
 
-use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    client::{self, Socket},
-    crypto,
+    client, crypto,
     payload::{self, Payload},
     progress::Progress,
+    transport::{Frame, Transport, relay},
 };
 
 /// In-flight bytes the sender allows before waiting for acknowledgements.
@@ -94,11 +92,25 @@ pub async fn run(
     eprintln!();
     eprintln!("Waiting for the receiver to connect...");
 
-    let mut socket = client::open_upload(&options.origin, code.nameplate()).await?;
+    let mut transport = relay::connect_sender(&options.origin, code.nameplate()).await?;
 
-    wait_for_receiver(&mut socket).await?;
+    send_transfer(&mut transport, &code, payload, sealed_size).await
+}
 
-    let keys = exchange_keys(&mut socket, &code).await?;
+/// The sender's half of a transfer, over whatever is carrying it.
+///
+/// Everything below this line is written against the conversation rather than
+/// against a socket, so a second carrier is a different `T` and not a second
+/// copy of this function.
+async fn send_transfer<T: Transport>(
+    transport: &mut T,
+    code: &crypto::TransferCode,
+    payload: Payload,
+    sealed_size: u64,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    wait_for_receiver(transport).await?;
+
+    let keys = exchange_keys(transport, code).await?;
     let mut sealer = crypto::Sealer::new(&keys, payload.size);
 
     let metadata = crypto::seal_metadata(
@@ -111,50 +123,40 @@ pub async fn run(
         },
     )?;
 
-    socket
-        .send(Message::Text(
-            json!({
-                "type": "meta",
-                "version": crypto::ENVELOPE_VERSION,
-                "ciphertext_size": sealed_size,
-                "metadata": crypto::to_hex(&metadata),
-            })
-            .to_string()
-            .into(),
-        ))
+    transport
+        .send_control(json!({
+            "type": "meta",
+            "version": crypto::ENVELOPE_VERSION,
+            "ciphertext_size": sealed_size,
+            "metadata": crypto::to_hex(&metadata),
+        }))
         .await?;
 
     let total = payload.size;
-    let result = stream_payload(&mut socket, payload, &mut sealer, sealed_size).await;
+    let result = stream_payload(transport, payload, &mut sealer, sealed_size).await;
 
     if let Err(error) = result {
-        // Tell the relay this transfer is over so the receiver is not left
+        // Tell the peer this transfer is over so the receiver is not left
         // waiting on a session that will never finish.
-        let _ = socket
-            .send(Message::Text(
-                json!({ "type": "cancel" }).to_string().into(),
-            ))
-            .await;
-        let _ = socket.close(None).await;
+        let _ = transport.send_control(json!({ "type": "cancel" })).await;
+        transport.close().await;
         return Err(error);
     }
 
-    await_completion(&mut socket).await?;
-    let _ = socket.close(None).await;
+    await_completion(transport).await?;
+    transport.close().await;
 
     eprintln!("Sent {}.", crate::progress::format_bytes(total));
     Ok(())
 }
 
-async fn wait_for_receiver(socket: &mut Socket) -> Result<(), Box<dyn Error + Send + Sync>> {
-    while let Some(message) = socket.next().await {
-        let message = message?;
-
-        let Message::Text(text) = message else {
+async fn wait_for_receiver<T: Transport>(
+    transport: &mut T,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    while let Some(frame) = transport.receive().await? {
+        let Frame::Control(payload) = frame else {
             continue;
         };
-
-        let payload: Value = serde_json::from_str(&text)?;
 
         match payload["type"].as_str() {
             Some("status") => {
@@ -177,29 +179,23 @@ async fn wait_for_receiver(socket: &mut Socket) -> Result<(), Box<dyn Error + Se
 ///
 /// The relay carries both messages without being able to use either: the
 /// password they authenticate against never leaves this process.
-async fn exchange_keys(
-    socket: &mut Socket,
+async fn exchange_keys<T: Transport>(
+    transport: &mut T,
     code: &crypto::TransferCode,
 ) -> Result<crypto::SessionKeys, Box<dyn Error + Send + Sync>> {
     let (handshake, outbound) = crypto::Handshake::start(code);
 
-    socket
-        .send(Message::Text(
-            json!({
-                "type": "key_exchange",
-                "message": crypto::to_hex(&outbound),
-            })
-            .to_string()
-            .into(),
-        ))
+    transport
+        .send_control(json!({
+            "type": "key_exchange",
+            "message": crypto::to_hex(&outbound),
+        }))
         .await?;
 
-    while let Some(message) = socket.next().await {
-        let Message::Text(text) = message? else {
+    while let Some(frame) = transport.receive().await? {
+        let Frame::Control(payload) = frame else {
             continue;
         };
-
-        let payload: Value = serde_json::from_str(&text)?;
 
         match payload["type"].as_str() {
             Some("key_exchange") => {
@@ -222,8 +218,8 @@ async fn exchange_keys(
 /// The window and the acknowledgements are counted in sealed bytes, because
 /// that is what the relay sees and meters. Progress is reported against the
 /// same scale so the two never disagree on screen.
-async fn stream_payload(
-    socket: &mut Socket,
+async fn stream_payload<T: Transport>(
+    transport: &mut T,
     payload: Payload,
     sealer: &mut crypto::Sealer,
     total: u64,
@@ -238,7 +234,7 @@ async fn stream_payload(
         // Drain acknowledgements that have already arrived, then block only if
         // the window is actually full.
         while sent - acknowledged >= WINDOW_BYTES {
-            acknowledged = next_acknowledgement(socket, acknowledged).await?;
+            acknowledged = next_acknowledgement(transport, acknowledged).await?;
             progress.update(acknowledged);
         }
 
@@ -248,7 +244,7 @@ async fn stream_payload(
 
         let sealed = sealer.seal_chunk(&chunk?)?;
         sent += sealed.len() as u64;
-        socket.send(Message::Binary(sealed.into())).await?;
+        transport.send_chunk(sealed).await?;
         progress.update(acknowledged);
     }
 
@@ -261,41 +257,35 @@ async fn stream_payload(
     }
 
     while acknowledged < total {
-        acknowledged = next_acknowledgement(socket, acknowledged).await?;
+        acknowledged = next_acknowledgement(transport, acknowledged).await?;
         progress.update(acknowledged);
     }
 
     progress.finish(total);
 
-    socket
-        .send(Message::Text(
-            json!({ "type": "complete" }).to_string().into(),
-        ))
+    transport
+        .send_control(json!({ "type": "complete" }))
         .await?;
 
     Ok(())
 }
 
-async fn next_acknowledgement(
-    socket: &mut Socket,
+async fn next_acknowledgement<T: Transport>(
+    transport: &mut T,
     current: u64,
 ) -> Result<u64, Box<dyn Error + Send + Sync>> {
-    while let Some(message) = socket.next().await {
-        match message? {
-            Message::Text(text) => {
-                let payload: Value = serde_json::from_str(&text)?;
+    while let Some(frame) = transport.receive().await? {
+        let Frame::Control(payload) = frame else {
+            continue;
+        };
 
-                match payload["type"].as_str() {
-                    Some("ack") => {
-                        if let Some(bytes) = payload["bytes_received"].as_u64() {
-                            return Ok(bytes.max(current));
-                        }
-                    }
-                    Some("error") => return Err(relay_error(&payload).into()),
-                    _ => {}
+        match payload["type"].as_str() {
+            Some("ack") => {
+                if let Some(bytes) = payload["bytes_received"].as_u64() {
+                    return Ok(bytes.max(current));
                 }
             }
-            Message::Close(_) => break,
+            Some("error") => return Err(relay_error(&payload).into()),
             _ => {}
         }
     }
@@ -303,27 +293,25 @@ async fn next_acknowledgement(
     Err("the transfer connection closed before the receiver acknowledged the file".into())
 }
 
-async fn await_completion(socket: &mut Socket) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn await_completion<T: Transport>(
+    transport: &mut T,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     eprintln!("Waiting for the receiver to finish writing...");
 
-    while let Some(message) = socket.next().await {
-        match message? {
-            Message::Text(text) => {
-                let payload: Value = serde_json::from_str(&text)?;
+    while let Some(frame) = transport.receive().await? {
+        let Frame::Control(payload) = frame else {
+            continue;
+        };
 
-                match payload["type"].as_str() {
-                    Some("status") => match payload["status"].as_str() {
-                        Some("transfer_complete") => return Ok(()),
-                        Some("cancelled") => {
-                            return Err("the transfer was cancelled".into());
-                        }
-                        _ => {}
-                    },
-                    Some("error") => return Err(relay_error(&payload).into()),
-                    _ => {}
+        match payload["type"].as_str() {
+            Some("status") => match payload["status"].as_str() {
+                Some("transfer_complete") => return Ok(()),
+                Some("cancelled") => {
+                    return Err("the transfer was cancelled".into());
                 }
-            }
-            Message::Close(_) => break,
+                _ => {}
+            },
+            Some("error") => return Err(relay_error(&payload).into()),
             _ => {}
         }
     }
@@ -336,4 +324,72 @@ fn relay_error(payload: &Value) -> String {
         .as_str()
         .unwrap_or("the relay reported an error")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{await_completion, next_acknowledgement, wait_for_receiver};
+    use crate::transport::scripted::ScriptedTransport;
+    use serde_json::json;
+
+    /// The sender's paths run over a transport that is not a socket, which is
+    /// the whole claim the trait makes.
+    #[tokio::test]
+    async fn waits_past_frames_that_are_not_the_one_it_needs() {
+        let mut transport = ScriptedTransport::saying(vec![
+            json!({ "type": "status", "status": "waiting_for_receiver" }),
+            json!({ "type": "progress", "bytes_transferred": 0 }),
+            json!({ "type": "status", "status": "receiver_connected" }),
+        ]);
+
+        wait_for_receiver(&mut transport)
+            .await
+            .expect("the receiver did connect");
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_stops_before_the_receiver_arrives_is_an_error() {
+        let mut transport = ScriptedTransport::silent();
+
+        let error = wait_for_receiver(&mut transport)
+            .await
+            .expect_err("a peer that says nothing cannot have connected a receiver");
+        assert!(error.to_string().contains("before a receiver joined"));
+    }
+
+    /// Acknowledgements only ever move forward. A relayed one that is behind
+    /// what the sender already counted would otherwise reopen the window.
+    #[tokio::test]
+    async fn an_acknowledgement_never_moves_backwards() {
+        let mut transport =
+            ScriptedTransport::saying(vec![json!({ "type": "ack", "bytes_received": 10 })]);
+
+        let acknowledged = next_acknowledgement(&mut transport, 40)
+            .await
+            .expect("an acknowledgement arrived");
+        assert_eq!(acknowledged, 40);
+    }
+
+    #[tokio::test]
+    async fn an_error_frame_ends_the_wait_with_its_message() {
+        let mut transport = ScriptedTransport::saying(vec![
+            json!({ "type": "error", "message": "receiver disconnected" }),
+        ]);
+
+        let error = await_completion(&mut transport)
+            .await
+            .expect_err("an error frame is not a completion");
+        assert!(error.to_string().contains("receiver disconnected"));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_transfer_is_distinct_from_a_dropped_connection() {
+        let mut transport =
+            ScriptedTransport::saying(vec![json!({ "type": "status", "status": "cancelled" })]);
+
+        let error = await_completion(&mut transport)
+            .await
+            .expect_err("a cancellation is not a completion");
+        assert!(error.to_string().contains("cancelled"));
+    }
 }

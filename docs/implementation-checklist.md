@@ -1,7 +1,7 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — end-to-end encryption is complete across both clients
+Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — Phase 1 done, Phase 2 next
 Last updated: **2026-08-24**
 
 The tactical view of what is being built and what state it is in. The detailed
@@ -95,14 +95,19 @@ pinned by a test rather than raced. Detail in the plan.
 ## 3. Peer-to-peer transport
 
 Plan: [`peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md)
-Status: **proposed**
+Status: **active**
 
 Two CLIs connect directly over QUIC and find each other through a mainline-DHT
 record derived from the code, so a transfer needs no Drop-operated server. The
 relay stays as an untrusted fallback for browsers and for networks where this
 cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
 
-- [ ] Phase 1 — transport abstraction, existing WebSocket path moved behind it
+- [x] Phase 1 — transport abstraction, existing WebSocket path moved behind it.
+      113 tests pass, up from 104; the new ones drive the transfer paths over a
+      second implementation of the trait that is not a socket. Two findings in
+      the plan: establishing a connection is deliberately not on the trait, and
+      the relay turns out to rename and invent control frames, so Phase 2 has
+      to decide who does that over a direct connection.
 - [ ] Phase 2 — `iroh` QUIC transport
 - [ ] Phase 3 — rendezvous: code-derived keypair, `pkarr` publish and resolve
 - [ ] Phase 4 — selection, automatic fallback, and reporting the path taken

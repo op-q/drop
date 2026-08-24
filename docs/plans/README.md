@@ -32,15 +32,16 @@ the plan contract unmissable and indexes what is here.
 
 ## Active
 
-None. Encryption has landed; peer-to-peer transport is next and has not
-started.
-
-## Proposed
-
 - [`peer-to-peer-transport-plan-2026-08-20.md`](peer-to-peer-transport-plan-2026-08-20.md)
   — connect the two CLIs directly over QUIC with `iroh`, finding each other
-  through a mainline-DHT record derived from the code, so a transfer needs no
-  Drop-operated server. Depends on the encryption envelope landing first.
+  through a mainline-DHT record derived from the nameplate, so a transfer needs
+  no Drop-operated server. Phase 1 landed 2026-08-24: the transfer paths are
+  written against a transport trait and the WebSocket client sits behind it.
+  Phase 2 is the QUIC transport, and starts with a decision the refactor
+  surfaced — the relay renames and invents control frames, and a direct
+  connection has nobody to do that.
+
+## Proposed
 - [`receiver-confirmation-plan-2026-08-19.md`](receiver-confirmation-plan-2026-08-19.md)
   — show the receiver what it is about to accept and require a y/n before any
   bytes move. Adds a protocol handshake and a new terminal outcome.

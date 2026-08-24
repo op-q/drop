@@ -1,8 +1,8 @@
 # Peer-to-peer transport plan
 
-Status: **proposed**
+Status: **active**
 Created: **2026-08-20**
-Last updated: **2026-08-23**
+Last updated: **2026-08-24**
 
 ## Goal
 
@@ -70,11 +70,65 @@ unshippable.
 
 ### Phase 1 — Transport abstraction
 
-- [ ] Define a transport trait the send and receive paths use: establish,
-      send a control frame, send a chunk, receive, close.
-- [ ] Move the existing WebSocket client behind it with no behaviour change.
-- [ ] Gate: the full existing test suite passes against the refactored relay
-      transport before any QUIC code exists.
+Done 2026-08-24.
+
+- [x] Define a transport trait the send and receive paths use: send a control
+      frame, send a chunk, receive, close. **Establish is deliberately not on
+      the trait** — see the findings below.
+- [x] Move the existing WebSocket client behind it with no behaviour change.
+      `cli/src/transport/relay.rs` holds the socket; `cli/src/client.rs` keeps
+      only the relay's HTTP API, which is relay-specific by nature since a
+      transfer that needs no server creates no session.
+- [x] Gate: the full existing test suite passes against the refactored relay
+      transport before any QUIC code exists. 113 tests, up from 104: the nine
+      new ones drive the transfer paths over `ScriptedTransport`, a second
+      implementation of the trait that is not a socket. Without a second
+      implementation the trait is an assertion rather than a seam.
+
+#### Findings
+
+**Establish is not on the trait.** The relay is reached at an origin URL with a
+nameplate it allocated over HTTP; a direct connection is reached by resolving a
+record and punching a hole. Those constructors share no arguments, so each
+transport module owns its own and the choice between them belongs at the single
+call site in Phase 4 that makes it. Putting `establish` on the trait would have
+produced a parameter bag every implementation ignores half of.
+
+**The relay is not a dumb pipe for control frames — it translates, and Phase 2
+has to decide who does that instead.** This is the substantive thing Phase 1
+surfaced, and it is not mechanical:
+
+| The receiver sends | The sender hears | Produced by |
+| --- | --- | --- |
+| `chunk_ack` | `ack` | the relay, renaming |
+| `complete` | `status: transfer_complete` | the relay, after the receiver confirms its byte count |
+| — | `status: receiver_connected` | the relay, on claim |
+| — | `status: sending` | the relay |
+
+`wait_for_receiver` and `await_completion` both block on frames no peer ever
+sends. Over a direct connection there is no third party to invent them. The two
+honest options:
+
+1. **The QUIC transport synthesizes them.** `receiver_connected` when the
+   connection is established, and the receiver's own `complete` mapped to
+   `transfer_complete`. The transfer paths stay untouched and every transport
+   presents the same vocabulary. The cost is that a transport starts having
+   opinions about protocol semantics rather than only carrying frames.
+2. **The paths learn the peer's vocabulary** and treat the relay's extra
+   statuses as the relay's own embellishment. Cleaner in the long run, but it
+   changes the relay path too, which Phase 1 was careful not to.
+
+Option 1 is the smaller change and keeps the relay path frozen while QUIC is
+unproven; option 2 is where this should end up. Decide at the start of Phase 2,
+not during it, and record it in [`../decisions.md`](../decisions.md) if it goes
+the second way, because that changes the wire contract.
+
+**Error wording outlives the relay.** `the relay reported an error`, `the relay
+sent more bytes than the transfer declared`, and `relay_error` are user-facing
+strings on paths that will no longer always involve a relay. Left alone here on
+purpose: Phase 1 promised no behaviour change and an error string is behaviour.
+Fix with Phase 4, when a transfer can actually take either path and the word is
+wrong rather than merely imprecise.
 
 ### Phase 2 — QUIC transport
 
