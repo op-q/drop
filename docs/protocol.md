@@ -98,12 +98,21 @@ The two peers may connect in either order. A sender that connects first is told
 `waiting_for_sender`.
 
 **A `key_exchange` is forwarded, not buffered.** The relay hands it to a peer
-that is already connected and drops one that arrives before the peer exists. A
-sender must therefore wait for `receiver_connected` before sending its half; a
-sender that sends on connect strands the receiver waiting for a message that
-was discarded, and the transfer stalls with no error on either side. The
-receiver's half is sent in reply and is safe to send as soon as the sender's
-arrives.
+that is already connected and refuses one that arrives before the peer exists,
+failing the session with `key exchange arrived before the sender connected` or
+`key exchange arrived before the receiver connected`. Both halves are therefore
+ordered:
+
+- The **sender** waits for `receiver_connected` before sending its half.
+- The **receiver** sends its half **in reply to the sender's**, never on
+  connect. The sender's half arriving is what proves there is a peer to reply
+  to.
+
+Neither half may be sent on connect. Before the relay refused them, an early
+half was dropped silently and the peer waited for a message that no longer
+existed — the transfer stalled with no error on either side until the session
+expired. That is what the refusal replaces, and it is why the receiver replies
+rather than opens.
 
 ## Sender to relay
 

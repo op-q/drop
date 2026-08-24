@@ -61,6 +61,46 @@ async fn next_binary_message(
     }
 }
 
+/// Inserts a session the way `POST /api/session/create` would, with neither
+/// peer connected yet.
+async fn insert_session(state: &api::app_state::AppState, code: &str, ciphertext_size: u64) {
+    state
+        .sessions
+        .insert(
+            code.to_string(),
+            Session {
+                ciphertext_size,
+                created_at: Instant::now(),
+                last_activity: Instant::now(),
+                sender_tx: None,
+                download_tx: None,
+                sender_connected: false,
+                receiver_connected: false,
+                bytes_relayed: 0,
+                receiver_acknowledged_bytes: 0,
+                sender_finished: false,
+            },
+        )
+        .await;
+}
+
+/// Waits for a failed session to leave the map.
+///
+/// `fail_session` queues the error frame before it removes the session, so a
+/// client can read the error while the removal is still in flight. Polling
+/// keeps the assertion about the outcome rather than about the interleaving.
+async fn wait_for_session_removal(state: &api::app_state::AppState, code: &str) {
+    for _ in 0..200 {
+        if state.sessions.get(code).await.is_none() {
+            return;
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    panic!("expected the failed session to be removed");
+}
+
 /// A single oversized frame must be refused rather than buffered, because the
 /// relay runs under a hard container memory limit that
 /// `MAX_CONCURRENT_SESSIONS * DOWNLOAD_EVENT_CHANNEL_CAPACITY` oversized chunks
@@ -430,4 +470,139 @@ async fn returns_the_relay_budget_after_a_receiver_abandons_a_transfer() {
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+/// The two peers may connect in either order, so the key exchange has to
+/// survive the receiver arriving first. It did not: the receiver sent its half
+/// on connect, the relay had no sender to give it to and dropped it, and the
+/// sender then waited for a message that no longer existed. Neither side saw an
+/// error, because nothing had gone wrong from either one's point of view.
+#[tokio::test]
+async fn key_exchange_completes_when_the_receiver_connects_first() {
+    let code = "RECVFIRST";
+    let state = build_state();
+    insert_session(&state, code, 64).await;
+
+    let server = spawn_network_test_server_with_state(state.clone()).await;
+
+    let (mut receiver_ws, _) = connect_async(server.ws_url(&format!("/ws/download/{code}")))
+        .await
+        .expect("expected receiver websocket connection");
+
+    next_json_message_matching(&mut receiver_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "waiting_for_sender"
+    })
+    .await;
+
+    let (mut sender_ws, _) = connect_async(server.ws_url(&format!("/ws/upload/{code}")))
+        .await
+        .expect("expected sender websocket connection");
+
+    next_json_message_matching(&mut sender_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "receiver_connected"
+    })
+    .await;
+
+    // The sender goes first, on the signal that the receiver is there.
+    sender_ws
+        .send(Message::text(
+            json!({ "type": "key_exchange", "message": "5e4de5" }).to_string(),
+        ))
+        .await
+        .expect("expected the sender's half to be sent");
+
+    let forwarded_to_receiver = next_json_message_matching(&mut receiver_ws, |payload| {
+        payload["type"] == "key_exchange"
+    })
+    .await;
+    assert_eq!(forwarded_to_receiver["message"], "5e4de5");
+
+    // The receiver replies to it, which is what makes the order safe.
+    receiver_ws
+        .send(Message::text(
+            json!({ "type": "key_exchange", "message": "4ecece" }).to_string(),
+        ))
+        .await
+        .expect("expected the receiver's half to be sent");
+
+    let forwarded_to_sender =
+        next_json_message_matching(&mut sender_ws, |payload| payload["type"] == "key_exchange")
+            .await;
+    assert_eq!(forwarded_to_sender["message"], "4ecece");
+}
+
+/// A half that arrives before its peer cannot be delivered and is not held, so
+/// the relay says so. The alternative is the silence that hid this for a
+/// release: a client that sends on connect otherwise looks like it worked.
+#[tokio::test]
+async fn a_receiver_key_exchange_before_the_sender_is_refused() {
+    let code = "EARLYRECV";
+    let state = build_state();
+    insert_session(&state, code, 64).await;
+
+    let server = spawn_network_test_server_with_state(state.clone()).await;
+
+    let (mut receiver_ws, _) = connect_async(server.ws_url(&format!("/ws/download/{code}")))
+        .await
+        .expect("expected receiver websocket connection");
+
+    next_json_message_matching(&mut receiver_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "waiting_for_sender"
+    })
+    .await;
+
+    receiver_ws
+        .send(Message::text(
+            json!({ "type": "key_exchange", "message": "5e4de5" }).to_string(),
+        ))
+        .await
+        .expect("expected the receiver's half to be sent");
+
+    let error =
+        next_json_message_matching(&mut receiver_ws, |payload| payload["type"] == "error").await;
+    assert_eq!(
+        error["message"],
+        "key exchange arrived before the sender connected"
+    );
+
+    wait_for_session_removal(&state, code).await;
+    assert_eq!(state.metrics.snapshot().total_transfer_failures, 1);
+}
+
+/// The same rule from the other side. The sender already waits for
+/// `receiver_connected` before sending, so this is what a client that forgets
+/// to sees.
+#[tokio::test]
+async fn a_sender_key_exchange_before_the_receiver_is_refused() {
+    let code = "EARLYSEND";
+    let state = build_state();
+    insert_session(&state, code, 64).await;
+
+    let server = spawn_network_test_server_with_state(state.clone()).await;
+
+    let (mut sender_ws, _) = connect_async(server.ws_url(&format!("/ws/upload/{code}")))
+        .await
+        .expect("expected sender websocket connection");
+
+    next_json_message_matching(&mut sender_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "waiting_for_receiver"
+    })
+    .await;
+
+    sender_ws
+        .send(Message::text(
+            json!({ "type": "key_exchange", "message": "4ecece" }).to_string(),
+        ))
+        .await
+        .expect("expected the sender's half to be sent");
+
+    let error =
+        next_json_message_matching(&mut sender_ws, |payload| payload["type"] == "error").await;
+    assert_eq!(
+        error["message"],
+        "key exchange arrived before the receiver connected"
+    );
+
+    wait_for_session_removal(&state, code).await;
+    assert_eq!(state.metrics.snapshot().total_transfer_failures, 1);
 }

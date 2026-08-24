@@ -19,10 +19,16 @@ use drop_cli::{
 use tokio::sync::oneshot;
 
 async fn spawn_relay() -> String {
+    spawn_relay_with_state().await.0
+}
+
+/// As [`spawn_relay`], but handing back the relay's state so a test can watch
+/// a session rather than guess at its timing.
+async fn spawn_relay_with_state() -> (String, api::app_state::AppState) {
     let state = api::build_state();
     api::start_background_services(state.clone());
 
-    let app = api::build_app(state);
+    let app = api::build_app(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("relay listener");
@@ -33,7 +39,7 @@ async fn spawn_relay() -> String {
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    format!("http://{addr}")
+    (format!("http://{addr}"), state)
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -552,5 +558,128 @@ async fn a_wrong_code_is_refused_and_leaves_nothing_on_disk() {
     );
 
     let _ = sender.await;
+    fs::remove_dir_all(&base).ok();
+}
+
+/// A transfer where the receiver claims its socket before the sender claims
+/// its own.
+///
+/// Both orders are allowed, and this one was broken. The receiver sent its half
+/// of the key exchange on connect; the relay had no sender to give it to and
+/// dropped it, since a key exchange is forwarded and never held; and the sender
+/// then waited for a half that no longer existed, with no error on either side.
+/// The other transfer tests race the two connections and the sender almost
+/// always wins, which is why this survived. Here the sender is held at its code
+/// callback until the relay has actually recorded the receiver, so the order is
+/// pinned rather than hoped for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_receiver_that_connects_first_still_completes_the_transfer() {
+    let (origin, state) = spawn_relay_with_state().await;
+    let base = scratch("receiver-first");
+
+    let contents: Vec<u8> = (0..(64 * 1024 + 7))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let source = base.join("source/early.bin");
+    write_file(&source, &contents);
+    let destination = base.join("destination");
+
+    let (code_tx, code_rx) = oneshot::channel();
+    let mut code_tx = Some(code_tx);
+    // Blocking, not async, because `on_code` is a synchronous callback. It
+    // parks the sender's worker thread, which the runtime has three more of.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+    let sender = tokio::spawn({
+        let origin = origin.clone();
+        let source = source.clone();
+
+        async move {
+            send::run(
+                &source,
+                SendOptions {
+                    origin,
+                    compress: None,
+                    on_code: Box::new(move |code| {
+                        if let Some(sender) = code_tx.take() {
+                            let _ = sender.send(code.to_string());
+                        }
+
+                        let _ = release_rx.recv();
+                    }),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+    });
+
+    let code = tokio::time::timeout(Duration::from_secs(10), code_rx)
+        .await
+        .expect("the sender never produced a session code")
+        .expect("the sender failed before producing a session code");
+
+    let nameplate = code
+        .split('-')
+        .next()
+        .expect("a code always has a nameplate")
+        .to_string();
+
+    let receiver = tokio::spawn({
+        let origin = origin.clone();
+        let destination = destination.clone();
+
+        async move {
+            recv::run(
+                &code,
+                ReceiveOptions {
+                    origin,
+                    out_dir: destination,
+                    extract: true,
+                    force: true,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+    });
+
+    let mut connected = false;
+    for _ in 0..500 {
+        if state
+            .sessions
+            .get(&nameplate)
+            .await
+            .is_some_and(|session| session.receiver_connected)
+        {
+            connected = true;
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(connected, "the receiver never claimed its socket");
+
+    release_tx.send(()).expect("the sender is still waiting");
+
+    let (sent, received) = tokio::time::timeout(
+        Duration::from_secs(60),
+        futures_util::future::join(sender, receiver),
+    )
+    .await
+    .expect("the transfer did not finish in time");
+
+    sent.expect("the sender task panicked")
+        .expect("send should succeed");
+    received
+        .expect("the receiver task panicked")
+        .expect("receive should succeed");
+
+    assert_eq!(
+        fs::read(destination.join("early.bin")).expect("received file"),
+        contents,
+        "the received bytes must match the sent bytes exactly"
+    );
+
     fs::remove_dir_all(&base).ok();
 }

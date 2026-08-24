@@ -2,7 +2,7 @@
 
 Status: **done**
 Created: **2026-08-19**
-Last updated: **2026-08-23**
+Last updated: **2026-08-24**
 
 ## Goal
 
@@ -245,6 +245,36 @@ Not covered: `App.svelte` is checked by neither `tsc` nor a browser test. The
 interop tests exercise the envelope and the wire protocol from Node. The Svelte
 flows were changed to match and build clean, but "builds" is the evidence for
 the UI layer, not "works".
+
+## Found after the phases closed
+
+**Receiver-first transfers deadlocked.** Reported by automated review on
+pull request #40 and confirmed on 2026-08-24. The receiver sent its half of the
+key exchange on connect. A `key_exchange` is forwarded and never held, so when
+the receiver won the race to claim its socket the relay had no sender to give
+the half to and dropped it; the sender then waited for a half that no longer
+existed, and neither side had anything to report. The transfer hung until the
+session expired.
+
+The sender already waited for `receiver_connected` before sending, and the web
+sender carries a comment saying why. The rule was simply never applied to the
+receiver, and `protocol.md` stated it for only one of the two peers.
+
+Fixed in three parts:
+
+- Both receivers — `cli/src/recv.rs` and `web/src/App.svelte` — now reply to
+  the sender's half rather than opening with their own.
+- The relay refuses a key exchange that arrives before its peer instead of
+  dropping it silently, in both directions. A protocol mistake a client can
+  make invisibly is one it will keep making.
+- `a_receiver_that_connects_first_still_completes_the_transfer` pins the
+  connection order rather than racing it, which is why the ordinary transfer
+  tests never caught this. Against the unfixed code it hangs for its full
+  60-second budget and fails.
+
+**What this says about the phase gates.** Every gate held; the hole was that
+none of them fixed a connection order. Both clients were tested against a relay
+they happened to reach second.
 
 ## Open questions
 

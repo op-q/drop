@@ -314,6 +314,29 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                         break;
                                     }
 
+                                    // The same rule the receiver is held to: a
+                                    // key exchange is forwarded, never held, so
+                                    // one sent before the peer connects is lost
+                                    // and strands both sides waiting.
+                                    if !SessionService::receiver_connected(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                    )
+                                    .await
+                                    {
+                                        TransferService::fail_session(
+                                            &state_for_recv,
+                                            &code_for_recv,
+                                            Some(
+                                                "key exchange arrived before the receiver connected",
+                                            ),
+                                            None,
+                                            "sender key exchange arrived before the receiver connected",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+
                                     SessionService::touch_session(&state_for_recv, &code_for_recv)
                                         .await;
                                     TransferService::send_receiver(

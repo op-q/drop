@@ -162,6 +162,15 @@ impl SessionService {
             .and_then(|session| session.download_tx)
     }
 
+    pub async fn sender_connected(state: &AppState, code: &str) -> bool {
+        state
+            .sessions
+            .get(code)
+            .await
+            .map(|session| session.sender_connected)
+            .unwrap_or(false)
+    }
+
     pub async fn receiver_connected(state: &AppState, code: &str) -> bool {
         state
             .sessions

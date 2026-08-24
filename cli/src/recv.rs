@@ -256,22 +256,18 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
 }
 
 /// Runs the receiver's half of the key exchange.
+///
+/// The half is sent in reply to the sender's, not on connect. The relay
+/// forwards a key exchange to a peer that is connected and drops one that is
+/// not, so a receiver that arrives first and sends immediately has its half
+/// discarded — and the sender then waits for a message that no longer exists,
+/// with neither side seeing an error. The sender's half arriving is the proof
+/// that there is somebody to reply to.
 async fn exchange_keys(
     socket: &mut Socket,
     code: &crypto::TransferCode,
 ) -> Result<crypto::SessionKeys, Box<dyn Error + Send + Sync>> {
     let (handshake, outbound) = crypto::Handshake::start(code);
-
-    socket
-        .send(Message::Text(
-            json!({
-                "type": "key_exchange",
-                "message": crypto::to_hex(&outbound),
-            })
-            .to_string()
-            .into(),
-        ))
-        .await?;
 
     while let Some(message) = socket.next().await {
         let Message::Text(text) = message? else {
@@ -285,6 +281,17 @@ async fn exchange_keys(
                 let peer = payload["message"]
                     .as_str()
                     .ok_or("the sender sent a malformed key exchange message")?;
+
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "type": "key_exchange",
+                            "message": crypto::to_hex(&outbound),
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await?;
 
                 return Ok(handshake.finish(&crypto::from_hex(peer)?)?);
             }

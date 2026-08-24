@@ -105,10 +105,6 @@ function receiveWithEnvelope(codeText) {
   const parts = [];
 
   return new Promise((resolve, reject) => {
-    socket.onopen = () =>
-      socket.send(
-        JSON.stringify({ type: "key_exchange", message: handshake.message }),
-      );
     socket.onerror = () => reject(new Error("the download socket failed"));
 
     socket.onmessage = (event) => {
@@ -128,6 +124,11 @@ function receiveWithEnvelope(codeText) {
         const message = JSON.parse(event.data);
 
         if (message.type === "key_exchange") {
+          // Replied to here rather than sent on open: the relay drops a key
+          // exchange that arrives before the peer is connected.
+          socket.send(
+            JSON.stringify({ type: "key_exchange", message: handshake.message }),
+          );
           keys = handshake.finish(message.message);
           return;
         }

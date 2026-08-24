@@ -352,6 +352,28 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                     break;
                                 }
 
+                                // A key exchange is forwarded, never held. One
+                                // that arrives before the sender exists has
+                                // nowhere to go, and dropping it quietly is how
+                                // both peers end up waiting on each other with
+                                // no error to show for it. Say so instead.
+                                if !SessionService::sender_connected(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                )
+                                .await
+                                {
+                                    TransferService::fail_session(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        None,
+                                        Some("key exchange arrived before the sender connected"),
+                                        "receiver key exchange arrived before the sender connected",
+                                    )
+                                    .await;
+                                    break;
+                                }
+
                                 SessionService::touch_session(&state_for_recv, &code_for_recv)
                                     .await;
                                 TransferService::send_sender(

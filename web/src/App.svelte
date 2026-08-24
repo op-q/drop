@@ -653,10 +653,6 @@
       let keys: SessionKeys | null = null;
       let opener: Opener | null = null;
 
-      socket.send(
-        JSON.stringify({ type: "key_exchange", message: handshake.message })
-      );
-
       let filename = "download.bin";
       let mimeType = "application/octet-stream";
       // Two totals, deliberately. `sealedTotal` is what the relay meters and
@@ -705,6 +701,17 @@
           const message = JSON.parse(event.data) as DownloadSocketMessage;
 
           if (message.type === "key_exchange") {
+            // Replied to here rather than sent on open: the relay drops a key
+            // exchange that arrives before the peer is connected, so a receiver
+            // that connects first would have its half discarded and the sender
+            // would wait for it forever.
+            socket.send(
+              JSON.stringify({
+                type: "key_exchange",
+                message: handshake.message,
+              })
+            );
+
             // Completing this does not prove the sender knew the code. A wrong
             // code yields a well-formed message and a different key, caught
             // when the sealed details below fail to open.

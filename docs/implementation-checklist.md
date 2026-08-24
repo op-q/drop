@@ -2,7 +2,7 @@
 
 Status: **active**
 Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — end-to-end encryption is complete across both clients
-Last updated: **2026-08-21**
+Last updated: **2026-08-24**
 
 The tactical view of what is being built and what state it is in. The detailed
 reasoning, risks, and validation for each item live in its plan under
@@ -84,6 +84,13 @@ Not covered: `App.svelte` itself. `tsc` does not check `.svelte` files and the
 interop tests drive the envelope and the protocol from Node, not the UI. The
 browser flows have been exercised by the build and by their shared envelope,
 not by a browser.
+
+Found after the phases closed and fixed on 2026-08-24: a receiver that claimed
+its socket before the sender deadlocked the transfer, because it sent its half
+of the key exchange on connect and the relay drops a half that has no peer to
+go to. Both receivers now reply to the sender's half instead, the relay refuses
+an early half rather than dropping it silently, and the connection order is
+pinned by a test rather than raced. Detail in the plan.
 
 ## 3. Peer-to-peer transport
 
