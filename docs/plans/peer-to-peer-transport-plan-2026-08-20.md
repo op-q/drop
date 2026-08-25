@@ -321,6 +321,41 @@ The QUIC path still must not be reachable by default until this is
   to peer there is nothing to protect, but silently changing a documented limit
   based on invisible transport selection is worse than keeping it.
 
+## What cannot be verified on the development machine
+
+Recorded 2026-08-25, because it silently shapes what "the tests pass" is worth.
+
+**Outbound UDP is blocked in the sandbox the agent tooling runs commands in.** A
+`sendto` to any non-local address fails outright, and the system resolver hangs
+because it cannot reach a nameserver. TCP is unaffected, so crates.io and the
+toolchain download fine and the restriction is easy to miss.
+
+Everything the peer-to-peer path is *for* travels over UDP:
+
+| | Needs | Verifiable here |
+| --- | --- | --- |
+| Framing over a byte pipe | nothing | yes |
+| QUIC over loopback | local UDP | yes |
+| n0-relay-assisted connection | outbound UDP | **no** |
+| NAT traversal and hole punching | outbound UDP | **no** |
+| `pkarr` publish and resolve | outbound UDP (mainline DHT) | **no** |
+
+So the QUIC tests pass, and they prove less than they look like they prove. Two
+endpoints on one host with relays disabled exercise the framing, the stream
+orchestration and the close ordering — all of which were worth pinning, and one
+of which was wrong — but they do not exercise the feature's premise.
+
+The consequence for Phase 3 is that `pkarr` publish and resolve can be *written*
+here but not *run* here. Two honest ways forward, and they should be chosen
+between rather than blurred:
+
+- Write it with the DHT behind a trait, test the record's construction and
+  parsing against an in-memory implementation, and mark the network path
+  untested until someone runs it on an unrestricted machine.
+- Run it unsandboxed. This publishes a real record to a public DHT, which is an
+  outward-facing action rather than a local test, and it should be a deliberate
+  decision rather than something that happens inside a test run.
+
 ## Validation
 
 - [ ] Two CLIs on the same LAN transfer with no Drop server reachable at all —

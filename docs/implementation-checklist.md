@@ -108,7 +108,7 @@ cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
       the plan: establishing a connection is deliberately not on the trait, and
       the relay turns out to rename and invent control frames, so Phase 2 has
       to decide who does that over a direct connection.
-- [x] Phase 2 — `iroh` QUIC transport. 132 tests pass, up from 113. Two peers
+- [x] Phase 2 — `iroh` QUIC transport. 138 tests pass, up from 113. Two peers
       complete a whole encrypted transfer over a direct QUIC connection with no
       Drop server anywhere in it, running the same `send_transfer` and
       `receive_transfer` the relay drives. The control vocabulary is settled by
@@ -118,7 +118,11 @@ cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
       connection, and only the sender may close it. **Caveat, and it is not
       small:** both test endpoints bind with relays disabled and meet over
       loopback. Nothing here has exercised a home relay, a NAT, or hole
-      punching, which is the feature's whole value proposition.
+      punching, which is the feature's whole value proposition. Not an
+      oversight and not fixable by trying harder: outbound UDP is blocked on the
+      development machine, so every part of this that uses the network is
+      unverifiable there. The plan says so under "What cannot be verified on the
+      development machine".
 - [ ] Phase 3 — rendezvous: nameplate-derived keypair (done), `pkarr` publish
       and resolve, with private addresses filtered out of the record per
       [`decisions.md`](decisions.md) entry 14. The security question the
