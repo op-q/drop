@@ -24,6 +24,7 @@ use serde_json::Value;
 pub mod framed;
 pub mod quic;
 pub mod relay;
+pub mod rendezvous;
 #[cfg(test)]
 pub mod scripted;
 
