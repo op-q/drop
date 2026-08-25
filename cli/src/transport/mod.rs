@@ -22,6 +22,7 @@ use std::{fmt, future::Future};
 use serde_json::Value;
 
 pub mod framed;
+pub mod quic;
 pub mod relay;
 #[cfg(test)]
 pub mod scripted;
