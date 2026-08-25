@@ -122,6 +122,7 @@ cli/src/transport/
 ├── relay.rs      RelayTransport — the WebSocket
 ├── framed.rs     FramedTransport — any ordered byte stream, plus the framing
 ├── quic.rs       QuicTransport — a direct iroh connection, no server in it
+├── rendezvous.rs the record two peers meet at, and what may go in it
 └── scripted.rs   ScriptedTransport — replays a fixed conversation, tests only
 ```
 
@@ -166,20 +167,23 @@ reasoning is in the plans. In short:
   `a_whole_transfer_crosses_a_quic_connection`. What is *not* done is any of it
   over a real network: both test endpoints bind with relays disabled and meet
   over loopback, so hole punching remains unobserved.
-- **Rendezvous** — half done. The seed is derived (`crypto/src/rendezvous.rs`):
-  an ed25519 seed by HKDF from the **nameplate**, never from the words, because
-  a record keyed on the secret half would let anyone grind 33 bits offline
-  against a public artifact. Publishing and resolving it over the mainline DHT
-  with `pkarr` is not written.
+- **Rendezvous** — done, and also not reachable. The seed is derived by HKDF
+  from the **nameplate**, never from the words, because a record keyed on the
+  secret half would let anyone grind 33 bits offline against a public artifact
+  (`crypto/src/rendezvous.rs`). The record built around it lives in
+  `cli/src/transport/rendezvous.rs`, with the mainline DHT behind a trait so
+  everything except the network is tested. Private addresses are stripped before
+  publishing, per `decisions.md` entry 14.
 - **Selection and fallback** — not started. Try direct, fall back to the relay,
   and say which path was taken.
 
-**The blocker is not any of those three.** It is a security question the relay
-used to answer for free, recorded in full in the plan: *who enforces one guess
-when there is no relay?* The 33-bit password is only safe because an attacker
-gets a single attempt, and that was the relay refusing a second claim on a
-session. A serverless transfer has no such mechanism, and the answer has to be
-designed before a user can reach this path at all.
+**The blocker is none of the above; it is the one-guess enforcement.** A 33-bit
+password is only safe because an attacker gets a single attempt, and what
+enforced that was the relay refusing a second claim on a session. A serverless
+transfer has no such mechanism. `decisions.md` entry 13 settles what replaces it
+— the sender limits guessing, and asks a human before granting another attempt —
+and it is not built. Until it is, no amount of working transport makes this path
+safe to reach, which is why nothing in the CLI reaches it.
 
 The known cost, recorded rather than discovered: a nameplate is small and
 public, so enumerating it against the DHT discloses a sender's IP and node

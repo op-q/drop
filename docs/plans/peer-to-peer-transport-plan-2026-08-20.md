@@ -214,10 +214,20 @@ The framing now belongs in [`../protocol.md`](../protocol.md), since it ships.
       derivation takes a whole `TransferCode` rather than a string so the
       nameplate is normalised — a receiver retyping it in lowercase has to
       arrive where the sender published.
-- [ ] Sender publishes its `NodeAddr` as a `pkarr` record; receiver resolves.
+- [x] Sender publishes its address as a `pkarr` record; receiver resolves. Done
+      2026-08-25 as `cli/src/transport/rendezvous.rs`. The DHT is behind a
+      `Directory` trait so the record layer — filtering, ticketing, signing,
+      parsing — is tested against an in-memory implementation; see "What cannot
+      be verified on the development machine" for why that split exists.
+      `MainlineDirectory` itself is **untested** and says so in its own doc
+      comment. The address is carried as an `EndpointTicket` in a `_drop` TXT
+      record, and `record_for` filters through `publishable` so a private
+      address cannot reach a record by a caller forgetting a step.
 - [ ] Handle the publish/resolve latency honestly in the UI — this is seconds,
       not milliseconds, and the sender must not print "waiting" before the
-      record is actually retrievable.
+      record is actually retrievable. The ordering the survey's measurements
+      imply: bind, `online()`, publish, *then* print the code. Nothing calls any
+      of this yet, so the ordering is not yet enforced anywhere.
 - [ ] Republish while waiting, since DHT records expire.
 
 ### Phase 4 — Selection and fallback

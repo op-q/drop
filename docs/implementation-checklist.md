@@ -1,7 +1,7 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — Phases 1 and 2 done, Phase 3 blocked on a security question
+Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — Phases 1-3 built, none of it reachable from the CLI yet
 Last updated: **2026-08-24**
 
 The tactical view of what is being built and what state it is in. The detailed
@@ -123,14 +123,19 @@ cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
       development machine, so every part of this that uses the network is
       unverifiable there. The plan says so under "What cannot be verified on the
       development machine".
-- [ ] Phase 3 — rendezvous: nameplate-derived keypair (done), `pkarr` publish
-      and resolve, with private addresses filtered out of the record per
-      [`decisions.md`](decisions.md) entry 14. The security question the
-      derivation surfaced — who enforces one guess with no relay to refuse a
-      second claim — is **settled**, not open: entry 13 puts it on the sender,
-      which asks a human before granting another attempt. It still has to be
-      *built*; deciding it does not enforce it, and the QUIC path stays
-      unreachable by default until it is.
+- [x] Phase 3 — rendezvous. 145 tests pass. The nameplate-derived keypair, the
+      `pkarr` record, publish and resolve, and the address filter from
+      [`decisions.md`](decisions.md) entry 14 all exist. The DHT is behind a
+      `Directory` trait, so what is tested is everything except the network and
+      what is untested is one named struct that says so.
+- [ ] **The one-guess enforcement, which is the actual gate.** Entry 13 settles
+      *what* to do — the sender limits guessing and asks a human before granting
+      another attempt — and none of it is built. It needs a checkpoint after
+      `meta` that the protocol does not currently have: the sender streams the
+      whole file before it learns whether the peer could open the metadata. That
+      checkpoint must be direct-path only, since requiring it over the relay
+      would break existing receivers for a guarantee the relay already enforces
+      server-side. Until this exists the QUIC path must not be reachable.
 - [ ] Phase 4 — selection, automatic fallback, and reporting the path taken
 - [ ] Phase 5 — documentation, including the DHT address-disclosure weakness
 
