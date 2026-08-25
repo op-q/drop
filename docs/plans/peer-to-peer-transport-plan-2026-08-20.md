@@ -178,14 +178,32 @@ wrong rather than merely imprecise.
       receiver's own `chunk_ack`, and finishes on the receiver's own `complete`
       after checking the count itself. If the sender still required the relay's
       wording, it would hang.
-- [ ] `iroh` (1.0.3) endpoint, one bidirectional stream per transfer.
-- [ ] Direct connection and n0-relay-assisted connection both exercised.
+- [x] `iroh` (1.0.3) endpoint, one bidirectional stream per transfer. Done
+      2026-08-25 as `cli/src/transport/quic.rs`, with
+      `a_whole_transfer_crosses_a_quic_connection` carrying a 2 MiB file end to
+      end over a real connection with no Drop server in it.
+- [ ] Direct connection and n0-relay-assisted connection both exercised. **Only
+      direct is.** Both test endpoints bind with `RelayMode::Disabled` and meet
+      over loopback, so nothing here has exercised a relay, a home relay, or
+      hole punching. That is the same gap section 6 of the API survey names, and
+      it does not close on this machine.
 
-What remains is the connection itself: obtaining a `SendStream`/`RecvStream`
-pair from `iroh` and handing it to `FramedTransport`. The framing goes into
-[`../protocol.md`](../protocol.md) when that lands — not before, because
-`docs/README.md` requires that planned behaviour is never written up as though
-it shipped.
+Two things the connection settled that the framing work could only assume:
+
+- **The sender accepts the connection but opens the stream**, and the receiver
+  dials but accepts it. `accept_bi` resolves when the peer first *writes*, not
+  when it opens a stream, and Drop's sender is the one that speaks first.
+  Reversed, both sides park forever instead of failing.
+- **Only the sender may close.** A `CONNECTION_CLOSE` permits the peer to drop
+  stream data it received but has not yet handed up, acknowledged or not. The
+  receiver's last act is writing the `complete` that the sender is blocked
+  reading, so a receiver that closed immediately destroyed it in flight and the
+  sender reported `connection lost` for a transfer whose file was already
+  correct on disk. iroh states the rule on `Connection::close`: only the peer
+  last *receiving* application data can be certain everything arrived. Here that
+  is the sender, so `close()` branches on role and the receiver waits.
+
+The framing now belongs in [`../protocol.md`](../protocol.md), since it ships.
 
 ### Phase 3 — Rendezvous
 

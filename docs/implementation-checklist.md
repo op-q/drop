@@ -1,7 +1,7 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — Phase 1 done, Phase 2 next
+Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — Phases 1 and 2 done, Phase 3 blocked on a security question
 Last updated: **2026-08-24**
 
 The tactical view of what is being built and what state it is in. The detailed
@@ -108,12 +108,17 @@ cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
       the plan: establishing a connection is deliberately not on the trait, and
       the relay turns out to rename and invent control frames, so Phase 2 has
       to decide who does that over a direct connection.
-- [ ] Phase 2 — `iroh` QUIC transport. Two of its three parts are done. The
-      control vocabulary is settled by [`decisions.md`](decisions.md) entry 12,
-      so the direct path has nothing left to imitate; and the stream framing
-      exists and carries a complete transfer over an in-memory pipe with no
-      relay, socket, or server in the path. The `iroh` connection itself is
-      what remains.
+- [x] Phase 2 — `iroh` QUIC transport. 132 tests pass, up from 113. Two peers
+      complete a whole encrypted transfer over a direct QUIC connection with no
+      Drop server anywhere in it, running the same `send_transfer` and
+      `receive_transfer` the relay drives. The control vocabulary is settled by
+      [`decisions.md`](decisions.md) entry 12, the framing is written up in
+      [`protocol.md`](protocol.md), and two orderings turned out to be
+      load-bearing: the sender opens the stream although it accepts the
+      connection, and only the sender may close it. **Caveat, and it is not
+      small:** both test endpoints bind with relays disabled and meet over
+      loopback. Nothing here has exercised a home relay, a NAT, or hole
+      punching, which is the feature's whole value proposition.
 - [ ] Phase 3 — rendezvous: nameplate-derived keypair (done), `pkarr` publish
       and resolve. **Blocked on a security question the derivation surfaced:**
       the one-guess property that makes 33 bits defensible was enforced by the

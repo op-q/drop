@@ -120,8 +120,16 @@ design: see [`protocol.md`](protocol.md) on the peer vocabulary, and
 cli/src/transport/
 ├── mod.rs        Transport trait, Frame, TransportError
 ├── relay.rs      RelayTransport — the WebSocket
+├── framed.rs     FramedTransport — any ordered byte stream, plus the framing
+├── quic.rs       QuicTransport — a direct iroh connection, no server in it
 └── scripted.rs   ScriptedTransport — replays a fixed conversation, tests only
 ```
+
+`framed.rs` and `quic.rs` are split on purpose. A QUIC stream is bytes with no
+message boundaries, so the direct path has to carry its own framing — and that
+framing is written against `AsyncRead`/`AsyncWrite` rather than against QUIC, so
+it can be exercised over an in-memory pipe with no network anywhere in the test.
+`quic.rs` is then only the connection.
 
 The trait is the whole conversation and nothing else:
 
@@ -152,16 +160,26 @@ of the transfer loop.
 Tracked in [`implementation-checklist.md`](implementation-checklist.md); the
 reasoning is in the plans. In short:
 
-- **QUIC transport** — a second implementation of the trait over `iroh`, one
-  bidirectional stream per transfer. QUIC gives an ordered byte stream with no
-  message boundaries, so this transport carries its own framing; the WebSocket
-  got that free from its text/binary opcode.
-- **Rendezvous** — an ed25519 keypair derived by HKDF from the **nameplate**,
-  under which the sender publishes its node address to the mainline DHT and the
-  receiver resolves it. Never derived from the words: a record keyed on the
-  secret half would let anyone grind 33 bits offline against a public record.
-- **Selection and fallback** — try direct, fall back to the relay, and say which
-  path was taken.
+- **QUIC transport** — done, and not yet reachable. A second implementation of
+  the trait over `iroh` carries a whole encrypted transfer between two peers
+  with no Drop server in the path, exercised end to end in
+  `a_whole_transfer_crosses_a_quic_connection`. What is *not* done is any of it
+  over a real network: both test endpoints bind with relays disabled and meet
+  over loopback, so hole punching remains unobserved.
+- **Rendezvous** — half done. The seed is derived (`crypto/src/rendezvous.rs`):
+  an ed25519 seed by HKDF from the **nameplate**, never from the words, because
+  a record keyed on the secret half would let anyone grind 33 bits offline
+  against a public artifact. Publishing and resolving it over the mainline DHT
+  with `pkarr` is not written.
+- **Selection and fallback** — not started. Try direct, fall back to the relay,
+  and say which path was taken.
+
+**The blocker is not any of those three.** It is a security question the relay
+used to answer for free, recorded in full in the plan: *who enforces one guess
+when there is no relay?* The 33-bit password is only safe because an attacker
+gets a single attempt, and that was the relay refusing a second claim on a
+session. A serverless transfer has no such mechanism, and the answer has to be
+designed before a user can reach this path at all.
 
 The known cost, recorded rather than discovered: a nameplate is small and
 public, so enumerating it against the DHT discloses a sender's IP and node

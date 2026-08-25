@@ -358,6 +358,86 @@ The socket survives a human-scale pause: the idle timeout is reset by the pong
 answering each heartbeat ping. The five-minute session lifetime is the binding
 constraint on an idle session, not the socket timeout.
 
+## The direct path: framing a transfer on a QUIC stream
+
+Everything above describes a transfer carried by the relay. A CLI-to-CLI
+transfer carries the **same envelope and the same vocabulary** over a QUIC
+stream instead, and this section is only the difference.
+
+Implemented in `cli/src/transport/framed.rs` and `cli/src/transport/quic.rs`.
+Not yet reachable from the `drop` binary — see
+[`plans/peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md)
+phases 3 and 4.
+
+### Why framing is needed at all
+
+A WebSocket hands a transfer its framing for free: every message carries its own
+length, and the text/binary opcode already says whether it is control or
+payload. A QUIC stream gives neither — it is an ordered, reliable sequence of
+bytes and nothing more. So the direct transport declares both.
+
+```text
+┌──────┬─────────────────┬────────────────┐
+│ kind │ length (BE u32) │ payload        │
+│ 1 B  │ 4 B             │ `length` bytes │
+└──────┴─────────────────┴────────────────┘
+  0x01  control — payload is UTF-8 JSON, the same objects as above
+  0x02  chunk   — payload is sealed bytes, opaque to the transport
+```
+
+| Property | Value | Source |
+| --- | --- | --- |
+| ALPN | `drop/transfer/1` | `DROP_ALPN` |
+| Header | 5 bytes | `HEADER_BYTES` |
+| Maximum accepted frame | 1 MiB + 16 B | `MAX_FRAME_BYTES` |
+| Streams per transfer | 1, bidirectional | — |
+
+The length is declared *before* the payload, so a hostile peer can declare one
+far larger than any real frame and make the reader allocate it. The cap is
+checked before a single payload byte is read. It is the size of a sealed chunk —
+plaintext plus tag — which covers control frames too, since the largest of those
+carries hex-encoded sealed metadata the relay already bounds at 8 KiB.
+
+The ALPN carries a version. Two builds whose framing disagrees are refused by
+QUIC before either side allocates anything, which is cheaper and clearer than
+discovering the mismatch in a frame header.
+
+### Who opens, and who hangs up
+
+Two orderings here are load-bearing, and both fail as hangs rather than errors
+if reversed.
+
+**The sender accepts the connection and opens the stream.** The receiver dials
+and accepts it. This reads backwards until you know that `accept_bi` resolves
+only when the peer first *writes*, not when it opens a stream — and Drop's
+sender speaks first, since `key_exchange` originates there. The receiver is the
+one that resolved an address, so it is necessarily the dialler.
+
+**Only the sender closes the connection.** A QUIC `CONNECTION_CLOSE` permits the
+peer to discard stream data it has received but not yet handed to its
+application, *including data it already acknowledged*. The receiver's final act
+is writing the `complete` that the sender is blocked reading, so a receiver that
+closes immediately destroys that frame in flight — and the sender reports a lost
+connection for a transfer whose file is already correct on disk. The rule, as
+iroh states it on `Connection::close`: only the peer last **receiving**
+application data can be certain everything arrived, and closing is then the only
+reliable thing it can do. In Drop that peer is the sender. The receiver finishes
+its stream, which flushes and signals that no more frames are coming, and waits
+to be closed.
+
+### What is unchanged
+
+- **The envelope.** Same key schedule, same nonces, same AAD, same sizes. A
+  transport that could tell a sealed chunk from any other bytes would be a
+  transport that could read the payload.
+- **The control vocabulary.** The peer's words are canonical and the relay's are
+  the embellishment, which is exactly what makes one vocabulary serve both
+  carriers. See the section above and
+  [`decisions.md`](decisions.md) entry 12.
+- **The flow control.** Same 16 MiB window, same 4 MiB acknowledgement batches.
+  QUIC has flow control of its own underneath, but the application-level window
+  is what bounds the receiver's write-out, not the network.
+
 ## Planned changes
 
 Not implemented. Tracked in
@@ -366,6 +446,9 @@ Not implemented. Tracked in
 - **Receiver confirmation** adds `accept` and `decline` receiver messages and a
   `receiver_accepted` status, and moves the start trigger off
   `receiver_connected`.
-- **A peer-to-peer QUIC transport** carrying this same envelope, with the relay
-  as fallback. See
-  [`plans/peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md).
+- **Rendezvous and fallback for the direct path.** The transport above exists
+  and carries whole transfers in test, but nothing in the `drop` binary reaches
+  it: two peers still have no way to find each other without the relay, and
+  there is no selection between the paths. See
+  [`plans/peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md)
+  phases 3 and 4, and the unsolved one-guess question it records.
