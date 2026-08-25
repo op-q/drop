@@ -120,13 +120,13 @@ cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
       loopback. Nothing here has exercised a home relay, a NAT, or hole
       punching, which is the feature's whole value proposition.
 - [ ] Phase 3 — rendezvous: nameplate-derived keypair (done), `pkarr` publish
-      and resolve. **Blocked on a security question the derivation surfaced:**
-      the one-guess property that makes 33 bits defensible was enforced by the
-      relay refusing a second claim, and a serverless transfer has no relay to
-      do it. Without an answer the direct path is an unlimited online oracle.
-      Proposed answer and the two details it needs are in the plan under
-      "The unsolved problem". The QUIC path must not be reachable by default
-      until it is settled.
+      and resolve, with private addresses filtered out of the record per
+      [`decisions.md`](decisions.md) entry 14. The security question the
+      derivation surfaced — who enforces one guess with no relay to refuse a
+      second claim — is **settled**, not open: entry 13 puts it on the sender,
+      which asks a human before granting another attempt. It still has to be
+      *built*; deciding it does not enforce it, and the QUIC path stays
+      unreachable by default until it is.
 - [ ] Phase 4 — selection, automatic fallback, and reporting the path taken
 - [ ] Phase 5 — documentation, including the DHT address-disclosure weakness
 

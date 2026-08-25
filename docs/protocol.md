@@ -451,4 +451,5 @@ Not implemented. Tracked in
   it: two peers still have no way to find each other without the relay, and
   there is no selection between the paths. See
   [`plans/peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md)
-  phases 3 and 4, and the unsolved one-guess question it records.
+  phases 3 and 4. The one-guess enforcement those phases depend on is settled in
+  [`decisions.md`](decisions.md) entry 13 and not yet built.

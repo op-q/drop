@@ -237,10 +237,13 @@ The framing now belongs in [`../protocol.md`](../protocol.md), since it ships.
       plainly.
 - [ ] `protocol.md`: the QUIC framing, so a third client can interoperate.
 
-## The unsolved problem: who enforces one guess when there is no relay
+## Who enforces one guess when there is no relay — settled
 
-Found 2026-08-24 while deriving the rendezvous key, and it must be settled
-before Phase 4 lets anyone use this path.
+Found 2026-08-24 while deriving the rendezvous key. **Settled 2026-08-25 and
+recorded as [`../decisions.md`](../decisions.md) entry 13: the sender enforces
+it, and asks a human before granting another attempt.** The two details the
+proposal left open are decided with it, at the bottom of this section. The
+problem statement below is kept because the reasoning is worth not losing.
 
 The whole security argument for a 33-bit password is that an attacker gets
 **one** attempt. The plan above already says so. What it does not say is what
@@ -274,22 +277,25 @@ documents: an attacker who guesses a nameplate can burn a transfer without
 learning anything, which is denial of service. `security.md` says that of the
 relay path today, and it stays true here.
 
-Two details need deciding with it, and neither is obvious:
+Two details needed deciding with it. Both are now decided:
 
-- **Does a genuine mistype cost the sender the transfer?** Over the relay it
-  does, and that is consistent. But a receiver who fat-fingers a word now has
-  to ask the sender to start again, and over a direct connection there is no
-  relay error to explain why. Whatever the answer, the sender's message has to
-  say what happened.
-- **When does the sender consider a peer to have committed?** Completing the
-  SPAKE2 exchange is the earliest point, but an attacker can complete it
-  trivially — completing it proves nothing, which is the whole reason a wrong
-  password fails later at the metadata rather than at the handshake. The
-  honest trigger is the first sealed frame the peer either opens or does not,
-  which means the sender learns the outcome from the peer's behaviour after
-  `meta`, not from the handshake.
+- **Does a genuine mistype cost the sender the transfer?** No, but only with a
+  human's consent. The sender prints what happened and asks whether to allow
+  another attempt; declining, or running with no terminal, ends the transfer.
+  This beats both a flat one-attempt rule and a bounded retry count, because an
+  attacker grinding the code then needs human approval per guess — capping the
+  attack at human speed and, more importantly, making it *visible* to the person
+  being attacked.
+- **When does the sender consider a peer to have committed?** On the peer's
+  response to the sealed metadata, not on the handshake. Completing SPAKE2
+  proves nothing — an attacker completes it trivially, which is the whole reason
+  a wrong password fails at the metadata instead. An explicit failure, a timeout
+  and a disconnect all count as one consumed attempt, which makes the honest
+  mistyper and the silent attacker indistinguishable to the sender, as they
+  should be.
 
-Until this is settled, the QUIC path must not be reachable by default.
+The QUIC path still must not be reachable by default until this is
+*implemented*. Deciding it does not enforce it.
 
 ## Risks
 
