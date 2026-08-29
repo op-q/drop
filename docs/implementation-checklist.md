@@ -1,8 +1,8 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — Phases 1-3 built, none of it reachable from the CLI yet
-Last updated: **2026-08-24**
+Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — Phases 1-3 and the one-guess gate built; Phase 4 is what makes any of it reachable
+Last updated: **2026-08-29**
 
 The tactical view of what is being built and what state it is in. The detailed
 reasoning, risks, and validation for each item live in its plan under
@@ -128,14 +128,19 @@ cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
       [`decisions.md`](decisions.md) entry 14 all exist. The DHT is behind a
       `Directory` trait, so what is tested is everything except the network and
       what is untested is one named struct that says so.
-- [ ] **The one-guess enforcement, which is the actual gate.** Entry 13 settles
-      *what* to do — the sender limits guessing and asks a human before granting
-      another attempt — and none of it is built. It needs a checkpoint after
-      `meta` that the protocol does not currently have: the sender streams the
-      whole file before it learns whether the peer could open the metadata. That
-      checkpoint must be direct-path only, since requiring it over the relay
-      would break existing receivers for a guarantee the relay already enforces
-      server-side. Until this exists the QUIC path must not be reachable.
+- [x] **The one-guess enforcement, which was the actual gate.** Done 2026-08-29.
+      153 tests pass, up from 145. The checkpoint after `meta` exists, the
+      sender consumes an attempt on any way of not hearing `meta_ok`, and it
+      asks a human before allowing another — `AskTheTerminal`, strict when
+      there is no terminal. Which carrier polices guessing is a method on the
+      transport trait with no default, because both wrong answers are security
+      bugs: `false` on a direct connection is an unlimited guessing oracle, and
+      `true` over the relay fails every transfer, since the relay rejects
+      receiver frames outside a closed set. The retry loop hands the payload
+      back rather than re-reading it, which the type states. **What is not
+      proved:** none of it has run over a real network, for the same UDP reason
+      as Phases 2 and 3 — the pair tests use an in-memory byte pipe and
+      loopback QUIC.
 - [ ] Phase 4 — selection, automatic fallback, and reporting the path taken
 - [ ] Phase 5 — documentation, including the DHT address-disclosure weakness
 

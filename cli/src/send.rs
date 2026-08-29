@@ -1,6 +1,6 @@
 //! The sending half of a terminal-to-terminal transfer.
 
-use std::{error::Error, path::Path};
+use std::{error::Error, fmt, future::Future, io::IsTerminal, path::Path, time::Duration};
 
 use serde_json::{Value, json};
 
@@ -17,6 +17,52 @@ use crate::{
 /// sender may keep this much data unacknowledged, so the ceiling is roughly
 /// `WINDOW_BYTES / round-trip time` regardless of available bandwidth.
 const WINDOW_BYTES: u64 = 16 * 1024 * 1024;
+
+/// How long the sender waits to hear whether the peer opened the metadata.
+///
+/// Only the direct path waits at all. The frame being waited for is a few
+/// bytes and the peer sends it the moment it has decrypted something it
+/// already holds, so this is generous rather than tight — it bounds a peer
+/// that has stopped talking, not a slow one.
+const META_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How one attempt at a transfer ended.
+///
+/// Two outcomes rather than a success and an error, because a peer that could
+/// not open the metadata is not a broken transfer — it is one consumed guess,
+/// and `docs/decisions.md` entry 13 has the sender ask a human whether to allow
+/// another. The caller cannot make that decision from an error message, and
+/// matching on message text would rest a security decision on a sentence
+/// somebody might one day reword.
+///
+/// The payload comes back with the failure, and that is the type saying
+/// something true rather than a convenience: the checkpoint fires before a
+/// single chunk is produced, so nothing has been read, compressed or spooled
+/// twice. A retry costs a connection, not the file.
+pub enum Attempt {
+    Done,
+    FailedTheCode {
+        /// What the peer actually did. An explicit refusal, a timeout, a
+        /// disconnect and an unexpected frame all reach here, and entry 13
+        /// counts them the same: from this side the honest mistyper and the
+        /// silent attacker are indistinguishable, and should be.
+        what_happened: &'static str,
+        payload: Payload,
+    },
+}
+
+/// Written by hand because [`Payload`] is a file on its way somewhere, not
+/// something to render into a test failure or a log line.
+impl fmt::Debug for Attempt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Done => formatter.write_str("Done"),
+            Self::FailedTheCode { what_happened, .. } => {
+                write!(formatter, "FailedTheCode({what_happened})")
+            }
+        }
+    }
+}
 
 pub struct SendOptions {
     pub origin: String,
@@ -94,7 +140,16 @@ pub async fn run(
 
     let mut transport = relay::connect_sender(&options.origin, code.nameplate()).await?;
 
-    send_transfer(&mut transport, &code, payload, sealed_size).await
+    match send_transfer(&mut transport, &code, payload, sealed_size).await? {
+        Attempt::Done => Ok(()),
+        // Unreachable over the relay, which enforces one guess itself and so
+        // never asks this side for a checkpoint. Stated rather than dismissed:
+        // if it ever does arrive, the sender must not silently continue as
+        // though the transfer had happened.
+        Attempt::FailedTheCode { what_happened, .. } => {
+            Err(format!("the receiver could not open this transfer: {what_happened}").into())
+        }
+    }
 }
 
 /// The sender's half of a transfer, over whatever is carrying it.
@@ -107,7 +162,7 @@ pub(crate) async fn send_transfer<T: Transport>(
     code: &crypto::TransferCode,
     payload: Payload,
     sealed_size: u64,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<Attempt, Box<dyn Error + Send + Sync>> {
     transport.await_peer().await?;
     eprintln!("Receiver connected.");
 
@@ -133,6 +188,19 @@ pub(crate) async fn send_transfer<T: Transport>(
         }))
         .await?;
 
+    // Nothing has been streamed yet, and on the direct path nothing will be
+    // until the peer proves it opened what was just sent.
+    if transport.peers_enforce_one_guess()
+        && let Some(what_happened) = await_meta_checkpoint(transport).await?
+    {
+        transport.close().await;
+
+        return Ok(Attempt::FailedTheCode {
+            what_happened,
+            payload,
+        });
+    }
+
     let total = payload.size;
     let result = stream_payload(transport, payload, &mut sealer, sealed_size).await;
 
@@ -148,7 +216,198 @@ pub(crate) async fn send_transfer<T: Transport>(
     transport.close().await;
 
     eprintln!("Sent {}.", crate::progress::format_bytes(total));
-    Ok(())
+    Ok(Attempt::Done)
+}
+
+/// Asked before a peer that failed the code is allowed to be followed by
+/// another.
+///
+/// A trait rather than a direct read of stdin so the policy can be tested
+/// without a terminal, which matters more than usual here: the decision this
+/// gates is the one holding a 33-bit password together.
+pub trait AnotherAttempt {
+    /// `attempt` counts the guesses already consumed, starting at one.
+    fn allow(&mut self, attempt: u32, what_happened: &str) -> impl Future<Output = bool> + Send;
+}
+
+/// Asks the human sitting in front of the sender, in `docs/decisions.md`
+/// entry 13's words.
+///
+/// The count is shown on purpose. Entry 13 chose this over a fixed retry limit
+/// because an attacker grinding the code then needs an approval per guess,
+/// which caps the attack at human speed *and makes it visible* — and a counter
+/// nobody is shown is not visible.
+pub struct AskTheTerminal {
+    interactive: bool,
+}
+
+impl Default for AskTheTerminal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AskTheTerminal {
+    pub fn new() -> Self {
+        Self {
+            interactive: std::io::stdin().is_terminal(),
+        }
+    }
+
+    /// A sender with nobody in front of it.
+    ///
+    /// Tests construct this rather than reading the real stdin, because
+    /// `cargo test` inherits whatever terminal it was started from: asking the
+    /// process would make the strict-when-unattended case pass or block
+    /// depending on how the suite happened to be launched.
+    #[cfg(test)]
+    fn unattended() -> Self {
+        Self { interactive: false }
+    }
+}
+
+impl AnotherAttempt for AskTheTerminal {
+    async fn allow(&mut self, attempt: u32, what_happened: &str) -> bool {
+        eprintln!();
+        eprintln!("A peer connected and failed the code ({what_happened}).");
+        eprintln!("This may be a mistype, or someone guessing.");
+
+        if attempt > 1 {
+            eprintln!(
+                "That is {attempt} failed attempts on this transfer. Repeated \
+                 failures are what being probed looks like."
+            );
+        }
+
+        // Not a terminal means nobody is there to answer, and entry 13 makes
+        // that strict: one attempt, exactly as the relay would have enforced.
+        // Failing closed is the safe direction.
+        if !self.interactive {
+            eprintln!("Not running in a terminal, so this transfer ends here.");
+            return false;
+        }
+
+        eprint!("Allow another attempt? [y/N] ");
+
+        // Reading stdin blocks, and blocking a runtime worker while a human
+        // thinks would stall every other task on it.
+        let answer = tokio::task::spawn_blocking(|| {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).map(|_| line)
+        })
+        .await;
+
+        match answer {
+            Ok(Ok(line)) => matches!(line.trim(), "y" | "Y" | "yes" | "Yes"),
+            // A stdin that cannot be read is a stdin nobody answered.
+            _ => false,
+        }
+    }
+}
+
+/// Sends a payload over a carrier the peers themselves have to police,
+/// allowing another attempt only when a human says so.
+///
+/// Public, and nothing in the binary calls it yet. That is the same shape
+/// [`crate::transport::quic`] has and for the same reason: the direct path is
+/// built and deliberately not reachable, and Phase 4 is what connects the two.
+///
+/// This is the whole of `docs/decisions.md` entry 13's mechanism. The relay
+/// path does not come through here and does not need to: a wrong guess burns
+/// the session server-side, so there is nothing for a human to decide.
+///
+/// `accept` produces one fresh connection per attempt. It has to be fresh —
+/// the failed one was closed, and reusing a connection an unknown peer already
+/// spoke on would be handing the same peer its second guess for free.
+pub async fn send_policing_guesses<T, A, F, Fut>(
+    mut accept: F,
+    code: &crypto::TransferCode,
+    mut payload: Payload,
+    sealed_size: u64,
+    approver: &mut A,
+) -> Result<(), Box<dyn Error + Send + Sync>>
+where
+    T: Transport,
+    A: AnotherAttempt,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, crate::transport::TransportError>>,
+{
+    let mut attempt = 1_u32;
+
+    loop {
+        let mut transport = accept().await?;
+
+        match send_transfer(&mut transport, code, payload, sealed_size).await? {
+            Attempt::Done => return Ok(()),
+            Attempt::FailedTheCode {
+                what_happened,
+                payload: returned,
+            } => {
+                // Handed back rather than re-read: nothing was streamed, so a
+                // retry costs a connection and not the file.
+                payload = returned;
+
+                if !approver.allow(attempt, what_happened).await {
+                    return Err(format!(
+                        "the transfer ended after {attempt} failed attempt{}",
+                        if attempt == 1 { "" } else { "s" }
+                    )
+                    .into());
+                }
+
+                attempt += 1;
+                eprintln!("Waiting for another receiver...");
+            }
+        }
+    }
+}
+
+/// Waits for the peer to say it opened the metadata, on a carrier where
+/// nobody else is limiting guesses.
+///
+/// This is the moment the direct path adds to the protocol, and the reason it
+/// has to exist: without it the sender streams an entire payload before
+/// learning anything about the peer, so a wrong guess costs an attacker one
+/// connection and reveals one bit — an unlimited online oracle against a
+/// 33-bit password.
+///
+/// Every way of not hearing `meta_ok` is the same outcome. See
+/// [`FailedTheCode`].
+///
+/// # On cancelling a read
+///
+/// `iroh`'s stream reads are not cancel-safe: a `read_exact` dropped partway
+/// through leaves the framing mid-frame, and the survey in
+/// `docs/validation/iroh-pkarr-api-survey-2026-08-24.md` warns against putting
+/// a timeout around a transfer's reads for exactly that reason. It does not
+/// bite here, and the reason is worth stating rather than rediscovering: every
+/// path out of this function that involves the timeout firing also abandons
+/// this connection. A stream nobody reads again cannot be desynchronised by
+/// having been left mid-frame.
+async fn await_meta_checkpoint<T: Transport>(
+    transport: &mut T,
+) -> Result<Option<&'static str>, Box<dyn Error + Send + Sync>> {
+    // Exactly one frame, deliberately. The peer has one thing to say here and
+    // a loop that tolerated anything else would be a loop an attacker could
+    // hold open, which is the shape this checkpoint exists to close.
+    let deadline = tokio::time::timeout(META_CHECKPOINT_TIMEOUT, transport.receive()).await;
+
+    let outcome: Result<Option<&'static str>, Box<dyn Error + Send + Sync>> = match deadline {
+        Err(_) => Ok(Some("it stopped responding")),
+        Ok(Err(error)) => Err(error.into()),
+        Ok(Ok(None)) => Ok(Some("it disconnected without answering")),
+        // A peer that sends payload here is not answering the question.
+        Ok(Ok(Some(Frame::Chunk(_)))) => Ok(Some("it sent data instead of answering")),
+        Ok(Ok(Some(Frame::Control(payload)))) => Ok(match payload["type"].as_str() {
+            Some("meta_ok") => None,
+            Some("error") => Some("it reported that the code did not open it"),
+            // Anything else is a peer not following the protocol, which is what
+            // a peer probing the code looks like.
+            Some(_) | None => Some("it answered with something else"),
+        }),
+    };
+
+    outcome
 }
 
 /// Runs the key exchange and returns the derived session keys.
@@ -329,9 +588,250 @@ fn relay_error(payload: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{await_completion, next_acknowledgement};
+    use super::{
+        AnotherAttempt, AskTheTerminal, Payload, await_completion, await_meta_checkpoint,
+        next_acknowledgement, send_policing_guesses,
+    };
     use crate::transport::scripted::ScriptedTransport;
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use std::{collections::VecDeque, path::PathBuf};
+
+    /// The happy path of the checkpoint: the peer opened the metadata, so the
+    /// payload may follow.
+    #[tokio::test]
+    async fn a_peer_that_opened_the_metadata_passes_the_checkpoint() {
+        let mut transport = ScriptedTransport::saying(vec![json!({ "type": "meta_ok" })]).direct();
+
+        let outcome = await_meta_checkpoint(&mut transport)
+            .await
+            .expect("the peer answered");
+
+        assert!(outcome.is_none(), "unexpected failure: {outcome:?}");
+    }
+
+    /// Every way of not hearing `meta_ok` is one consumed attempt, and the
+    /// caller has to be able to tell that apart from a broken network without
+    /// reading the message. `docs/decisions.md` entry 13.
+    #[tokio::test]
+    async fn every_way_of_not_answering_is_the_same_failed_guess() {
+        let scripts = [
+            ("an explicit refusal", vec![json!({ "type": "error" })]),
+            ("silence, then a hang-up", vec![]),
+            (
+                "an unrelated frame",
+                vec![json!({ "type": "chunk_ack", "bytes_received": 1 })],
+            ),
+        ];
+
+        for (what, script) in scripts {
+            let mut transport = ScriptedTransport::saying(script).direct();
+
+            let outcome = await_meta_checkpoint(&mut transport)
+                .await
+                .expect("a peer that will not answer is not a transport failure");
+
+            assert!(
+                outcome.is_some(),
+                "{what} should count as a consumed guess, not as a pass"
+            );
+        }
+    }
+
+    /// A peer that says the right things, in the order the sender asks for
+    /// them.
+    ///
+    /// The key exchange half has to be real: SPAKE2 succeeds for anyone, which
+    /// is exactly why a wrong password surfaces at the metadata instead, and a
+    /// fabricated half would fail earlier than the protocol does and test the
+    /// wrong thing.
+    fn a_peer_that_completes(code: &crate::crypto::TransferCode, sealed_size: u64) -> Vec<Value> {
+        let (_, half) = crate::crypto::Handshake::start(code);
+
+        vec![
+            json!({ "type": "key_exchange", "message": crate::crypto::to_hex(&half) }),
+            json!({ "type": "meta_ok" }),
+            json!({ "type": "ack", "bytes_received": sealed_size }),
+            json!({ "type": "complete", "bytes_received": sealed_size }),
+        ]
+    }
+
+    /// A peer that gets through the handshake and then cannot open what it was
+    /// sent — a mistype, or a guess. They look identical from here.
+    fn a_peer_that_fails_the_code(code: &crate::crypto::TransferCode) -> Vec<Value> {
+        let (_, half) = crate::crypto::Handshake::start(code);
+
+        vec![
+            json!({ "type": "key_exchange", "message": crate::crypto::to_hex(&half) }),
+            json!({ "type": "error", "message": "the code did not open this transfer" }),
+        ]
+    }
+
+    struct Answers {
+        replies: VecDeque<bool>,
+        asked: Vec<u32>,
+    }
+
+    impl Answers {
+        fn of(replies: Vec<bool>) -> Self {
+            Self {
+                replies: replies.into(),
+                asked: Vec::new(),
+            }
+        }
+    }
+
+    impl AnotherAttempt for Answers {
+        async fn allow(&mut self, attempt: u32, _what_happened: &str) -> bool {
+            self.asked.push(attempt);
+            self.replies.pop_front().unwrap_or(false)
+        }
+    }
+
+    fn a_small_payload(name: &str) -> (PathBuf, Payload) {
+        let base =
+            std::env::temp_dir().join(format!("drop-attempts-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("a scratch directory");
+        let file = base.join("payload.bin");
+        std::fs::write(&file, vec![3u8; 64 * 1024]).expect("fixture written");
+
+        let payload = Payload::prepare(&file, None).expect("payload prepared");
+        (base, payload)
+    }
+
+    /// The mechanism entry 13 chose, end to end: a failed guess does not end
+    /// the transfer, but it does not continue on its own either. A human says
+    /// yes, and the next peer gets its one attempt.
+    #[tokio::test]
+    async fn another_attempt_happens_only_because_a_human_allowed_it() {
+        let code =
+            crate::crypto::TransferCode::parse("A1B2C3-abandon-ability-able").expect("a code");
+        let (base, payload) = a_small_payload("allowed");
+        let sealed_size = crate::crypto::ciphertext_len(payload.size);
+
+        let mut attempts = VecDeque::from(vec![
+            ScriptedTransport::saying(a_peer_that_fails_the_code(&code)).direct(),
+            ScriptedTransport::saying(a_peer_that_completes(&code, sealed_size)).direct(),
+        ]);
+        let accept = move || {
+            let next = attempts.pop_front().expect("an attempt was prepared");
+            async move { Ok(next) }
+        };
+
+        let mut answers = Answers::of(vec![true]);
+
+        send_policing_guesses(accept, &code, payload, sealed_size, &mut answers)
+            .await
+            .expect("the second peer knew the code");
+
+        assert_eq!(
+            answers.asked,
+            vec![1],
+            "the human should have been asked exactly once, after the first \
+             failed guess and before the second attempt existed"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Declining is the whole point of asking. It has to actually stop the
+    /// transfer rather than merely slow it down.
+    #[tokio::test]
+    async fn a_declined_attempt_ends_the_transfer() {
+        let code =
+            crate::crypto::TransferCode::parse("A1B2C3-abandon-ability-able").expect("a code");
+        let (base, payload) = a_small_payload("declined");
+        let sealed_size = crate::crypto::ciphertext_len(payload.size);
+
+        // Two are prepared and only one may be taken: an accept that ran twice
+        // would be a second guess nobody approved.
+        let mut attempts = VecDeque::from(vec![
+            ScriptedTransport::saying(a_peer_that_fails_the_code(&code)).direct(),
+            ScriptedTransport::saying(a_peer_that_completes(&code, sealed_size)).direct(),
+        ]);
+        let mut accepted = 0;
+        let accept = move || {
+            accepted += 1;
+            assert!(accepted <= 1, "a declined transfer must not accept again");
+            let next = attempts.pop_front().expect("an attempt was prepared");
+            async move { Ok(next) }
+        };
+
+        let mut answers = Answers::of(vec![false]);
+
+        let error = send_policing_guesses(accept, &code, payload, sealed_size, &mut answers)
+            .await
+            .expect_err("a declined attempt is not a transfer");
+
+        assert!(
+            error.to_string().contains("1 failed attempt"),
+            "the sender should say how many guesses it saw: {error}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Grinding the code costs one human approval per guess. That is the
+    /// property entry 13 picked over a retry limit, so it is worth holding
+    /// open rather than inferring from the single-failure case.
+    #[tokio::test]
+    async fn each_further_guess_needs_its_own_approval() {
+        let code =
+            crate::crypto::TransferCode::parse("A1B2C3-abandon-ability-able").expect("a code");
+        let (base, payload) = a_small_payload("grinding");
+        let sealed_size = crate::crypto::ciphertext_len(payload.size);
+
+        let mut attempts = VecDeque::from(vec![
+            ScriptedTransport::saying(a_peer_that_fails_the_code(&code)).direct(),
+            ScriptedTransport::saying(a_peer_that_fails_the_code(&code)).direct(),
+            ScriptedTransport::saying(a_peer_that_fails_the_code(&code)).direct(),
+        ]);
+        let accept = move || {
+            let next = attempts.pop_front().expect("an attempt was prepared");
+            async move { Ok(next) }
+        };
+
+        let mut answers = Answers::of(vec![true, true, false]);
+
+        send_policing_guesses(accept, &code, payload, sealed_size, &mut answers)
+            .await
+            .expect_err("three failed guesses are not a transfer");
+
+        assert_eq!(
+            answers.asked,
+            vec![1, 2, 3],
+            "every guess after the first must be approved on its own, and the \
+             count must climb where the human can see it"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Entry 13's safe direction: with nobody there to notice a counter
+    /// climbing, the prompt cannot be the protection, so the sender falls back
+    /// to exactly what the relay would have done — one attempt.
+    #[tokio::test]
+    async fn an_unattended_sender_allows_nothing() {
+        let mut approver = AskTheTerminal::unattended();
+
+        assert!(
+            !approver.allow(1, "it stopped responding").await,
+            "a sender with no terminal must be strict"
+        );
+    }
+
+    /// The security-critical half of the carrier split, stated from the
+    /// sender's side: over the relay this checkpoint is not merely unnecessary,
+    /// it must not happen. A relay receiver sends no `meta_ok`, so a sender
+    /// that waited for one would hang on every relay transfer.
+    #[tokio::test]
+    async fn the_relay_path_is_not_asked_to_pass_a_checkpoint() {
+        let transport = ScriptedTransport::saying(vec![]);
+
+        assert!(
+            !crate::transport::Transport::peers_enforce_one_guess(&transport),
+            "the relay enforces one guess itself, so the peers must not"
+        );
+    }
 
     /// The sender's paths run over a transport that is not a socket, which is
     /// the whole claim the trait makes.

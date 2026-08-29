@@ -135,10 +135,14 @@ impl QuicEndpoint {
     /// receiver is the one that resolved an address and therefore dials. Let
     /// the dialer open the stream instead and both sides park forever.
     ///
-    /// Exactly one connection is accepted. The endpoint is consumed here, so
-    /// there is no second accept for a peer that guessed a nameplate and failed
-    /// to retry into.
-    pub async fn accept_transfer(self) -> Result<QuicTransport, TransportError> {
+    /// One connection per call, and the endpoint survives the call. It used to
+    /// be consumed, which made a failed guess unconditionally fatal — strict
+    /// one-attempt, and the behaviour `docs/decisions.md` entry 13 weighed and
+    /// rejected, because a receiver who fat-fingers one word should not lose
+    /// the transfer with nothing to explain why. What replaces it is not a
+    /// looser rule but a differently enforced one: the caller may come back for
+    /// another attempt, and entry 13 requires it to ask a human first.
+    pub async fn accept_transfer(&self) -> Result<QuicTransport, TransportError> {
         let incoming = self.endpoint.accept().await.ok_or_else(|| {
             TransportError::Connect("the endpoint closed before a peer connected".into())
         })?;
@@ -151,18 +155,12 @@ impl QuicEndpoint {
             TransportError::Io(format!("could not open a transfer stream: {error}"))
         })?;
 
-        Ok(QuicTransport::new(
-            Role::Sender,
-            self.endpoint,
-            connection,
-            send,
-            recv,
-        ))
+        Ok(QuicTransport::new(Role::Sender, connection, send, recv))
     }
 
     /// The receiver's side: dial the sender, then accept the stream it opens.
     pub async fn connect_transfer(
-        self,
+        &self,
         peer: EndpointAddr,
     ) -> Result<QuicTransport, TransportError> {
         let connection = self
@@ -181,13 +179,19 @@ impl QuicEndpoint {
             ))
         })?;
 
-        Ok(QuicTransport::new(
-            Role::Receiver,
-            self.endpoint,
-            connection,
-            send,
-            recv,
-        ))
+        Ok(QuicTransport::new(Role::Receiver, connection, send, recv))
+    }
+
+    /// Closes the endpoint, and with it every connection it still holds.
+    ///
+    /// Separate from [`QuicTransport::close`] because the two now have
+    /// different lifetimes: a transport ends when one attempt ends, and the
+    /// endpoint has to outlive a failed attempt so the next one has somewhere
+    /// to land. Closing rather than dropping is what gives an in-flight
+    /// `CONNECTION_CLOSE` time to reach the peer, so a caller that simply drops
+    /// this can truncate the goodbye of a transfer that otherwise succeeded.
+    pub async fn shutdown(self) {
+        self.endpoint.close().await;
     }
 }
 
@@ -195,24 +199,16 @@ impl QuicEndpoint {
 pub struct QuicTransport {
     framed: FramedTransport<RecvStream, SendStream>,
     connection: Connection,
-    endpoint: Endpoint,
     role: Role,
 }
 
 impl QuicTransport {
-    fn new(
-        role: Role,
-        endpoint: Endpoint,
-        connection: Connection,
-        send: SendStream,
-        recv: RecvStream,
-    ) -> Self {
+    fn new(role: Role, connection: Connection, send: SendStream, recv: RecvStream) -> Self {
         Self {
             // Reader first, writer second — the reverse of the pair iroh hands
             // back. Both orderings typecheck; only one of them works.
             framed: FramedTransport::new(recv, send),
             connection,
-            endpoint,
             role,
         }
     }
@@ -228,6 +224,15 @@ impl QuicTransport {
 }
 
 impl Transport for QuicTransport {
+    /// Nobody is in the middle of a direct connection, so nothing enforces one
+    /// guess unless the peers do. Without the checkpoint this answer turns on,
+    /// a peer that guessed a nameplate could connect, try a password, learn one
+    /// bit from whether the metadata opened, disconnect and repeat — which is
+    /// not 33 bits of security but 33 bits of work at network speed.
+    fn peers_enforce_one_guess(&self) -> bool {
+        true
+    }
+
     /// A QUIC connection is a connection to somebody, so by the time one of
     /// these exists the peer is already there.
     async fn await_peer(&mut self) -> Result<(), TransportError> {
@@ -261,8 +266,9 @@ impl Transport for QuicTransport {
     /// flushes what it wrote and signals that no more frames are coming, and
     /// then waits for the sender to close.
     ///
-    /// Closing the endpoint rather than dropping it is what gives the
-    /// `CONNECTION_CLOSE` time to actually reach the peer.
+    /// The endpoint is deliberately left alone — see [`QuicEndpoint::shutdown`],
+    /// which is where closing it moved to when it had to start outliving a
+    /// single attempt.
     async fn close(&mut self) {
         // Both sides finish the stream: it flushes, and it tells the peer that
         // nothing further is coming without touching the connection.
@@ -279,8 +285,6 @@ impl Transport for QuicTransport {
                 let _ = tokio::time::timeout(PEER_CLOSE_TIMEOUT, self.connection.closed()).await;
             }
         }
-
-        self.endpoint.close().await;
     }
 }
 
@@ -305,13 +309,17 @@ mod tests {
 
         let address = sender.addr();
 
+        // The write stays inside the task, and that is not tidiness. The
+        // receiver's `accept_bi` resolves on the sender's first write, not when
+        // the stream opens, so a version of this that joined both tasks before
+        // writing anything would deadlock rather than fail.
         let sending = tokio::spawn(async move {
             let mut transport = sender.accept_transfer().await.expect("a peer dialled");
             transport
                 .send_control(json!({ "type": "key_exchange", "message": "5e4de5" }))
                 .await
                 .expect("the sender speaks first");
-            transport
+            (transport, sender)
         });
 
         let receiving = tokio::spawn(async move {
@@ -321,11 +329,11 @@ mod tests {
                 .expect("the sender was reachable");
 
             let frame = transport.receive().await.expect("a frame arrived");
-            (transport, frame)
+            (transport, receiver, frame)
         });
 
-        let mut sending = sending.await.expect("the sending task");
-        let (mut receiving, frame) = receiving.await.expect("the receiving task");
+        let (mut sending, sender) = sending.await.expect("the sending task");
+        let (mut receiving, receiver, frame) = receiving.await.expect("the receiving task");
 
         let Some(Frame::Control(payload)) = frame else {
             panic!("expected the sender's first frame");
@@ -334,6 +342,11 @@ mod tests {
 
         sending.close().await;
         receiving.close().await;
+
+        // The endpoints outlive their transports now, so closing them is the
+        // caller's job rather than the transport's.
+        sender.shutdown().await;
+        receiver.shutdown().await;
     }
 
     /// The ALPN is the version gate. Two builds whose framing disagrees must
@@ -403,6 +416,10 @@ mod tests {
                 crate::send::send_transfer(&mut transport, &code, payload, sealed_size)
                     .await
                     .map_err(|error| error.to_string())
+                    .and_then(|outcome| match outcome {
+                        crate::send::Attempt::Done => Ok(()),
+                        other => Err(format!("the transfer did not complete: {other:?}")),
+                    })
             }
         });
 

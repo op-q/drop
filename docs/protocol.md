@@ -133,6 +133,7 @@ nothing below is mistaken for something a peer said.
 | `status: waiting_for_sender` / `waiting_for_receiver` | **the relay** | Invented |
 | `status: sending` | **the relay** | Invented |
 | `progress` | **the relay** | Invented; advisory, and safe to ignore |
+| `meta_ok` | the receiver | **Direct path only.** Never sent over the relay |
 
 A sender must accept the receiver's `chunk_ack` and `complete` as well as the
 relay's `ack` and `status: transfer_complete`, because which one arrives says
@@ -144,6 +145,13 @@ success on an unchecked claim.
 A sender must **not** require `status: receiver_connected`. Whether the peer
 has to be waited for at all is a property of the carrier, not of the protocol.
 Recorded as entry 12 in [`decisions.md`](decisions.md).
+
+`meta_ok` is the one frame that is not common to both carriers, and a client
+must get that right in both directions. It is described under
+[the metadata checkpoint](#the-metadata-checkpoint) below. Sending it over the
+relay is not merely redundant: the relay parses receiver frames into a closed
+set and fails the session on anything outside it, so a receiver that sends
+`meta_ok` unconditionally breaks every relay transfer.
 
 ## Sender to relay
 
@@ -424,6 +432,46 @@ application data can be certain everything arrived, and closing is then the only
 reliable thing it can do. In Drop that peer is the sender. The receiver finishes
 its stream, which flushes and signals that no more frames are coming, and waits
 to be closed.
+
+### The metadata checkpoint
+
+One frame the relay path does not have, and the reason the direct path needs
+it. Recorded as entry 13 in [`decisions.md`](decisions.md).
+
+```text
+sender                                    receiver
+  │  meta (version, size, sealed blob)         │
+  ├───────────────────────────────────────────▶│
+  │                                            │ opens the metadata
+  │                     meta_ok                │
+  │◀───────────────────────────────────────────┤
+  │  first chunk — and not one byte before it  │
+  ├───────────────────────────────────────────▶│
+```
+
+The security argument for a 33-bit password is that an attacker gets **one**
+attempt. Over the relay a third party enforces that: a second claim on a
+session is refused, so a wrong guess burns it. A direct connection has no third
+party, and without this checkpoint the sender streams an entire payload before
+learning anything about who it is talking to — so a wrong guess would cost an
+attacker one connection and reveal one bit. That is not 33 bits of security, it
+is 33 bits of work at network speed.
+
+- The receiver sends `meta_ok` once it has opened the sealed metadata, and
+  before it creates anything on disk. Opening it is what proves the peer knew
+  the code; a receiver that then fails to write a file has still guessed
+  correctly.
+- A receiver that cannot open the metadata sends `error` and stops.
+- The sender sends no chunk until `meta_ok` arrives, and waits at most 30
+  seconds for it.
+- **An explicit `error`, a timeout, a disconnect and any other frame are one
+  outcome**: one consumed attempt. From the sender's side an honest mistyper
+  and a silent attacker are indistinguishable, and treating them differently
+  would tell an attacker which it had been taken for.
+
+What the sender does with a consumed attempt is policy rather than protocol,
+and a receiver cannot observe it: the sender asks the human in front of it
+whether to allow another, and a sender with no terminal allows none.
 
 ### What is unchanged
 

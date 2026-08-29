@@ -91,6 +91,15 @@ fn while_waiting(payload: &Value) -> WhileWaiting {
 }
 
 impl Transport for RelayTransport {
+    /// The relay refuses a second claim on a session, so a wrong guess burns
+    /// it server-side and the real receiver is turned away. That is the
+    /// mechanism the whole 33-bit argument has always rested on; the peers add
+    /// nothing to it, and a receiver that tried to would be sending a control
+    /// frame the relay rejects outright.
+    fn peers_enforce_one_guess(&self) -> bool {
+        false
+    }
+
     /// A relay session outlives neither peer but precedes both, so the sender
     /// has to be told when the other side turns up.
     async fn await_peer(&mut self) -> Result<(), TransportError> {

@@ -76,6 +76,23 @@ impl std::error::Error for TransportError {}
 /// future it returns, so leaving it out would make the caller's future
 /// unspawnable for reasons that point at the call site rather than at here.
 pub trait Transport {
+    /// Whether the peers themselves have to limit password guessing.
+    ///
+    /// The security of a 33-bit code rests entirely on an attacker getting one
+    /// attempt, and over the relay a third party provides that: `claim_receiver`
+    /// refuses a second claim, so a wrong guess burns the session server-side
+    /// and this answers `false`. A direct connection has nobody to do that, so
+    /// it answers `true` and the peers run the checkpoint after `meta` that
+    /// `docs/decisions.md` entry 13 specifies.
+    ///
+    /// **Deliberately without a default.** Both wrong answers are security bugs
+    /// rather than papercuts — `false` on a direct connection is an unlimited
+    /// guessing oracle, and `true` over the relay makes the receiver send a
+    /// frame the relay rejects, failing every transfer — so a new carrier that
+    /// has not thought about it should fail to compile rather than inherit
+    /// somebody else's answer.
+    fn peers_enforce_one_guess(&self) -> bool;
+
     /// Waits until the peer is present.
     ///
     /// A carrier that cannot exist without a peer answers immediately — a QUIC

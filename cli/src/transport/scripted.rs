@@ -15,6 +15,7 @@ use super::{Frame, Transport, TransportError};
 pub struct ScriptedTransport {
     inbound: VecDeque<Frame>,
     sent: Vec<Frame>,
+    peers_enforce_one_guess: bool,
 }
 
 impl ScriptedTransport {
@@ -23,7 +24,22 @@ impl ScriptedTransport {
         Self {
             inbound: inbound.into(),
             sent: Vec::new(),
+            // The relay's shape, because it is the one most of these scripts
+            // are written against. A test that wants the direct path's extra
+            // checkpoint asks for it by name.
+            peers_enforce_one_guess: false,
         }
+    }
+
+    /// The same script, but carried by something with no third party in it.
+    ///
+    /// Only this changes: the frames are whatever the caller wrote. It exists
+    /// so the sender's and receiver's one-guess policy can be driven without a
+    /// QUIC endpoint, which is what lets the policy be tested at all on a
+    /// machine where outbound UDP does not work.
+    pub fn direct(mut self) -> Self {
+        self.peers_enforce_one_guess = true;
+        self
     }
 
     /// The common case: a peer that only sends control frames.
@@ -60,6 +76,10 @@ impl ScriptedTransport {
 }
 
 impl Transport for ScriptedTransport {
+    fn peers_enforce_one_guess(&self) -> bool {
+        self.peers_enforce_one_guess
+    }
+
     async fn send_control(&mut self, frame: Value) -> Result<(), TransportError> {
         self.sent.push(Frame::Control(frame));
         Ok(())

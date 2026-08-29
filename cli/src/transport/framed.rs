@@ -138,6 +138,13 @@ where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
+    /// A byte pipe has no third party in it, by construction. Whatever is
+    /// carrying these frames — a QUIC stream, a test's in-memory duplex — there
+    /// is nobody between the peers to refuse a second guess on their behalf.
+    fn peers_enforce_one_guess(&self) -> bool {
+        true
+    }
+
     async fn send_control(&mut self, frame: Value) -> Result<(), TransportError> {
         let payload = serde_json::to_vec(&frame)
             .map_err(|error| TransportError::Malformed(error.to_string()))?;
@@ -403,13 +410,92 @@ mod tests {
         let receive = crate::recv::receive_transfer(&mut receiving, &code, &options);
 
         let (sent, received) = tokio::join!(send, receive);
-        sent.expect("the send half should succeed");
+        assert!(
+            matches!(
+                sent.expect("the send half should succeed"),
+                crate::send::Attempt::Done
+            ),
+            "the send half should have run to completion"
+        );
         received.expect("the receive half should succeed");
 
         assert_eq!(
             std::fs::read(destination.join("pipe.bin")).expect("received file"),
             contents,
             "the received bytes must match the sent bytes exactly"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The gate this whole checkpoint exists for, over two real paths and a
+    /// real byte pipe rather than a script.
+    ///
+    /// Both peers hold the same nameplate — the public half, which an attacker
+    /// enumerates rather than guesses — and different words. That is exactly
+    /// what a mistype looks like and exactly what a guess looks like, which is
+    /// the point: the sender cannot tell them apart and must treat both as one
+    /// consumed attempt.
+    ///
+    /// What is being asserted is *when* the sender stops. Before this
+    /// checkpoint existed it would have streamed the entire payload first and
+    /// discovered the failure from a connection that went quiet, which is what
+    /// made an unlimited guessing oracle possible.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_wrong_code_stops_the_sender_before_a_single_chunk() {
+        let base = std::env::temp_dir().join(format!("drop-guess-{}", std::process::id()));
+        let source = base.join("source");
+        let destination = base.join("destination");
+        std::fs::create_dir_all(&source).expect("source directory");
+        std::fs::create_dir_all(&destination).expect("destination directory");
+
+        let file = source.join("secret.bin");
+        std::fs::write(&file, vec![7u8; 3 * 1024 * 1024]).expect("fixture written");
+
+        let sender_code = crate::crypto::TransferCode::parse("A1B2C3-abandon-ability-able")
+            .expect("the sender's code");
+        let guessed_code =
+            crate::crypto::TransferCode::parse("A1B2C3-zone-zoo-zebra").expect("a wrong guess");
+        assert_eq!(
+            sender_code.nameplate(),
+            guessed_code.nameplate(),
+            "the guess must reach the right meeting point; only the words differ"
+        );
+
+        let payload = crate::payload::Payload::prepare(&file, None).expect("payload prepared");
+        let sealed_size = crate::crypto::ciphertext_len(payload.size);
+
+        let (mut sending, mut receiving) = joined();
+
+        let options = crate::recv::ReceiveOptions {
+            origin: String::new(),
+            out_dir: destination.clone(),
+            extract: true,
+            force: true,
+        };
+
+        let send = crate::send::send_transfer(&mut sending, &sender_code, payload, sealed_size);
+        let receive = crate::recv::receive_transfer(&mut receiving, &guessed_code, &options);
+
+        let (sent, received) = tokio::join!(send, receive);
+
+        let outcome = sent.expect("a failed guess is an outcome, not a transport failure");
+        let crate::send::Attempt::FailedTheCode { what_happened, .. } = outcome else {
+            panic!("a peer that cannot open the metadata must not look like a success");
+        };
+        assert!(
+            what_happened.contains("did not open it"),
+            "the receiver should have said so rather than simply vanishing, so that \
+             the sender is not waiting out a timeout it did not need: {what_happened}"
+        );
+        received.expect_err("the wrong code cannot open the transfer");
+
+        assert!(
+            std::fs::read_dir(&destination)
+                .expect("destination readable")
+                .next()
+                .is_none(),
+            "a failed guess must leave nothing behind on the receiver"
         );
 
         std::fs::remove_dir_all(&base).ok();

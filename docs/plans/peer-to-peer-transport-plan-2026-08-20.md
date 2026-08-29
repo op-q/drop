@@ -2,7 +2,7 @@
 
 Status: **active**
 Created: **2026-08-20**
-Last updated: **2026-08-24**
+Last updated: **2026-08-29**
 
 ## Goal
 
@@ -306,6 +306,85 @@ Two details needed deciding with it. Both are now decided:
 
 The QUIC path still must not be reachable by default until this is
 *implemented*. Deciding it does not enforce it.
+
+### Building it
+
+Broken in two, because the halves fail differently and only the first touches
+the wire.
+
+**A — the checkpoint after `meta`.** The sender streams the whole payload today
+without ever learning whether the peer opened the metadata, so there is no
+moment at which a failed guess is observable. Add one:
+
+- [x] `Transport::peers_enforce_one_guess()`. The relay answers no — it refuses
+      a second claim on a session, so a wrong guess is burned server-side. A
+      direct connection answers yes. No default implementation: a carrier that
+      forgets to state this should fail to compile, because both wrong answers
+      are security bugs rather than papercuts.
+- [x] Receiver: after `open_metadata` succeeds send `meta_ok`, after it fails
+      send `error` and stop — **only when the carrier says the peers enforce
+      it.** This cannot be additive, and that is the trap: the relay parses
+      receiver frames into a typed enum and calls `fail_session` on anything it
+      does not recognise (`src/routes/download_ws.rs:322`), so a receiver that
+      sends `meta_ok` unconditionally breaks every relay transfer against the
+      deployed relay.
+- [x] Sender: wait for `meta_ok` before the first chunk, bounded by
+      `META_CHECKPOINT_TIMEOUT`. An explicit `error`, a timeout, a disconnect
+      and any other frame all resolve to one consumed attempt, per entry 13.
+- [x] `send_transfer` reports that outcome distinctly rather than as a generic
+      error, since the caller has to tell "the peer failed the code" apart from
+      "the network broke" to know whether prompting is even the right response.
+- [x] Gate: a wrong code over a direct connection stops the sender before a
+      single chunk is written, and the relay path's frames stay byte-identical
+      to today's. Both are testable with no network — `ScriptedTransport` for
+      the sender's policy, an in-memory duplex for the pair.
+
+**B — the attempt loop and the prompt.** `QuicEndpoint::accept_transfer`
+consumes the endpoint, so a failed attempt currently ends the process: strict
+one-attempt, which is the behaviour entry 13 rejected because a mistype should
+not cost the transfer.
+
+- [x] Accept without consuming the endpoint, so a second attempt has somewhere
+      to land. `iroh::Endpoint` is `Clone`, and `QuicTransport::close` has to
+      stop closing an endpoint it no longer solely owns.
+- [x] Prompt on stderr and read from the TTY, in entry 13's wording. Count the
+      attempts and show the count: a climbing counter is the whole point of
+      choosing the prompt over a retry limit.
+- [x] No TTY means strict — end the transfer. That is the safe direction.
+- [x] Gate: two failed guesses need two separate approvals, and a
+      non-interactive sender ends after the first.
+
+Deliberately out of scope here: which transport `drop send` picks. That is
+Phase 4. This makes the direct path *safe* to reach, not reachable.
+
+#### Findings
+
+Done 2026-08-29. 153 tests, up from 145.
+
+**The carrier split had to be explicit, and nearly was not.** The first shape
+tried was a receiver that always sends `meta_ok` and a sender that ignores it
+over the relay — additive, no trait change, no relay change. It would have
+broken every relay transfer in production. `src/routes/download_ws.rs:322`
+parses receiver frames into a typed `ReceiverMessage` and calls `fail_session`
+on a parse error, so an unknown frame is not ignored, it is fatal. Hence a
+trait method with no default rather than a convention.
+
+**The payload comes back from a failed guess, and the type says so.** The
+checkpoint fires before `into_chunks`, so nothing has been read, compressed or
+spooled. Returning `Attempt::FailedTheCode { payload, .. }` rather than an
+error keeps a retry costing a connection instead of a recompressed folder — and
+it removed the downcast the first draft needed to tell a failed guess from a
+broken network.
+
+**A test can deadlock where the protocol cannot.** Restructuring the QUIC
+ordering test to join both tasks before writing anything hung: `accept_bi`
+resolves on the peer's first *write*, so the write has to stay inside the
+sending task. The same ordering the module's own doc comment warns about, met
+from the other direction.
+
+**`AskTheTerminal` takes its TTY answer at construction.** Reading
+`stdin().is_terminal()` inside the prompt would make the unattended test pass or
+block depending on how `cargo test` was launched.
 
 ## Risks
 

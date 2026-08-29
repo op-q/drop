@@ -174,16 +174,25 @@ reasoning is in the plans. In short:
   `cli/src/transport/rendezvous.rs`, with the mainline DHT behind a trait so
   everything except the network is tested. Private addresses are stripped before
   publishing, per `decisions.md` entry 14.
-- **Selection and fallback** — not started. Try direct, fall back to the relay,
-  and say which path was taken.
+- **One-guess enforcement** — done, and it was the blocker. A 33-bit password is
+  only safe because an attacker gets a single attempt, and what enforced that
+  was the relay refusing a second claim on a session; a serverless transfer has
+  no such mechanism. The direct path now has its own: the sender streams nothing
+  until the peer proves it opened the sealed metadata, and any way of failing
+  that — a refusal, a timeout, a disconnect — consumes the attempt and puts the
+  question to a human. Which carrier polices guessing is a method on the
+  transport trait with no default, since `false` on a direct connection is an
+  unlimited guessing oracle and `true` over the relay fails every transfer.
+  `decisions.md` entry 13, `protocol.md`, and `security.md`.
+- **Selection and fallback** — not started, and now the only thing between this
+  and a user. Try direct, fall back to the relay, and say which path was taken.
 
-**The blocker is none of the above; it is the one-guess enforcement.** A 33-bit
-password is only safe because an attacker gets a single attempt, and what
-enforced that was the relay refusing a second claim on a session. A serverless
-transfer has no such mechanism. `decisions.md` entry 13 settles what replaces it
-— the sender limits guessing, and asks a human before granting another attempt —
-and it is not built. Until it is, no amount of working transport makes this path
-safe to reach, which is why nothing in the CLI reaches it.
+**Nothing here has run over a real network.** That has not changed and is not a
+matter of trying harder: outbound UDP is blocked on the development machine, so
+the DHT, hole punching, and n0's relays are all unexercised. The transport tests
+meet over loopback and the checkpoint tests over an in-memory byte pipe. What is
+tested is the protocol and the policy; what is untested is the network they are
+for.
 
 The known cost, recorded rather than discovered: a nameplate is small and
 public, so enumerating it against the DHT discloses a sender's IP and node

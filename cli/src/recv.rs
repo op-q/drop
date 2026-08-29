@@ -137,8 +137,39 @@ pub(crate) async fn receive_transfer<T: Transport>(
     // before any destination is created and before a byte is written. The
     // session is consumed either way, which is what holds an attacker to one
     // guess.
+    //
+    // Who consumes it differs by carrier. Over the relay a server refuses the
+    // next claim and this side says nothing. Over a direct connection there is
+    // no server, so the sender is waiting to hear how this went and cannot
+    // proceed until it does — `docs/decisions.md` entry 13.
     let sealed_metadata = crypto::from_hex(&sealed_metadata)?;
-    let meta = crypto::open_metadata(&keys, ciphertext_size, &sealed_metadata)?;
+    let meta = match crypto::open_metadata(&keys, ciphertext_size, &sealed_metadata) {
+        Ok(meta) => meta,
+        Err(error) => {
+            // Saying so discloses nothing. A peer that reaches this branch
+            // already knows it failed, and staying silent would only make the
+            // sender wait out its timeout before reaching the same conclusion.
+            if transport.peers_enforce_one_guess() {
+                let _ = transport
+                    .send_control(json!({
+                        "type": "error",
+                        "message": "the code did not open this transfer",
+                    }))
+                    .await;
+            }
+
+            return Err(error.into());
+        }
+    };
+
+    // The checkpoint the direct path adds, and the reason it is here rather
+    // than after the destination is opened: what it attests is that this peer
+    // knew the code, which opening the metadata has just proved. A receiver
+    // that then fails to create a file has still guessed correctly, and
+    // charging it an attempt would punish the wrong failure.
+    if transport.peers_enforce_one_guess() {
+        transport.send_control(json!({ "type": "meta_ok" })).await?;
+    }
 
     let size = meta.plaintext_size;
     let filename = meta.filename;
