@@ -13,14 +13,17 @@ entry point for users and self-hosters. This file is the map of everything under
 
 Read these in order when picking up the project:
 
-1. [`implementation-checklist.md`](implementation-checklist.md) — the tactical
+1. [`architecture.md`](architecture.md) — what the pieces are, what runs
+   where, and which direction the project is moving.
+2. [`implementation-checklist.md`](implementation-checklist.md) — the tactical
    view: what is being built and what state it is in.
-2. [`plans/README.md`](plans/README.md) — the plan contract and the full plans
+3. [`plans/README.md`](plans/README.md) — the plan contract and the full plans
    behind each item.
-3. [`protocol.md`](protocol.md) — the wire contract both clients implement.
-4. [`security.md`](security.md) — trust boundaries, hostile input, and the
+4. [`protocol.md`](protocol.md) — the wire contract both clients implement,
+   including the envelope a second client would have to reproduce.
+5. [`security.md`](security.md) — trust boundaries, hostile input, and the
    weaknesses that are known and accepted.
-5. [`decisions.md`](decisions.md) — the choices that are expensive to reverse.
+6. [`decisions.md`](decisions.md) — the choices that are expensive to reverse.
 
 ## Layout
 
@@ -28,7 +31,8 @@ Read these in order when picking up the project:
 docs/
   plans/            full plans with checkbox progress, one file per topic
   validation/       repeatable test recipes and dated exploratory reports
-  protocol.md       the HTTP and WebSocket contract
+  architecture.md   the crates, what runs where, and the direction of travel
+  protocol.md       the HTTP and WebSocket contract, and the envelope
   security.md       trust boundaries, hostile input, resource bounds
   decisions.md      durable architectural decisions
   implementation-checklist.md   tactical status mirror
@@ -40,9 +44,10 @@ docs/
 
 | Document | Owns |
 | --- | --- |
+| [`architecture.md`](architecture.md) | Orientation: the crates and how they depend on each other, where a transfer's work happens, the transport seam, and what the project is working towards |
 | [`plans/`](plans/README.md) | Full plan context: phases, risks, validation, kickoff prompts, open questions |
 | [`implementation-checklist.md`](implementation-checklist.md) | Honest status and work order, mirroring the plans |
-| [`protocol.md`](protocol.md) | The session, control-message, and framing contract |
+| [`protocol.md`](protocol.md) | The session, control-message, framing, and envelope contract |
 | [`security.md`](security.md) | Trust boundaries, hostile-input rules, resource bounds, known weaknesses |
 | [`decisions.md`](decisions.md) | Architectural choices that are costly or confusing to reverse |
 | [`release-checklist.md`](release-checklist.md) | Repeatable evidence gate for tagging a release |
@@ -83,8 +88,12 @@ to the owning document.
   the checklist rather than duplicating the plan.
 - Mark a checkbox complete only when its evidence exists. A check that was not
   run is reported as not run, never assumed to pass.
-- Do not describe Drop as peer-to-peer or end-to-end encrypted while the relay
-  still handles plaintext. See [AGENTS.md](../AGENTS.md).
+- Two claims are narrow and must stay narrow. **End-to-end encrypted** is true
+  of CLI-to-CLI transfers and not of browser transfers, which are only as strong
+  as the code the site delivered. **Peer-to-peer** is a claim about the direct
+  QUIC path once it ships, never about Drop as a whole, since every transfer
+  today crosses the relay. Never blur either pair. See
+  [AGENTS.md](../AGENTS.md) and [`decisions.md`](decisions.md) entries 7 and 11.
 - Record a decision entry when changing the persistence stance, the session
   lifecycle, the encryption model, the deployment shape, or the resource
   bounds.
@@ -101,5 +110,3 @@ Tracked so it is not rediscovered, but left alone for now:
 - `MAX_UPLOAD_SIZE_LABEL` in [`config.rs`](../src/config.rs) reads `4 GB` while
   the enforced limit is 4 GiB and every document says 4 GiB. It is user-visible
   in error text.
-- There is no `architecture.md`. The root README's architecture table plus
-  `protocol.md` currently cover it; add one only when they stop being enough.

@@ -1,15 +1,13 @@
-//! Transport to a Drop relay: session creation over HTTP, transfer over
-//! WebSocket.
+//! The relay's HTTP API: session creation, and the origin it is reached at.
+//!
+//! Carrying the transfer itself is [`crate::transport`]'s job. The split is
+//! not cosmetic: this file is relay-specific by nature — a transfer that needs
+//! no server creates no session — while the transport is the part a second
+//! carrier has to reimplement.
 
 use std::fmt;
 
 use serde::Deserialize;
-use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::client::IntoClientRequest,
-};
-
-pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// The hosted relay's API origin.
 ///
@@ -68,16 +66,6 @@ pub fn normalize_origin(server: &str) -> String {
     format!("https://{trimmed}")
 }
 
-fn websocket_origin(origin: &str) -> String {
-    if let Some(rest) = origin.strip_prefix("https://") {
-        format!("wss://{rest}")
-    } else if let Some(rest) = origin.strip_prefix("http://") {
-        format!("ws://{rest}")
-    } else {
-        origin.to_string()
-    }
-}
-
 /// Asks the relay for a one-time session code.
 /// Reserves a session and returns its nameplate.
 ///
@@ -113,40 +101,9 @@ pub fn create_session(origin: &str, ciphertext_size: u64) -> Result<String, Clie
     }
 }
 
-async fn open(origin: &str, path: &str) -> Result<Socket, ClientError> {
-    let url = format!("{}{}", websocket_origin(origin), path);
-
-    let request = url
-        .as_str()
-        .into_client_request()
-        .map_err(|error| ClientError::Transport(format!("invalid relay URL {url}: {error}")))?;
-
-    let (socket, _) = connect_async(request).await.map_err(|error| {
-        ClientError::Transport(format!("could not open a transfer connection: {error}"))
-    })?;
-
-    Ok(socket)
-}
-
-pub async fn open_upload(origin: &str, code: &str) -> Result<Socket, ClientError> {
-    open(origin, &format!("/ws/upload/{}", encode_code(code))).await
-}
-
-pub async fn open_download(origin: &str, code: &str) -> Result<Socket, ClientError> {
-    open(origin, &format!("/ws/download/{}", encode_code(code))).await
-}
-
-/// Session codes are six uppercase hex characters, so anything outside that set
-/// is a user typo rather than something to percent-encode and send onward.
-fn encode_code(code: &str) -> String {
-    code.chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{normalize_origin, websocket_origin};
+    use super::normalize_origin;
 
     #[test]
     fn assumes_https_for_a_bare_host() {
@@ -161,18 +118,6 @@ mod tests {
         assert_eq!(
             normalize_origin("http://127.0.0.1:8080/"),
             "http://127.0.0.1:8080"
-        );
-    }
-
-    #[test]
-    fn maps_origins_onto_matching_websocket_schemes() {
-        assert_eq!(
-            websocket_origin("https://drop.lifbom.com"),
-            "wss://drop.lifbom.com"
-        );
-        assert_eq!(
-            websocket_origin("http://localhost:8080"),
-            "ws://localhost:8080"
         );
     }
 }

@@ -308,3 +308,168 @@ than yielding a module with no entropy, and `web/tests/envelope.test.mjs` pins
 that property by asserting two handshakes differ. Interoperation in both
 directions is held by `web/tests/interop.test.mjs`, which runs a real relay and
 the real CLI.
+
+## 12. The control vocabulary is the peer's, and a relay only embellishes it
+
+**Decision.** The transfer paths speak the vocabulary two peers use with each
+other. Anything a relay adds, renames, or invents is treated as that relay's
+embellishment: understood where it appears, never required.
+
+Concretely, the sender now accepts the receiver's own frames as well as the
+relay's rewording of them, and the wait for the peer to arrive stops being a
+frame at all:
+
+| The receiver sends | A relay turns it into | The sender accepts |
+| --- | --- | --- |
+| `chunk_ack` | `ack` | both |
+| `complete` with `bytes_received` | `status: transfer_complete` | both |
+| — | `status: receiver_connected` | neither — see below |
+| — | `status: sending` | neither; already ignored |
+
+`receiver_connected` is not a frame the sender waits for any more. Whether a
+peer must be waited for is a property of the carrier — a relay session exists
+before either side joins and can say so; a QUIC connection is a connection to
+somebody and cannot — so it is `Transport::await_peer`, a method the relay
+transport implements by waiting and a direct transport answers immediately.
+
+**Why this and not the alternative.** The other option was to have each new
+transport synthesize the relay's statuses, so every carrier presents one
+vocabulary. That is a smaller change and it keeps the relay path frozen, but it
+makes the relay's accidents into the protocol: a direct connection would be
+manufacturing a `receiver_connected` for nobody, and every future transport
+would inherit the obligation. The relay is meant to be the fallback, so its
+wording should not be the standard the fallback-free path has to imitate.
+
+**What it costs.** The sender validates the receiver's byte count itself when
+the count arrives directly. The relay was doing that check before it reworded
+the frame, and without it a direct transfer would report success on the
+receiver's unchecked word — a weaker promise than the relayed path already
+makes. That check now exists in two places, which is the price of the relay
+staying trustworthy about its own path while not being required for the other.
+
+**What it does not change.** Nothing on the wire. The relay sends exactly what
+it sent before and no released client is affected; this widens what a sender
+understands rather than narrowing what anything may send. It is not a breaking
+change and needs no version bump.
+
+**Consequences.** `protocol.md` now states the peer vocabulary and the relay's
+embellishments separately, so a third client written against it will
+interoperate over either carrier. `wait_for_receiver` is gone from the send
+path. The receive path needed no changes at all: the receiver was already
+speaking peer vocabulary, and only the sender was listening for things the
+relay had invented.
+
+## 13. The sender enforces one guess, and asks a human before granting another
+
+**Decision.** On a direct transfer the **sender** is what limits password
+guessing, because it is the only participant a serverless transfer is
+guaranteed to have. A peer that fails the code consumes the transfer, and the
+sender then asks the human sitting in front of it whether to allow another
+attempt:
+
+```text
+A peer connected and failed the code.
+This may be a mistype, or someone guessing.
+Allow another attempt? [y/N]
+```
+
+Declining, or running without a terminal, ends the transfer.
+
+**A peer has failed the code when it fails to act on the sealed metadata.** Not
+when SPAKE2 fails — SPAKE2 succeeds for an attacker, which is exactly why a
+wrong password surfaces later at the metadata rather than at the handshake.
+Completing the exchange proves nothing, so it cannot be the commitment point.
+The honest trigger is what the peer does after `meta`: an explicit failure, a
+timeout, and a disconnect all count the same, which is what makes the honest
+mistyper and the silent attacker indistinguishable to the sender — as they
+should be.
+
+**Why this needed deciding at all.** The security argument for a 33-bit password
+is that an attacker gets *one* attempt. Nothing in the envelope provides that.
+The relay did: `claim_receiver` refuses a second claim on a session, so a wrong
+guess burns it and the real receiver is turned away. Removing the relay removes
+the enforcement and leaves an unlimited online oracle — enumerate a 24-bit
+nameplate, derive the same rendezvous key since its input is public, connect,
+guess, disconnect, repeat. That is not 33 bits of security, it is 33 bits of
+work at network speed, and it would have shipped silently because every
+individual piece looks correct.
+
+**Why the prompt and not the alternatives.** Three options were real:
+
+| | Attacker's rate | Cost of a mistype |
+| --- | --- | --- |
+| Strict, one attempt | one guess, ever | the transfer |
+| Bounded, three attempts | three guesses, unattended | forgiving |
+| **Prompt the human** | **one guess per human approval** | **forgiving** |
+
+Strict matches the relay exactly and is the safest, but a receiver who
+fat-fingers one word loses the transfer with no relay error to explain why.
+Bounded is forgiving and costs only ~1.6 bits — 33 down to 31.4, still five
+billion to one — but an unattended sender cannot see that it is being probed,
+which is the part that matters more than the bits.
+
+The prompt is stronger than either. An attacker grinding the code needs a human
+to approve every single guess, which caps the attack at human speed *and makes
+it visible* — the sender watches the attempt counter climb and stops. It is the
+one option where being attacked is something the victim notices.
+
+**What it costs.** Denial of service, unchanged from the relay design and
+already documented there: someone who guesses a nameplate can burn a transfer
+without learning anything. It also puts an interactive prompt in the send path,
+so `drop send` now behaves differently with and without a TTY. Non-interactive
+use gets strict behaviour, which is the safe direction to fail.
+
+**What it does not change.** Nothing about the relay path, which keeps enforcing
+one claim server-side. Nothing on the wire. This is sender-side policy, and a
+receiver cannot tell the difference.
+
+**Consequences.** The QUIC path stays unreachable by default until this is
+implemented; it is the gate on Phase 4, not `pkarr`. `security.md` gains the
+distinction between what the relay enforces and what the sender enforces, since
+the same guarantee now has two different mechanisms behind it depending on the
+path taken.
+
+## 14. A rendezvous record carries a public address and a relay, never a private one
+
+**Decision.** Before publishing an `EndpointAddr` to the DHT, strip every
+private address from it. What goes into the record is the public address and the
+home relay URL:
+
+```text
+published:  203.0.113.44:41641
+            relay: euw1.relay.iroh.link
+
+withheld:   192.168.1.23:41641
+            172.17.0.1:41641   (docker0)
+            10.8.0.6:41641     (wireguard)
+```
+
+**Why.** iroh hands over every local interface it found, and entry 10 already
+accepted that a nameplate is small enough to enumerate, so a published record is
+readable by anyone willing to walk 24 bits. Entry 10 named the disclosure of a
+*public* address as the cost of going serverless. It did not name this one: that
+the same record maps the sender's **internal network topology** — which private
+ranges they use, that they run Docker, that they are on a VPN — to a stranger
+who guessed a number. That is a different and worse disclosure than an IP, and
+it was never accepted because it was never noticed.
+
+**What it costs.** Two peers on the same LAN can no longer find each other
+directly through the DHT, because the address that would let them is exactly the
+one being withheld. They fall back through the relay: correct, encrypted, and
+slower than a transfer that never should have left the building. Direct LAN
+discovery is worth having and should come back as something local — mDNS, or an
+explicitly passed address — where the address never enters a public record at
+all.
+
+**Why not the alternatives.** Publishing the relay URL alone leaks least, since
+no address of the sender's enters the DHT, but it makes every direct transfer
+depend on n0's relay to bootstrap — an odd shape for the path whose entire
+purpose is needing no third party. Publishing everything and documenting it is
+honest but asks the wrong person to accept the risk: the sender is the one
+exposed, and they are not the one reading `security.md`.
+
+**Consequences.** The publish step filters rather than passing iroh's value
+through, so the filter needs a test that fails if a private range ever reaches a
+record. `security.md` states the residual disclosure — a public IP under a
+guessable key — as a known and accepted cost, and states the LAN case as
+deliberately given up rather than overlooked.

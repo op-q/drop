@@ -114,6 +114,45 @@ existed — the transfer stalled with no error on either side until the session
 expired. That is what the refusal replaces, and it is why the receiver replies
 rather than opens.
 
+## The peer vocabulary, and what the relay adds to it
+
+A transfer is a conversation between two peers. The relay carries it, and it
+also embellishes it: it renames two frames and invents two more. Both are
+listed here so a third client interoperates over either carrier, and so that
+nothing below is mistaken for something a peer said.
+
+| Frame | Who produces it | Meaning |
+| --- | --- | --- |
+| `key_exchange` | either peer | Forwarded verbatim |
+| `meta` | the sender | Forwarded verbatim |
+| binary chunks | the sender | Forwarded verbatim |
+| `chunk_ack` | the receiver | The relay renames it `ack` for the sender |
+| `complete` (sender) | the sender | All declared bytes are sent |
+| `complete` (receiver, with `bytes_received`) | the receiver | The relay checks the count, then reports `status: transfer_complete` instead |
+| `status: receiver_connected` | **the relay** | Invented. No peer sends it |
+| `status: waiting_for_sender` / `waiting_for_receiver` | **the relay** | Invented |
+| `status: sending` | **the relay** | Invented |
+| `progress` | **the relay** | Invented; advisory, and safe to ignore |
+| `meta_ok` | the receiver | **Direct path only.** Never sent over the relay |
+
+A sender must accept the receiver's `chunk_ack` and `complete` as well as the
+relay's `ack` and `status: transfer_complete`, because which one arrives says
+only what carried the transfer. A sender that accepts a receiver's `complete`
+must check `bytes_received` against what it sent: over the relay that check is
+already done before the rewording, and skipping it directly would report
+success on an unchecked claim.
+
+A sender must **not** require `status: receiver_connected`. Whether the peer
+has to be waited for at all is a property of the carrier, not of the protocol.
+Recorded as entry 12 in [`decisions.md`](decisions.md).
+
+`meta_ok` is the one frame that is not common to both carriers, and a client
+must get that right in both directions. It is described under
+[the metadata checkpoint](#the-metadata-checkpoint) below. Sending it over the
+relay is not merely redundant: the relay parses receiver frames into a closed
+set and fails the session on anything outside it, so a receiver that sends
+`meta_ok` unconditionally breaks every relay transfer.
+
 ## Sender to relay
 
 Text frames, tagged JSON:
@@ -203,6 +242,94 @@ reports success after the receiver's final count matches the declared size,
 which is why a transfer is confirmed by the receiver rather than assumed by the
 sender.
 
+## The envelope
+
+What is inside the frames above. A relay never needs this section; a second
+client implementation needs all of it.
+
+### Key schedule
+
+```text
+code = NAMEPLATE-word-word-word
+       ^^^^^^^^^ public, routes            ^^^^^^^^^^^^^^^ secret, authenticates
+
+password = the three words, ASCII, dash-separated, lowercase
+identity = "drop/v1/transfer/" + nameplate
+
+SPAKE2 (Ed25519 group, symmetric mode, password, identity)
+   └─ both peers exchange one message and agree on a shared secret
+
+HKDF-SHA256 over that secret, no salt, three expansions:
+   info "drop/v1/chunk" -> chunk_key  32 bytes
+   info "drop/v1/meta"  -> meta_key   32 bytes
+   info "drop/v1/salt"  -> salt        4 bytes
+```
+
+Symmetric mode is used because either peer may connect first and the protocol
+has no natural A/B assignment. The identity binds a handshake to one session:
+the nameplate is public so it adds no secrecy, but it stops a relay running two
+sessions from splicing a message from one into the other.
+
+Completing the handshake does **not** prove the peer knew the code. A wrong
+password yields a well-formed message and a different key, which is detected
+when the sealed metadata fails to open.
+
+### Sealing
+
+AES-256-GCM throughout. The 96-bit nonce is structural, never random:
+
+```text
+nonce = salt(4 bytes) || counter(8 bytes, big-endian)
+
+  chunks    counter = 0, 1, 2, ... in order
+  metadata  counter = 2^64 - 1        cannot collide with any chunk
+```
+
+Every sealed frame carries 17 bytes of additional authenticated data —
+authenticated, not encrypted, and not transmitted, because both sides
+reconstruct it:
+
+```text
+aad = version(1 byte) || index(8 bytes, BE) || total(8 bytes, BE)
+
+  chunks    index = the chunk's counter,  total = total chunk count
+  metadata  index = 2^64 - 1,             total = the declared ciphertext size
+```
+
+Binding every chunk to both its own index and the total count is what makes
+four different attacks detectable:
+
+| Attack | Caught by |
+| --- | --- |
+| Modified bytes | the GCM tag |
+| Reordered chunks | the index in the AAD does not match the expected counter |
+| Duplicated chunk | same |
+| Truncated stream | the count of chunks opened against the authenticated `total` |
+
+Truncation is the one a per-chunk tag cannot catch alone: every chunk that did
+arrive is perfectly authentic. Only counting them against the total detects a
+stream that simply stopped.
+
+A nonce must never repeat under one key. The key here is freshly derived per
+transfer and the counter cannot wrap within a transfer, so repetition is
+impossible by construction rather than by luck — which is why a counter is used
+instead of random nonces, and why a future resume feature cannot simply restart
+the counter on reconnect.
+
+### Sizes
+
+| Value | Size |
+| --- | --- |
+| Plaintext chunk | 1 MiB, the last one shorter |
+| Sealed chunk | plaintext + 16 tag bytes |
+| Metadata plaintext | JSON of `{filename, mime_type, plaintext_size}` |
+| Metadata on the wire | hex of the sealed blob, inside `meta.metadata` |
+
+`meta.ciphertext_size` is the total sealed size and is what the relay meters,
+bounds, and acknowledges. The plaintext size travels **inside** the sealed
+metadata. Confusing the two stalls a transfer one authentication tag short of
+finishing.
+
 ## Framing, flow control, and limits
 
 | Property | Value | Source |
@@ -239,6 +366,126 @@ The socket survives a human-scale pause: the idle timeout is reset by the pong
 answering each heartbeat ping. The five-minute session lifetime is the binding
 constraint on an idle session, not the socket timeout.
 
+## The direct path: framing a transfer on a QUIC stream
+
+Everything above describes a transfer carried by the relay. A CLI-to-CLI
+transfer carries the **same envelope and the same vocabulary** over a QUIC
+stream instead, and this section is only the difference.
+
+Implemented in `cli/src/transport/framed.rs` and `cli/src/transport/quic.rs`.
+Not yet reachable from the `drop` binary — see
+[`plans/peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md)
+phases 3 and 4.
+
+### Why framing is needed at all
+
+A WebSocket hands a transfer its framing for free: every message carries its own
+length, and the text/binary opcode already says whether it is control or
+payload. A QUIC stream gives neither — it is an ordered, reliable sequence of
+bytes and nothing more. So the direct transport declares both.
+
+```text
+┌──────┬─────────────────┬────────────────┐
+│ kind │ length (BE u32) │ payload        │
+│ 1 B  │ 4 B             │ `length` bytes │
+└──────┴─────────────────┴────────────────┘
+  0x01  control — payload is UTF-8 JSON, the same objects as above
+  0x02  chunk   — payload is sealed bytes, opaque to the transport
+```
+
+| Property | Value | Source |
+| --- | --- | --- |
+| ALPN | `drop/transfer/1` | `DROP_ALPN` |
+| Header | 5 bytes | `HEADER_BYTES` |
+| Maximum accepted frame | 1 MiB + 16 B | `MAX_FRAME_BYTES` |
+| Streams per transfer | 1, bidirectional | — |
+
+The length is declared *before* the payload, so a hostile peer can declare one
+far larger than any real frame and make the reader allocate it. The cap is
+checked before a single payload byte is read. It is the size of a sealed chunk —
+plaintext plus tag — which covers control frames too, since the largest of those
+carries hex-encoded sealed metadata the relay already bounds at 8 KiB.
+
+The ALPN carries a version. Two builds whose framing disagrees are refused by
+QUIC before either side allocates anything, which is cheaper and clearer than
+discovering the mismatch in a frame header.
+
+### Who opens, and who hangs up
+
+Two orderings here are load-bearing, and both fail as hangs rather than errors
+if reversed.
+
+**The sender accepts the connection and opens the stream.** The receiver dials
+and accepts it. This reads backwards until you know that `accept_bi` resolves
+only when the peer first *writes*, not when it opens a stream — and Drop's
+sender speaks first, since `key_exchange` originates there. The receiver is the
+one that resolved an address, so it is necessarily the dialler.
+
+**Only the sender closes the connection.** A QUIC `CONNECTION_CLOSE` permits the
+peer to discard stream data it has received but not yet handed to its
+application, *including data it already acknowledged*. The receiver's final act
+is writing the `complete` that the sender is blocked reading, so a receiver that
+closes immediately destroys that frame in flight — and the sender reports a lost
+connection for a transfer whose file is already correct on disk. The rule, as
+iroh states it on `Connection::close`: only the peer last **receiving**
+application data can be certain everything arrived, and closing is then the only
+reliable thing it can do. In Drop that peer is the sender. The receiver finishes
+its stream, which flushes and signals that no more frames are coming, and waits
+to be closed.
+
+### The metadata checkpoint
+
+One frame the relay path does not have, and the reason the direct path needs
+it. Recorded as entry 13 in [`decisions.md`](decisions.md).
+
+```text
+sender                                    receiver
+  │  meta (version, size, sealed blob)         │
+  ├───────────────────────────────────────────▶│
+  │                                            │ opens the metadata
+  │                     meta_ok                │
+  │◀───────────────────────────────────────────┤
+  │  first chunk — and not one byte before it  │
+  ├───────────────────────────────────────────▶│
+```
+
+The security argument for a 33-bit password is that an attacker gets **one**
+attempt. Over the relay a third party enforces that: a second claim on a
+session is refused, so a wrong guess burns it. A direct connection has no third
+party, and without this checkpoint the sender streams an entire payload before
+learning anything about who it is talking to — so a wrong guess would cost an
+attacker one connection and reveal one bit. That is not 33 bits of security, it
+is 33 bits of work at network speed.
+
+- The receiver sends `meta_ok` once it has opened the sealed metadata, and
+  before it creates anything on disk. Opening it is what proves the peer knew
+  the code; a receiver that then fails to write a file has still guessed
+  correctly.
+- A receiver that cannot open the metadata sends `error` and stops.
+- The sender sends no chunk until `meta_ok` arrives, and waits at most 30
+  seconds for it.
+- **An explicit `error`, a timeout, a disconnect and any other frame are one
+  outcome**: one consumed attempt. From the sender's side an honest mistyper
+  and a silent attacker are indistinguishable, and treating them differently
+  would tell an attacker which it had been taken for.
+
+What the sender does with a consumed attempt is policy rather than protocol,
+and a receiver cannot observe it: the sender asks the human in front of it
+whether to allow another, and a sender with no terminal allows none.
+
+### What is unchanged
+
+- **The envelope.** Same key schedule, same nonces, same AAD, same sizes. A
+  transport that could tell a sealed chunk from any other bytes would be a
+  transport that could read the payload.
+- **The control vocabulary.** The peer's words are canonical and the relay's are
+  the embellishment, which is exactly what makes one vocabulary serve both
+  carriers. See the section above and
+  [`decisions.md`](decisions.md) entry 12.
+- **The flow control.** Same 16 MiB window, same 4 MiB acknowledgement batches.
+  QUIC has flow control of its own underneath, but the application-level window
+  is what bounds the receiver's write-out, not the network.
+
 ## Planned changes
 
 Not implemented. Tracked in
@@ -247,6 +494,10 @@ Not implemented. Tracked in
 - **Receiver confirmation** adds `accept` and `decline` receiver messages and a
   `receiver_accepted` status, and moves the start trigger off
   `receiver_connected`.
-- **A peer-to-peer QUIC transport** carrying this same envelope, with the relay
-  as fallback. See
-  [`plans/peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md).
+- **Rendezvous and fallback for the direct path.** The transport above exists
+  and carries whole transfers in test, but nothing in the `drop` binary reaches
+  it: two peers still have no way to find each other without the relay, and
+  there is no selection between the paths. See
+  [`plans/peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md)
+  phases 3 and 4. The one-guess enforcement those phases depend on is settled in
+  [`decisions.md`](decisions.md) entry 13 and not yet built.

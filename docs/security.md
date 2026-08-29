@@ -90,6 +90,44 @@ The remaining cost of a guessed nameplate is denial of service — the attacker
 burns the session and the real receiver is refused. Codes should still be
 shared through a trusted channel.
 
+### One guess, enforced twice over
+
+"SPAKE2 gives them exactly one attempt" is a claim about the *code*, but
+nothing in the envelope delivers it. Something outside has to, and which
+something depends on the carrier. The guarantee is the same; the mechanism is
+not, and confusing the two is how a path ships without either.
+
+| | What holds an attacker to one guess | What a second guess costs them |
+| --- | --- | --- |
+| **Relay** | `claim_receiver` refuses a second claim on a session | a new session, which needs a new nameplate |
+| **Direct** | the sender stops at the metadata checkpoint | a human approving it, one guess at a time |
+
+Over the relay this is server-side and invisible to both peers. Over a direct
+connection there is no server, so the sender does it: it sends nothing until
+the peer proves it opened the sealed metadata, and a peer that fails — by
+saying so, by timing out, or by vanishing, which count the same — consumes the
+transfer. The sender then asks the person in front of it:
+
+```text
+A peer connected and failed the code.
+This may be a mistype, or someone guessing.
+Allow another attempt? [y/N]
+```
+
+This is stronger than a fixed retry limit and was chosen over one. An attacker
+grinding the code needs a human approval per guess, which caps the attack at
+human speed and — the part that matters more than the bits — *makes it
+visible*: the attempt counter climbs where the sender's owner can see it. A
+sender with no terminal allows nothing, so unattended use gets the strict
+behaviour.
+
+The denial of service above is unchanged by this and applies to both paths:
+someone who guesses a nameplate can burn a transfer without learning anything.
+
+The protocol side is in [`protocol.md`](protocol.md#the-metadata-checkpoint),
+the reasoning and the rejected alternatives in
+[`decisions.md`](decisions.md) entry 13.
+
 ## Hostile input from a peer
 
 The receiving end treats an archive as hostile, because the sender chooses every

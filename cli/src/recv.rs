@@ -7,15 +7,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
-use tokio_tungstenite::tungstenite::Message;
+use serde_json::json;
 
 use crate::{
-    client::{self, Socket},
     crypto,
     payload::{GZIP_MIME, TAR_GZIP_MIME, TAR_MIME},
     progress::Progress,
+    transport::{Frame, Transport, relay},
     untar::TarExtractor,
 };
 
@@ -114,10 +112,22 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
 
     eprintln!("Connecting to {}...", options.origin);
 
-    let mut socket = client::open_download(&options.origin, code.nameplate()).await?;
+    let mut transport = relay::connect_receiver(&options.origin, code.nameplate()).await?;
 
-    let keys = exchange_keys(&mut socket, &code).await?;
-    let (version, ciphertext_size, sealed_metadata) = wait_for_meta(&mut socket).await?;
+    receive_transfer(&mut transport, &code, &options).await
+}
+
+/// The receiver's half of a transfer, over whatever is carrying it.
+///
+/// Written against the conversation rather than against a socket, so a second
+/// carrier is a different `T` and not a second copy of this function.
+pub(crate) async fn receive_transfer<T: Transport>(
+    transport: &mut T,
+    code: &crypto::TransferCode,
+    options: &ReceiveOptions,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let keys = exchange_keys(transport, code).await?;
+    let (version, ciphertext_size, sealed_metadata) = wait_for_meta(transport).await?;
 
     if version != crypto::ENVELOPE_VERSION {
         return Err(crypto::CryptoError::UnsupportedVersion { found: version }.into());
@@ -127,8 +137,39 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
     // before any destination is created and before a byte is written. The
     // session is consumed either way, which is what holds an attacker to one
     // guess.
+    //
+    // Who consumes it differs by carrier. Over the relay a server refuses the
+    // next claim and this side says nothing. Over a direct connection there is
+    // no server, so the sender is waiting to hear how this went and cannot
+    // proceed until it does — `docs/decisions.md` entry 13.
     let sealed_metadata = crypto::from_hex(&sealed_metadata)?;
-    let meta = crypto::open_metadata(&keys, ciphertext_size, &sealed_metadata)?;
+    let meta = match crypto::open_metadata(&keys, ciphertext_size, &sealed_metadata) {
+        Ok(meta) => meta,
+        Err(error) => {
+            // Saying so discloses nothing. A peer that reaches this branch
+            // already knows it failed, and staying silent would only make the
+            // sender wait out its timeout before reaching the same conclusion.
+            if transport.peers_enforce_one_guess() {
+                let _ = transport
+                    .send_control(json!({
+                        "type": "error",
+                        "message": "the code did not open this transfer",
+                    }))
+                    .await;
+            }
+
+            return Err(error.into());
+        }
+    };
+
+    // The checkpoint the direct path adds, and the reason it is here rather
+    // than after the destination is opened: what it attests is that this peer
+    // knew the code, which opening the metadata has just proved. A receiver
+    // that then fails to create a file has still guessed correctly, and
+    // charging it an attempt would punish the wrong failure.
+    if transport.peers_enforce_one_guess() {
+        transport.send_control(json!({ "type": "meta_ok" })).await?;
+    }
 
     let size = meta.plaintext_size;
     let filename = meta.filename;
@@ -149,7 +190,7 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
             || mime_type == TAR_GZIP_MIME
             || strip_gz(&filename).ends_with(".tar"));
 
-    let mut target = open_target(&options, &filename, is_archive, decompress)?;
+    let mut target = open_target(options, &filename, is_archive, decompress)?;
     let mut decoder = if decompress {
         Some(flate2::write::GzDecoder::new(Vec::new()))
     } else {
@@ -165,13 +206,11 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
     let mut written = 0_u64;
     let mut unacknowledged = 0_u64;
 
-    while let Some(message) = socket.next().await {
-        match message? {
-            Message::Binary(data) => {
+    while let Some(frame) = transport.receive().await? {
+        match frame {
+            Frame::Chunk(data) => {
                 if received + data.len() as u64 > ciphertext_size {
-                    let _ = socket
-                        .send(Message::Text(json!({ "type": "error" }).to_string().into()))
-                        .await;
+                    let _ = transport.send_control(json!({ "type": "error" })).await;
                     return Err("the relay sent more bytes than the transfer declared".into());
                 }
 
@@ -183,9 +222,7 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
                 let plaintext = match opener.open_chunk(&data) {
                     Ok(plaintext) => plaintext,
                     Err(error) => {
-                        let _ = socket
-                            .send(Message::Text(json!({ "type": "error" }).to_string().into()))
-                            .await;
+                        let _ = transport.send_control(json!({ "type": "error" })).await;
                         discard_partial(target);
                         return Err(error.into());
                     }
@@ -197,58 +234,42 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
 
                 if unacknowledged >= ACK_INTERVAL_BYTES || received == ciphertext_size {
                     unacknowledged = 0;
-                    socket
-                        .send(Message::Text(
-                            json!({ "type": "chunk_ack", "bytes_received": received })
-                                .to_string()
-                                .into(),
-                        ))
+                    transport
+                        .send_control(json!({ "type": "chunk_ack", "bytes_received": received }))
                         .await?;
                 }
             }
-            Message::Text(text) => {
-                let payload: Value = serde_json::from_str(&text)?;
-
-                match payload["type"].as_str() {
-                    Some("complete") => {
-                        // Every chunk that arrived was authentic; only the
-                        // count against the sealed total shows a stream that
-                        // simply stopped early.
-                        if let Err(error) = opener.finish() {
-                            let _ = socket
-                                .send(Message::Text(json!({ "type": "error" }).to_string().into()))
-                                .await;
-                            discard_partial(target);
-                            return Err(error.into());
-                        }
-
-                        finish(&mut target, decoder, &mut expansion)?;
-                        progress.finish(written);
-
-                        socket
-                            .send(Message::Text(
-                                json!({ "type": "complete", "bytes_received": received })
-                                    .to_string()
-                                    .into(),
-                            ))
-                            .await?;
-
-                        report(&target, written);
-                        let _ = socket.close(None).await;
-                        return Ok(());
+            Frame::Control(payload) => match payload["type"].as_str() {
+                Some("complete") => {
+                    // Every chunk that arrived was authentic; only the count
+                    // against the sealed total shows a stream that simply
+                    // stopped early.
+                    if let Err(error) = opener.finish() {
+                        let _ = transport.send_control(json!({ "type": "error" })).await;
+                        discard_partial(target);
+                        return Err(error.into());
                     }
-                    Some("error") => {
-                        return Err(payload["message"]
-                            .as_str()
-                            .unwrap_or("the relay reported an error")
-                            .to_string()
-                            .into());
-                    }
-                    _ => {}
+
+                    finish(&mut target, decoder, &mut expansion)?;
+                    progress.finish(written);
+
+                    transport
+                        .send_control(json!({ "type": "complete", "bytes_received": received }))
+                        .await?;
+
+                    report(&target, written);
+                    transport.close().await;
+                    return Ok(());
                 }
-            }
-            Message::Close(_) => break,
-            _ => {}
+                Some("error") => {
+                    return Err(payload["message"]
+                        .as_str()
+                        .unwrap_or("the relay reported an error")
+                        .to_string()
+                        .into());
+                }
+                _ => {}
+            },
         }
     }
 
@@ -263,18 +284,16 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
 /// discarded — and the sender then waits for a message that no longer exists,
 /// with neither side seeing an error. The sender's half arriving is the proof
 /// that there is somebody to reply to.
-async fn exchange_keys(
-    socket: &mut Socket,
+async fn exchange_keys<T: Transport>(
+    transport: &mut T,
     code: &crypto::TransferCode,
 ) -> Result<crypto::SessionKeys, Box<dyn Error + Send + Sync>> {
     let (handshake, outbound) = crypto::Handshake::start(code);
 
-    while let Some(message) = socket.next().await {
-        let Message::Text(text) = message? else {
+    while let Some(frame) = transport.receive().await? {
+        let Frame::Control(payload) = frame else {
             continue;
         };
-
-        let payload: Value = serde_json::from_str(&text)?;
 
         match payload["type"].as_str() {
             Some("key_exchange") => {
@@ -282,15 +301,11 @@ async fn exchange_keys(
                     .as_str()
                     .ok_or("the sender sent a malformed key exchange message")?;
 
-                socket
-                    .send(Message::Text(
-                        json!({
-                            "type": "key_exchange",
-                            "message": crypto::to_hex(&outbound),
-                        })
-                        .to_string()
-                        .into(),
-                    ))
+                transport
+                    .send_control(json!({
+                        "type": "key_exchange",
+                        "message": crypto::to_hex(&outbound),
+                    }))
                     .await?;
 
                 return Ok(handshake.finish(&crypto::from_hex(peer)?)?);
@@ -329,15 +344,13 @@ fn discard_partial(target: Target) {
     }
 }
 
-async fn wait_for_meta(
-    socket: &mut Socket,
+async fn wait_for_meta<T: Transport>(
+    transport: &mut T,
 ) -> Result<(u8, u64, String), Box<dyn Error + Send + Sync>> {
-    while let Some(message) = socket.next().await {
-        let Message::Text(text) = message? else {
+    while let Some(frame) = transport.receive().await? {
+        let Frame::Control(payload) = frame else {
             continue;
         };
-
-        let payload: Value = serde_json::from_str(&text)?;
 
         match payload["type"].as_str() {
             Some("meta") => {
@@ -639,5 +652,73 @@ mod expansion_tests {
             guard.record(1).is_err(),
             "expansion beyond the ratio must be refused"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exchange_keys, wait_for_meta};
+    use crate::crypto;
+    use crate::transport::scripted::ScriptedTransport;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn the_receivers_half_is_written_only_after_the_senders_arrives() {
+        let code = crypto::TransferCode::generate_for("A1B2C3").expect("a well-formed code");
+        let (_, sender_half) = crypto::Handshake::start(&code);
+
+        // The status arrives first and must not draw a reply: the sender is
+        // not connected yet, and a half sent now would be dropped.
+        let mut transport = ScriptedTransport::saying(vec![
+            json!({ "type": "status", "status": "waiting_for_sender" }),
+            json!({ "type": "key_exchange", "message": crypto::to_hex(&sender_half) }),
+        ]);
+
+        exchange_keys(&mut transport, &code)
+            .await
+            .expect("the halves agree");
+
+        let sent = transport.sent_control();
+        assert_eq!(sent.len(), 1, "exactly one half, and only in reply");
+        assert_eq!(sent[0]["type"], "key_exchange");
+    }
+
+    #[tokio::test]
+    async fn a_sender_that_stops_before_the_key_exchange_is_an_error() {
+        let code = crypto::TransferCode::generate_for("A1B2C3").expect("a well-formed code");
+        let mut transport = ScriptedTransport::silent();
+
+        // `expect_err` is not available here: `SessionKeys` deliberately does
+        // not implement `Debug`, so a key can never be printed by accident.
+        let Err(error) = exchange_keys(&mut transport, &code).await else {
+            panic!("there was no half to agree with");
+        };
+        assert!(error.to_string().contains("before the sender completed"));
+
+        assert!(
+            transport.sent_control().is_empty(),
+            "nothing to reply to means nothing sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn transfer_details_are_read_past_the_frames_that_precede_them() {
+        let mut transport = ScriptedTransport::saying(vec![
+            json!({ "type": "status", "status": "waiting_for_sender" }),
+            json!({
+                "type": "meta",
+                "version": crypto::ENVELOPE_VERSION,
+                "ciphertext_size": 4096,
+                "metadata": "abcdef",
+            }),
+        ]);
+
+        let (version, ciphertext_size, metadata) = wait_for_meta(&mut transport)
+            .await
+            .expect("the sender described the payload");
+
+        assert_eq!(version, crypto::ENVELOPE_VERSION);
+        assert_eq!(ciphertext_size, 4096);
+        assert_eq!(metadata, "abcdef");
     }
 }
