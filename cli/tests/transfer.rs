@@ -95,6 +95,9 @@ async fn transfer_forcing(
                 SendOptions {
                     origin,
                     compress,
+                    // These drive a real relay in-process, so they pin the
+                    // path rather than letting `auto` reach for a DHT.
+                    path: drop_cli::direct::Path::Relay,
                     on_code: Box::new(move |code| {
                         if let Some(sender) = code_tx.take() {
                             let _ = sender.send(code.to_string());
@@ -120,6 +123,7 @@ async fn transfer_forcing(
             recv::run(
                 &code,
                 ReceiveOptions {
+                    path: drop_cli::direct::Path::Relay,
                     origin,
                     out_dir: destination,
                     extract: true,
@@ -254,6 +258,7 @@ async fn reports_a_clear_error_for_an_unknown_code() {
     let error = recv::run(
         "ZZZZZZ-abandon-ability-able",
         ReceiveOptions {
+            path: drop_cli::direct::Path::Relay,
             origin: origin.clone(),
             out_dir: base.clone(),
             extract: true,
@@ -281,6 +286,7 @@ async fn a_malformed_code_fails_before_the_relay_is_contacted() {
     let error = recv::run(
         "7F2A91-abandon-ability-frobnicate",
         ReceiveOptions {
+            path: drop_cli::direct::Path::Relay,
             // Nothing is listening here. Reaching it at all is the failure.
             origin: "http://127.0.0.1:1".to_string(),
             out_dir: base.clone(),
@@ -500,6 +506,7 @@ async fn a_wrong_code_is_refused_and_leaves_nothing_on_disk() {
                 SendOptions {
                     origin,
                     compress: None,
+                    path: drop_cli::direct::Path::Relay,
                     on_code: Box::new(move |code| {
                         if let Some(sender) = code_tx.take() {
                             let _ = sender.send(code.to_string());
@@ -528,6 +535,7 @@ async fn a_wrong_code_is_refused_and_leaves_nothing_on_disk() {
     let error = recv::run(
         &wrong_code,
         ReceiveOptions {
+            path: drop_cli::direct::Path::Relay,
             origin: origin.clone(),
             out_dir: destination.clone(),
             extract: true,
@@ -600,6 +608,7 @@ async fn a_receiver_that_connects_first_still_completes_the_transfer() {
                 SendOptions {
                     origin,
                     compress: None,
+                    path: drop_cli::direct::Path::Relay,
                     on_code: Box::new(move |code| {
                         if let Some(sender) = code_tx.take() {
                             let _ = sender.send(code.to_string());
@@ -633,6 +642,7 @@ async fn a_receiver_that_connects_first_still_completes_the_transfer() {
             recv::run(
                 &code,
                 ReceiveOptions {
+                    path: drop_cli::direct::Path::Relay,
                     origin,
                     out_dir: destination,
                     extract: true,

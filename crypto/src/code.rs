@@ -40,6 +40,10 @@ pub const SECRET_WORDS: usize = 3;
 /// Bits each word contributes. 2048 words, so exactly 11.
 const BITS_PER_WORD: u32 = 11;
 
+/// Bytes of nameplate a self-allocated code draws, rendered as two hex
+/// characters each. Three gives the same six characters the relay issues.
+const NAMEPLATE_BYTES: usize = 3;
+
 /// A validated transfer code: a routing nameplate plus the secret words.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TransferCode {
@@ -107,6 +111,34 @@ impl TransferCode {
             nameplate: normalise_nameplate(nameplate)?,
             words: words.join("-"),
         })
+    }
+
+    /// Draws a whole code, nameplate included, for a send with no server to
+    /// allocate one.
+    ///
+    /// The relay path calls [`Self::generate_for`] because the relay hands out
+    /// the nameplate and needs it to match a session it created. A direct
+    /// transfer has nobody to ask, so it draws its own — six hex characters,
+    /// the same shape the relay issues, so one code format serves both paths
+    /// and a person cannot tell from a code which way it will travel.
+    ///
+    /// **The nameplate is not a secret and this does not try to make it one.**
+    /// It is 24 bits, it is published to a public DHT, and it is meant to be
+    /// enumerable — see `rendezvous.rs`. What keeps a transfer safe is the
+    /// words, which are drawn separately and never leave this process.
+    ///
+    /// Collision is possible and is the caller's problem, not this function's:
+    /// two live transfers that draw the same nameplate meet at the same DHT
+    /// record. A caller that publishes should resolve first, which costs one
+    /// round trip and also proves the DHT is reachable before a code is shown
+    /// to anybody.
+    pub fn generate() -> Result<Self, CodeError> {
+        let mut entropy = [0u8; NAMEPLATE_BYTES];
+        rand::fill(&mut entropy);
+
+        let nameplate: String = entropy.iter().map(|byte| format!("{byte:02X}")).collect();
+
+        Self::generate_for(&nameplate)
     }
 
     /// Accepts a code as a person is likely to have retyped it.
@@ -212,6 +244,51 @@ impl fmt::Debug for TransferCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A self-allocated code has to be indistinguishable from a relay-issued
+    /// one, or the code itself would tell a stranger which path a transfer is
+    /// taking before they even try it.
+    #[test]
+    fn a_self_drawn_code_has_the_shape_the_relay_issues() {
+        let drawn = TransferCode::generate().expect("a code");
+        let issued = TransferCode::generate_for("7F2A91").expect("a code");
+
+        assert_eq!(drawn.nameplate().len(), issued.nameplate().len());
+        assert!(
+            drawn.nameplate().chars().all(|c| c.is_ascii_hexdigit()),
+            "not hex: {}",
+            drawn.nameplate()
+        );
+        assert!(
+            drawn.nameplate().chars().all(|c| !c.is_lowercase()),
+            "nameplates are printed uppercase: {}",
+            drawn.nameplate()
+        );
+        assert_eq!(
+            drawn.to_shareable().split('-').count(),
+            issued.to_shareable().split('-').count()
+        );
+    }
+
+    /// It must survive the trip through a person retyping it.
+    #[test]
+    fn a_self_drawn_code_parses_back() {
+        let drawn = TransferCode::generate().expect("a code");
+        let reparsed = TransferCode::parse(&drawn.to_shareable()).expect("parses");
+
+        assert_eq!(reparsed.nameplate(), drawn.nameplate());
+        assert_eq!(reparsed.to_shareable(), drawn.to_shareable());
+    }
+
+    /// Two codes drawn in a row must not collide, which would mean the
+    /// nameplate carried no entropy at all.
+    #[test]
+    fn two_drawn_codes_differ() {
+        let first = TransferCode::generate().expect("a code");
+        let second = TransferCode::generate().expect("a code");
+
+        assert_ne!(first.to_shareable(), second.to_shareable());
+    }
 
     const NAMEPLATE: &str = "7F2A91";
 

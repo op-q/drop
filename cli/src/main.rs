@@ -2,7 +2,7 @@
 
 use std::{path::PathBuf, process::ExitCode};
 
-use drop_cli::{client, recv, send};
+use drop_cli::{client, direct, recv, send};
 
 const USAGE: &str = "\
 drop — send a file or folder between two terminals
@@ -19,6 +19,11 @@ COMMANDS
 OPTIONS
     -s, --server <URL>   Relay to use [env: DROP_SERVER]
                          [default: https://api.drop.lifbom.com]
+    -t, --transport <T>  p2p, relay, or auto [default: auto]
+                         p2p connects the two terminals directly and involves
+                         no Drop server at all; relay forwards through one,
+                         which is what a browser peer needs. auto tries p2p
+                         and falls back. p2p fails rather than falling back.
     -c, --compress       (send) Compress before sending. Useful for source
                          trees and documents; skip it for media that is already
                          compressed.
@@ -31,9 +36,12 @@ OPTIONS
     -V, --version        Show the version
 
 NOTES
-    Both peers must be online at the same time: Drop relays bytes live and
-    never stores the file. A code is single use and expires after five idle
-    minutes.
+    Both peers must be online at the same time: Drop never stores the file.
+    A code is single use and expires after five idle minutes.
+
+    Every transfer is encrypted end to end with a key derived from the code,
+    on either transport. What the transport changes is who carries the bytes,
+    not who can read them.
 ";
 
 fn main() -> ExitCode {
@@ -77,7 +85,7 @@ fn run(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + 
 
             runtime()?.block_on(send::run(
                 &PathBuf::from(path),
-                send::SendOptions::printing(options.origin(), compress),
+                send::SendOptions::printing(options.origin(), compress, options.path()?),
             ))
         }
         "recv" | "receive" | "get" => {
@@ -91,6 +99,7 @@ fn run(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + 
                 &code,
                 recv::ReceiveOptions {
                     origin: options.origin(),
+                    path: options.path()?,
                     out_dir: options
                         .out
                         .clone()
@@ -118,6 +127,7 @@ fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
 struct Options {
     positional: Option<String>,
     server: Option<String>,
+    transport: Option<String>,
     out: Option<String>,
     level: Option<u32>,
     compress: bool,
@@ -134,6 +144,20 @@ impl Options {
             .unwrap_or_else(|| client::DEFAULT_SERVER.to_string());
 
         client::normalize_origin(&configured)
+    }
+
+    /// Which carrier to use, from the flag or the environment.
+    ///
+    /// Defaults to `auto`, which is the only value most people should ever
+    /// need: a person sending a file should not have to know what a DHT is.
+    fn path(&self) -> Result<direct::Path, Box<dyn std::error::Error + Send + Sync>> {
+        let configured = self
+            .transport
+            .clone()
+            .or_else(|| std::env::var("DROP_TRANSPORT").ok())
+            .unwrap_or_else(|| "auto".to_string());
+
+        direct::Path::parse(configured.trim()).map_err(Into::into)
     }
 }
 
@@ -154,6 +178,7 @@ fn parse(arguments: &[String]) -> Result<Options, Box<dyn std::error::Error + Se
 
         match argument {
             "-s" | "--server" => options.server = Some(value("--server")?),
+            "-t" | "--transport" => options.transport = Some(value("--transport")?),
             "-o" | "--out" => options.out = Some(value("--out")?),
             "--level" => options.level = Some(value("--level")?.parse()?),
             "-c" | "--compress" => options.compress = true,

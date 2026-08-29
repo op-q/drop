@@ -5,7 +5,7 @@ use std::{error::Error, fmt, future::Future, io::IsTerminal, path::Path, time::D
 use serde_json::{Value, json};
 
 use crate::{
-    client, crypto,
+    client, crypto, direct,
     payload::{self, Payload},
     progress::Progress,
     transport::{Frame, Transport, relay},
@@ -67,6 +67,8 @@ impl fmt::Debug for Attempt {
 pub struct SendOptions {
     pub origin: String,
     pub compress: Option<u32>,
+    /// Which carrier to use. See [`crate::direct::Path`].
+    pub path: crate::direct::Path,
     /// Called once with the session code, as soon as the relay issues it.
     ///
     /// The code is what the other terminal needs, so it is handed to the caller
@@ -78,10 +80,11 @@ pub struct SendOptions {
 impl SendOptions {
     /// Options that print the code to stdout, one line, nothing else, so it
     /// survives being piped into another command.
-    pub fn printing(origin: String, compress: Option<u32>) -> Self {
+    pub fn printing(origin: String, compress: Option<u32>, path: crate::direct::Path) -> Self {
         Self {
             origin,
             compress,
+            path,
             on_code: Box::new(|code| println!("{code}")),
         }
     }
@@ -117,6 +120,94 @@ pub async fn run(
     // ciphertext, so that is what the session reserves.
     let sealed_size = crypto::ciphertext_len(payload.size);
 
+    // Every fallback decision happens here, before a code exists. Once one is
+    // printed the path is fixed, because the two paths name their nameplates
+    // differently and the code carries one of them.
+    if options.path != direct::Path::Relay {
+        match try_direct(&mut options, payload, sealed_size).await {
+            Ok(outcome) => return outcome,
+            Err(failed) => {
+                direct::may_fall_back(options.path, failed.error.as_ref())?;
+                eprintln!("No peer-to-peer path: {}", failed.error);
+                eprintln!("Falling back to the relay.");
+
+                return send_over_relay(&mut options, *failed.payload, sealed_size).await;
+            }
+        }
+    }
+
+    send_over_relay(&mut options, payload, sealed_size).await
+}
+
+/// A direct path that could not be set up, carrying the payload back.
+///
+/// Boxed because a [`Payload`] is large and this rides in an `Err`, which
+/// otherwise makes every `Result` in this file the size of the failure case.
+pub(crate) struct SetupFailed {
+    error: Box<dyn Error + Send + Sync>,
+    payload: Box<Payload>,
+}
+
+/// Sets up a transfer nobody operates, and runs it.
+///
+/// The payload comes back with a setup failure so `run` can still fall back
+/// without re-reading, compressing and spooling the file a second time — the
+/// same reason [`Attempt::FailedTheCode`] carries it.
+async fn try_direct(
+    options: &mut SendOptions,
+    payload: Payload,
+    sealed_size: u64,
+) -> Result<Result<(), Box<dyn Error + Send + Sync>>, Box<SetupFailed>> {
+    eprintln!("Looking for a peer-to-peer path...");
+
+    let directory = match direct::Directory::new() {
+        Ok(directory) => directory,
+        Err(error) => return Err(SetupFailed::new(error, payload)),
+    };
+
+    let published = match direct::publish_sender(&directory).await {
+        Ok(published) => published,
+        Err(error) => return Err(SetupFailed::new(error, payload)),
+    };
+
+    let code = published.code.clone();
+    announce(options, &code);
+    direct::report("peer-to-peer (no Drop server)");
+    eprintln!("Waiting for the receiver to connect...");
+
+    // Only from here does a failure stop being a fallback: the code is out, a
+    // receiver may already be dialling, and starting again elsewhere would send
+    // them to a nameplate nobody is listening on.
+    let endpoint = published.endpoint;
+    let result = send_policing_guesses(
+        || endpoint.accept_transfer(),
+        &code,
+        payload,
+        sealed_size,
+        &mut AskTheTerminal::new(),
+    )
+    .await;
+
+    endpoint.shutdown().await;
+
+    Ok(result)
+}
+
+impl SetupFailed {
+    fn new(error: impl Into<Box<dyn Error + Send + Sync>>, payload: Payload) -> Box<Self> {
+        Box::new(Self {
+            error: error.into(),
+            payload: Box::new(payload),
+        })
+    }
+}
+
+/// The path with a Drop server in it, unchanged.
+async fn send_over_relay(
+    options: &mut SendOptions,
+    payload: Payload,
+    sealed_size: u64,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     // Session creation is a blocking HTTP call, so it runs on the blocking
     // pool rather than stalling a runtime worker.
     let nameplate = {
@@ -128,14 +219,8 @@ pub async fn run(
     // The relay allocated the nameplate; the words are drawn here and never
     // sent anywhere. Together they are what the receiver types.
     let code = crypto::TransferCode::generate_for(&nameplate)?;
-    let shareable = code.to_shareable();
-
-    (options.on_code)(&shareable);
-    eprintln!();
-    eprintln!("  Run this on the other computer:");
-    eprintln!();
-    eprintln!("      drop recv {shareable}");
-    eprintln!();
+    announce(options, &code);
+    direct::report("relay (encrypted; the relay cannot read it)");
     eprintln!("Waiting for the receiver to connect...");
 
     let mut transport = relay::connect_sender(&options.origin, code.nameplate()).await?;
@@ -150,6 +235,18 @@ pub async fn run(
             Err(format!("the receiver could not open this transfer: {what_happened}").into())
         }
     }
+}
+
+/// Shows the code, once, however the caller asked for it to be shown.
+fn announce(options: &mut SendOptions, code: &crypto::TransferCode) {
+    let shareable = code.to_shareable();
+
+    (options.on_code)(&shareable);
+    eprintln!();
+    eprintln!("  Run this on the other computer:");
+    eprintln!();
+    eprintln!("      drop recv {shareable}");
+    eprintln!();
 }
 
 /// The sender's half of a transfer, over whatever is carrying it.

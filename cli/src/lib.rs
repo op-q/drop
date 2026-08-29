@@ -4,6 +4,7 @@
 //! safety rules, and transport can be exercised directly by tests.
 
 pub mod client;
+pub mod direct;
 // Re-exported rather than defined here: the envelope is a separate crate so
 // the browser client can compile it to WebAssembly. Keeping the name `crypto`
 // means every call site below reads the same as before the split.

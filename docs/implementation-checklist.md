@@ -1,7 +1,7 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — Phases 1-3 and the one-guess gate built; Phase 4 is what makes any of it reachable
+Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — reachable and proved over a real network; Phase 5 (documentation) is what remains
 Last updated: **2026-08-29**
 
 The tactical view of what is being built and what state it is in. The detailed
@@ -141,11 +141,26 @@ cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
       proved:** none of it has run over a real network, for the same UDP reason
       as Phases 2 and 3 — the pair tests use an in-memory byte pipe and
       loopback QUIC.
-- [ ] Phase 4 — selection, automatic fallback, and reporting the path taken
+- [x] Phase 4 — selection, automatic fallback, and reporting the path taken.
+      Done 2026-08-29. `--transport p2p|relay|auto` (and `DROP_TRANSPORT`),
+      defaulting to `auto`; a locally drawn nameplate, since a serverless send
+      has nobody to allocate one; and both halves print which path they took.
+      Fallback is decided before a code is printed, because the two paths name
+      their nameplates differently — the reasoning is in the plan.
 - [ ] Phase 5 — documentation, including the DHT address-disclosure weakness
 
-Gate: two CLIs transfer with no Drop server reachable; a UDP-blocked network
-still completes over the relay and says so.
+**Gate: met, 2026-08-29, for its first half.** Two CLIs moved 3,000,000 bytes
+byte-identical with `DROP_SERVER` pointed at a dead port and `--transport p2p`
+forbidding fallback, so no Drop server was in the path. The relay half of the
+gate — a UDP-blocked network completing over the relay and saying so — is not
+re-testable here any more, because outbound UDP started working on this machine
+and `--transport relay` is now the only way to exercise that branch. It passes.
+
+Found by that first run and fixed: the receiver dropped the QUIC endpoint on the
+way out of its dial, killing every direct transfer at the moment it started.
+Every loopback test passed throughout — they hold both endpoints in scope and
+so could not express the bug. Now pinned by
+`dropping_an_endpoint_ends_the_transfer_on_it`.
 
 ## 4. Receiver preview and confirmation
 
