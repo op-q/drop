@@ -21,9 +21,14 @@ OPTIONS
                          [default: https://api.drop.lifbom.com]
     -t, --transport <T>  p2p, relay, or auto [default: auto]
                          p2p connects the two terminals directly and involves
-                         no Drop server at all; relay forwards through one,
-                         which is what a browser peer needs. auto tries p2p
-                         and falls back. p2p fails rather than falling back.
+                         no Drop server at all; relay forwards through one.
+                         auto tries p2p and falls back; p2p fails rather than
+                         falling back.
+
+                         Use relay when the other end is a browser. A browser
+                         cannot speak QUIC to a peer, so it can only meet you
+                         at the relay — and a sender on auto that reaches a
+                         peer-to-peer path will wait there instead.
     -c, --compress       (send) Compress before sending. Useful for source
                          trees and documents; skip it for media that is already
                          compressed.
