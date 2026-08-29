@@ -1,194 +1,289 @@
 # End-to-end encryption plan
 
-Status: **proposed**
+Status: **done**
 Created: **2026-08-19**
-Last updated: **2026-08-19**
+Last updated: **2026-08-24**
 
 ## Goal
 
-The relay forwards bytes it cannot read. A Drop operator, and anyone who
-compromises a Drop server, sees ciphertext and a byte count instead of files and
-filenames.
+Both peers derive a session key from the short transfer code without it ever
+crossing the wire, and the payload is encrypted under that key. Any relay in
+the path forwards bytes it cannot read.
 
-## Context
+## Phase 0 — Decided
 
-This is the largest of the three planned changes and the only one that alters
-what Drop *is*. It closes the gap the README currently states plainly: the relay
-handles file bytes in memory while relaying them, so the operator and a
-compromised server can access an active transfer.
+Resolved 2026-08-20 and recorded in [`../decisions.md`](../decisions.md)
+entry 7. Superseding the draft that lived here:
 
-It also requires a product decision, not just an implementation. AGENTS.md today
-says: *"Do not describe Drop as peer-to-peer or end-to-end encrypted."* That rule
-exists to stop the documentation overclaiming. Shipping this means deliberately
-replacing it with a narrower, accurate claim. The pending decision is recorded
-at [`../decisions.md`](../decisions.md) entry 7 and must be resolved there, not
-inside an implementation branch.
+- **Model adopted.** Client-side encryption, relay sees ciphertext plus a byte
+  total.
+- **Cipher: AES-256-GCM**, not XChaCha20-Poly1305. The nonce-misuse headroom
+  XChaCha buys is worth nothing when the key is freshly derived per transfer;
+  AES-GCM is native in WebCrypto and hardware-accelerated at both ends.
+- **Key agreement: SPAKE2**, seeded by the transfer code, with HKDF-SHA256 over
+  its output. The key is never transmitted and never derived from anything the
+  relay holds.
+- **Claim:** CLI-to-CLI is end-to-end encrypted; the browser case is encrypted
+  but bounded by the delivered JavaScript. Never blur the two.
 
-### Why the architecture already suits it
+The envelope is **transport-independent** by requirement, not by accident. The
+same chunk format rides the peer-to-peer transport in
+[`peer-to-peer-transport-plan-2026-08-20.md`](peer-to-peer-transport-plan-2026-08-20.md)
+and the WebSocket relay. That is the property that turns the relay into an
+untrusted fallback instead of a component to be deleted.
 
-- The relay never inspects chunk contents. `TransferService`
-  ([`transfer_service.rs`](../../src/services/transfer_service.rs)) is under a
-  hundred lines and forwards opaque binary frames against a byte budget.
-  Encrypting the payload requires no change to the relay's hot path.
-- The one thing the relay genuinely needs — the total byte count — survives
-  encryption. An AEAD adds a fixed tag per chunk, so ciphertext length is a
-  deterministic function of plaintext length. The sender can still declare an
-  exact total up front, which is what the 4 GiB limit, progress reporting, and
-  the compression design all depend on. See
-  [`../decisions.md`](../decisions.md) entry 2.
-- The same scheme lands in both clients, so browser-to-CLI transfers keep
-  working.
+## Design
 
-### What the session code is today
+### The code
 
-Six uppercase hexadecimal characters from a UUIDv4
-([`session_service.rs:68`](../../src/services/session_service.rs#L68)) — roughly
-24 bits. [`../security.md`](../security.md) records this as a known weakness.
-Encryption changes its meaning materially: once the key travels beside the code
-rather than being implied by it, guessing a code no longer yields readable
-bytes.
+A code reads `7F2A91-crossover-clockwork-ridge`: a nameplate the relay
+allocates, followed by three words from the BIP-39 English wordlist.
 
-The key must be generated client-side and must never be derived from the code.
-The relay knows the code.
+**The two halves have to be different bytes.** Only the nameplate is sent to
+the relay, and it carries nothing but routing. The words are the PAKE password
+and never leave either client. This section originally made the whole code the
+password and also handed it to the relay, which is broken — a relay holding the
+password runs the exchange against both peers at once and reads and rewrites
+everything in the middle. Caught during implementation on 2026-08-21 and
+recorded in [`../decisions.md`](../decisions.md) entry 7.
 
-## Constraints and invariants
+- 2048^3 = 33 bits in the words. That is small, and it is sufficient only
+  because the PAKE gives an attacker one online guess before the session burns.
+- BIP-39 is chosen for speakability and because every word has a unique 4-letter
+  prefix, which makes prefix-completion on entry possible later.
+- Case-insensitive on entry, and normalised before use as the PAKE password.
+  This also fixes the recorded bug where `drop recv 4607f9` is rejected while
+  `4607F9` succeeds.
+- The nameplate stays the relay's existing six uppercase hex characters,
+  allocated in
+  [`session_service.rs`](../../src/services/session_service.rs).
 
-- The relay must not be able to derive the key, and must never receive it.
-- The sender must still declare an exact ciphertext length before sending.
-- Chunk-level integrity must cover ordering and completeness, not just
-  per-chunk contents. A malicious relay that reorders, drops, or truncates
-  chunks must be detected.
-- The 4 GiB limit, the relay budget, and the per-IP bounds all continue to
-  apply against ciphertext.
-- An old client meeting a new one must fail cleanly, never write garbage to
-  disk.
-- No claim may blur the browser case and the CLI case. See Risks.
+### Handshake
 
-## Non-goals
+`spake2` (0.4) symmetric mode over the Ed25519 group, password = the normalised
+**words only**. The SPAKE2 identity is `drop/v1/transfer/<nameplate>`, which
+binds the handshake to one session: a relay running two transfers cannot splice
+a message from one into the other. Each side sends its PAKE message, receives
+the peer's, and finishes to a shared secret. HKDF-SHA256 expands it with domain
+separation:
 
-- Peer-to-peer transport. The relay stays in the path.
-- Identity, authentication, or verifying *who* the other party is. This protects
-  content from the relay; it does not tell either peer who they are talking to.
-- Encrypting the byte count, session code, or connection metadata. The relay
-  needs the first and sees the rest.
-- Signed release artifacts. Related trust problem, separate work.
+| Info string | Output |
+| --- | --- |
+| `drop/v1/meta` | 32-byte key for the metadata blob |
+| `drop/v1/chunk` | 32-byte key for payload chunks |
+| `drop/v1/salt` | 4-byte per-session nonce prefix |
+
+**One guess only.** A wrong code produces a different shared secret, so the
+first authenticated frame fails to open. The session must then be destroyed
+rather than retried — if a wrong guess can be retried on the same code, the
+short code stops being safe. This is a protocol requirement, not an
+implementation detail.
+
+### Chunk framing
+
+Nonce is 12 bytes: the 4-byte HKDF salt, then a `u64` big-endian counter
+starting at zero and incrementing per chunk. At the 1 MiB chunk size and the
+4 GiB limit the counter cannot exceed 4096, so it cannot wrap.
+
+AAD per chunk binds position and completeness:
+
+```text
+AAD = version_u8 || chunk_index_u64_be || total_chunks_u64_be
+```
+
+Reordering changes `chunk_index`, truncation changes the count of chunks
+actually delivered against the authenticated `total_chunks`, and dropping does
+both. All three fail the tag rather than producing plausible output.
+
+### Length accounting
+
+`ciphertext_len = plaintext_len + 16 * ceil(plaintext_len / CHUNK)`.
+
+Deterministic, so [`../decisions.md`](../decisions.md) entry 2 survives: the
+sender still declares an exact total before the first byte. Compression happens
+**before** encryption; the temporary-file measurement already yields the
+compressed plaintext length, and the formula above converts it.
+
+### Metadata
+
+`filename`, `mime_type`, and the plaintext size move out of cleartext `meta`
+into a blob sealed under the metadata key, nonce counter reserved at `u64::MAX`
+so it can never collide with a chunk nonce. Cleartext `meta` retains only the
+ciphertext byte total and the envelope version.
+
+The blob's AAD binds the **sealed size**, not the chunk count. Binding the
+chunk count is impossible: it is a function of the plaintext size, which is
+inside the blob the receiver has not opened yet. The sealed size is known to
+both ends beforehand, and binding it means a relay that rewrites the declared
+size cannot have the metadata open either.
 
 ## Phases
 
-### Phase 0 — Decide
+### Phase 1 — Envelope, transport-independent — **done 2026-08-20**
 
-- [ ] Resolve entry 7 in [`../decisions.md`](../decisions.md): whether Drop
-      adopts this model, and exactly what claim replaces the AGENTS.md
-      invariant.
-- [ ] Choose the cipher — XChaCha20-Poly1305 or AES-GCM — and record why.
-      Nonce handling differs materially between them; XChaCha's larger nonce is
-      more forgiving of random generation.
-- [ ] Choose the key encoding that travels beside the code, optimizing for
-      something a person can paste and, ideally, read aloud.
+- [x] New `crypto` module in the CLI library: wordlist codes, SPAKE2 handshake,
+      HKDF derivation, sealing and opening chunks, metadata blob.
+      `cli/src/crypto/{mod,code,handshake,envelope,wordlist}.rs`.
+- [x] Pure and synchronous at its boundary — it takes and returns bytes, and
+      knows nothing about sockets. This is what lets both transports share it.
+- [x] Unit tests for tamper, reorder, truncate, wrong key, and length
+      arithmetic including a payload that is not a chunk multiple.
+      25 tests, all passing; workspace total 87 with nothing regressed.
 
-### Phase 1 — Envelope
+Notes from building it:
 
-- [ ] Generate a random 256-bit key on the sending client.
-- [ ] Define chunk framing: nonce derivation from a session-random prefix plus
-      a counter, and a tag per chunk.
-- [ ] Put the chunk counter and the total chunk count in the additional
-      authenticated data, so reordering, dropping, or truncating is detected.
-- [ ] Define the encrypted metadata blob carrying `filename` and `mime_type`.
-- [ ] Add a protocol version to the cleartext envelope.
+- The BIP-39 wordlist is **vendored** into `wordlist.rs` rather than taken as a
+  dependency. `bip39` pulls `bitcoin_hashes`, `serde`, and
+  `unicode-normalization` to supply what is, for our purposes, a list of words,
+  and `../decisions.md` entry 10 already flags dependency weight as a standing
+  concern for a binary shipped prebuilt for four targets.
+- Duplicate-chunk rejection came free from binding the index into the AAD, and
+  is now covered by a test. It was not called out as a threat in the original
+  plan; it should have been, since a relay can replay a frame as easily as it
+  can drop one.
+- `TransferCode`'s `Debug` is redacted. The type is a secret and the codebase
+  logs liberally.
+- Nonce-reuse coverage is structural rather than statistical: the test walks
+  every nonce a maximum-size session can produce, including the metadata
+  nonce, and asserts the set has no duplicates.
 
-### Phase 2 — Relay
+### Phase 2 — Relay path carries the envelope — **done 2026-08-21**
 
-- [ ] Reduce cleartext `Meta` to the ciphertext byte total plus the version and
-      the opaque metadata blob.
-- [ ] Confirm the size limit, progress, and byte accounting all still work
-      against ciphertext length.
-- [ ] Confirm no plaintext filename can reach logs, tracing spans, or
-      `/metrics`. `log_incoming_sender_message`
-      ([`protocol.rs`](../../src/ws/protocol.rs)) currently logs the filename
-      at debug.
+- [x] Reduce cleartext `Meta` to ciphertext total, version, opaque blob.
+      `Session` no longer has a `filename` field at all.
+- [x] Confirm the size limit, relay budget, and progress accounting all work
+      against ciphertext length. Session creation now takes `ciphertext_size`.
+- [x] Remove the filename from `log_incoming_sender_message` in
+      [`protocol.rs`](../../src/ws/protocol.rs). The blob is not logged either:
+      a ciphertext in a debug log is still an artefact of someone's transfer.
+- [x] Carry the two PAKE messages through the relay as opaque frames.
+- [x] Bound the opaque fields. Not in the original plan and it should have
+      been: the relay cannot inspect these, so without a ceiling they are an
+      unmetered side channel outside the transfer accounting entirely.
 
-### Phase 3 — Clients
+### Phase 3 — CLI — **done 2026-08-21**
 
-- [ ] CLI: encrypt on send, decrypt on receive, carry the key as a suffix on
-      the code argument.
-- [ ] Web: same scheme via WebCrypto, with the key in the URL fragment, which
-      browsers never send to the server.
-- [ ] Make the failure modes clear: wrong key, tampered chunk, and version
-      mismatch each need a distinct, comprehensible message.
-- [ ] Confirm interoperability in both directions between the two clients.
+Landed with Phase 2 rather than after it. The protocol change is breaking by
+design — no downgrade path is permitted — so there was no green state with a
+Phase 2 relay and a Phase 1 client.
 
-### Phase 4 — Documentation
+- [x] Encrypt on send, decrypt on receive, over the relay transport.
+- [x] Distinct, comprehensible failures for wrong code, tampered chunk, and
+      version mismatch, via `CryptoError`.
+- [x] Partial-file handling: `discard_partial` removes a partly written file on
+      a decryption or truncation failure. An extraction directory is
+      deliberately left alone — the entries written are individually authentic,
+      and deleting a tree the receiver may already have had files in is worse
+      than reporting the stop.
 
-- [ ] Replace the AGENTS.md invariant with the precise claim agreed in Phase 0.
-- [ ] Rewrite the README privacy section and
-      [`../security.md`](../security.md), distinguishing the CLI case from the
-      browser case explicitly.
-- [ ] Update [`../protocol.md`](../protocol.md).
-- [ ] Move the resolved decision into [`../decisions.md`](../decisions.md) and
-      mark this plan done.
+### Phase 4 — Web — **done**
+
+Resolved by compiling the envelope rather than reimplementing it. `crypto/` is
+now its own crate and `crypto-wasm/` builds it for the browser, so there is no
+second implementation to keep byte-identical. The reasoning and its cost are in
+[`../decisions.md`](../decisions.md) entry 11.
+
+- [x] The whole envelope via WebAssembly, not just SPAKE2. WebCrypto would have
+      covered AES-GCM and HKDF, but splitting the envelope across two
+      implementations was the risk worth removing.
+- [x] Interoperate both directions with the CLI over the relay.
+      `web/tests/interop.test.mjs` runs a real relay and the real CLI binary.
+- [x] A receiver holding a malformed code fails with a message that says so,
+      before the relay is contacted.
+
+### Phase 5 — Documentation
+
+- [x] Replaced the AGENTS.md invariant with the narrower claim from entry 7.
+      Held until Phase 4: while the browser client could not do a sealed
+      transfer at all, a claim covering it would have been false.
+- [x] Rewrote the README privacy section and
+      [`../security.md`](../security.md), CLI and browser cases separated.
+- [x] Update [`../protocol.md`](../protocol.md).
 
 ## Risks
 
-- **Overclaiming.** This is the biggest risk and it is a documentation risk,
-  not a code risk. Encryption in a browser is only as strong as the JavaScript
-  the server delivered: it defeats a passive operator and stored traffic, but
-  not a server that actively serves modified client code. The CLI-to-CLI case is
-  the strong one. Any wording that implies browser transfers are as strong as
-  CLI transfers is worse than making no claim at all.
-- **Key handling in the shareable code.** The code plus key must stay pasteable
-  and must not end up in a place that logs URLs. The URL fragment is not sent to
-  the server, but it does land in browser history.
-- **Nonce reuse** is catastrophic for both candidate ciphers. The counter scheme
-  needs a test that a fresh session never reuses a nonce, and a design that
-  cannot silently wrap.
-- **Compression interaction.** Compress before encrypting, never after —
-  encrypted bytes do not compress. The temporary-file length measurement in the
-  CLI happens on the compressed plaintext, and the ciphertext length is then a
-  deterministic function of it. Confirm the arithmetic rather than assuming it.
-- **Silent downgrade.** A version field is only useful if a mismatch is a hard
-  failure. Make sure an old client cannot be talked into a plaintext transfer by
-  a hostile relay.
-- **Partial-file damage.** A decryption failure at chunk N means N-1 chunks are
-  already on disk. Decide whether the receiver truncates, removes, or reports
-  the partial file, and do it deliberately.
+- **Overclaiming.** The largest risk and it is a documentation risk. Browser
+  encryption is bounded by the JavaScript the server delivered. Wording that
+  implies browser transfers are as strong as CLI transfers is worse than
+  claiming nothing.
+- **Retry defeats the PAKE.** If a failed handshake leaves the code usable, an
+  attacker gets unlimited guesses against 33 bits. The session must burn.
+- **Nonce reuse** is catastrophic. The counter must be structurally incapable
+  of wrapping and must never restart within a session — this constrains the
+  resume design, which cannot simply reset the counter on reconnect.
+- **Partial-file damage.** A failure at chunk N leaves N-1 chunks written.
+- **Silent downgrade.** A version mismatch must be a hard failure, or a hostile
+  relay talks an old client into a plaintext transfer.
+- **Compression ordering.** Compress before encrypting, never after.
 
 ## Validation
 
-- [ ] A tampered chunk causes the receiver to fail rather than write corrupt
-      output.
-- [ ] Reordered and truncated chunk streams are both detected.
-- [ ] A wrong key fails with a clear message, not a panic and not a partial
-      file left silently in place.
-- [ ] Declared ciphertext length matches bytes actually sent, for compressed
-      and uncompressed payloads, across a range of sizes including one that is
-      not a chunk multiple.
-- [ ] A nonce is never reused within a session.
-- [ ] Version mismatch fails cleanly in both directions.
-- [ ] Browser-to-CLI and CLI-to-browser transfers interoperate.
-- [ ] Relay logs, tracing output, and `/metrics` contain no plaintext filename.
-- [ ] Full validation command set passes.
+- [x] Tampered, reordered, and truncated chunk streams are each detected.
+      Covered at the envelope level, plus duplication. End-to-end evidence over
+      a real transport is still owed by Phase 3.
+- [x] A wrong code fails clearly, leaves no usable partial file, and burns the
+      session so a second guess is impossible. Covered end to end by
+      `a_wrong_code_is_refused_and_leaves_nothing_on_disk`. The burn is not new
+      code: the relay already refuses a second receiver on a claimed session,
+      so the first claimant spends it. That was luck rather than design, and is
+      now pinned by a test.
+- [x] Declared ciphertext length matches bytes sent, across sizes including a
+      non-multiple of the chunk size. The compressed case is arithmetic on the
+      same function and is confirmed once Phase 3 wires compression through.
+- [x] A nonce is never reused within a session.
+- [x] Version mismatch fails cleanly: the relay refuses a `meta` whose version
+      it does not know, and the receiver refuses one it cannot speak.
+      `envelope_version_matches_the_client` guards the duplicated constant.
+- [x] Browser-to-CLI and CLI-to-browser interoperate, over a real relay with
+      the real CLI binary, at sizes spanning a chunk boundary.
+- [x] Relay logs, tracing, and `/metrics` contain no plaintext filename;
+      checked against a live relay at `RUST_LOG=info` during interop.
+- [x] Full validation command set passes: 100 Rust tests, fmt, clippy, the
+      secret scan, the web build, `tsc --noEmit`, and 16 Node tests.
 
-## Kickoff prompt
+Not covered: `App.svelte` is checked by neither `tsc` nor a browser test. The
+interop tests exercise the envelope and the wire protocol from Node. The Svelte
+flows were changed to match and build clean, but "builds" is the evidence for
+the UI layer, not "works".
 
-```text
-Read docs/plans/end-to-end-encryption-plan-2026-08-19.md, docs/decisions.md,
-docs/security.md, docs/protocol.md, and AGENTS.md. Phase 0 is a decision, not
-code — do not start implementing until entry 7 in docs/decisions.md is
-resolved and recorded. When implementing, the key is generated client-side and
-never sent to the relay; the chunk counter and total chunk count go in the AEAD
-additional data. Do not write any documentation claiming end-to-end encryption
-without the browser caveat stated in the same place.
-```
+## Found after the phases closed
+
+**Receiver-first transfers deadlocked.** Reported by automated review on
+pull request #40 and confirmed on 2026-08-24. The receiver sent its half of the
+key exchange on connect. A `key_exchange` is forwarded and never held, so when
+the receiver won the race to claim its socket the relay had no sender to give
+the half to and dropped it; the sender then waited for a half that no longer
+existed, and neither side had anything to report. The transfer hung until the
+session expired.
+
+The sender already waited for `receiver_connected` before sending, and the web
+sender carries a comment saying why. The rule was simply never applied to the
+receiver, and `protocol.md` stated it for only one of the two peers.
+
+Fixed in three parts:
+
+- Both receivers — `cli/src/recv.rs` and `web/src/App.svelte` — now reply to
+  the sender's half rather than opening with their own.
+- The relay refuses a key exchange that arrives before its peer instead of
+  dropping it silently, in both directions. A protocol mistake a client can
+  make invisibly is one it will keep making.
+- `a_receiver_that_connects_first_still_completes_the_transfer` pins the
+  connection order rather than racing it, which is why the ordinary transfer
+  tests never caught this. Against the unfixed code it hangs for its full
+  60-second budget and fails.
+
+**What this says about the phase gates.** Every gate held; the hole was that
+none of them fixed a connection order. Both clients were tested against a relay
+they happened to reach second.
 
 ## Open questions
 
-- XChaCha20-Poly1305 or AES-GCM? WebCrypto supports AES-GCM natively;
-  XChaCha needs a bundled implementation in the browser but is more forgiving
-  on nonces.
-- What does the shareable string look like? `7F2A91#K3F9...` is one option;
-  anything a person has to read aloud over a phone argues for a different
-  alphabet.
-- Should the browser support a receiver that has the code but not the key —
-  failing with a helpful message rather than a decryption error?
-- Does the metadata blob need padding? Filename length leaks a little
-  information about the payload even when the name itself is hidden.
+- Does the metadata blob need padding? Filename length leaks a little even when
+  the name is hidden.
+- Should a receiver that has the code but meets a version it cannot speak be
+  told to upgrade, naming the version it saw?
+- The nameplate is 24 bits and public, so it is enumerable. That costs nothing
+  while it only names a relay session, but
+  [`peer-to-peer-transport-plan-2026-08-20.md`](peer-to-peer-transport-plan-2026-08-20.md)
+  publishes a DHT record under it, and enumeration there discloses the sender's
+  address. Settle the nameplate's entropy in that plan, not this one.

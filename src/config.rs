@@ -63,6 +63,26 @@ pub const RELAY_BUDGET_BYTES: usize = 200 * 1024 * 1024;
 /// wakeups that the actual file bytes needed.
 pub const PROGRESS_INTERVAL_MS: u64 = 200;
 
+/// The envelope version the relay will carry.
+///
+/// The relay cannot open the envelope, but it does refuse a version it does
+/// not recognise, so an incompatible pair fails at the relay rather than
+/// halfway through a transfer. Duplicated from `ENVELOPE_VERSION` in the CLI's
+/// `crypto::envelope`, because the relay cannot depend on the client crate;
+/// `envelope_version_matches_the_client` in `cli/tests/protocol.rs` fails if
+/// the two ever drift apart.
+pub const ENVELOPE_VERSION: u8 = 1;
+
+/// Ceiling on an opaque client-supplied field the relay forwards without
+/// understanding — the sealed metadata blob and the key-exchange messages.
+///
+/// The relay cannot inspect these, which is the point, so it bounds them
+/// instead. Without a limit they are an unmetered side channel: two clients
+/// could pass arbitrary data through a session while relaying almost no
+/// chunks, outside the transfer accounting entirely. Real values are well
+/// under a kilobyte.
+pub const MAX_OPAQUE_FIELD_BYTES: usize = 8 * 1024;
+
 /// Load balancers and orchestrators cap how long a pod may take to stop, and
 /// the honored ceiling differs per platform, so both shutdown phases are
 /// overridable without rebuilding the image.

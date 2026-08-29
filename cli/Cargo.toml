@@ -27,6 +27,11 @@ ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 # C dependency would require a cross C toolchain for each of them.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
+# The encryption envelope. Its own crate because the browser client compiles
+# the same code to WebAssembly rather than reimplementing it — see
+# docs/decisions.md entry 11.
+drop-crypto = { path = "../crypto" }
+
 [dev-dependencies]
 api = { path = ".." }
 futures-util = "0.3"

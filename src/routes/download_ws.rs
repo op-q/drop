@@ -16,8 +16,9 @@ use tracing::{Instrument, info, warn};
 use crate::{
     app_state::AppState,
     config::{
-        DOWNLOAD_EVENT_CHANNEL_CAPACITY, RECEIVER_SEND_TIMEOUT_SECS, WS_HEARTBEAT_INTERVAL_SECS,
-        WS_IDLE_TIMEOUT_SECS, WS_MAX_MESSAGE_BYTES, client_ip_from_request,
+        DOWNLOAD_EVENT_CHANNEL_CAPACITY, MAX_OPAQUE_FIELD_BYTES, RECEIVER_SEND_TIMEOUT_SECS,
+        WS_HEARTBEAT_INTERVAL_SECS, WS_IDLE_TIMEOUT_SECS, WS_MAX_MESSAGE_BYTES,
+        client_ip_from_request,
     },
     domain::{
         messages::ReceiverMessage,
@@ -167,16 +168,30 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                 }
                             }
                             DownloadEvent::Meta {
-                                filename,
-                                file_size,
-                                mime_type,
+                                version,
+                                ciphertext_size,
+                                metadata,
                             } => {
-                                total_bytes = Some(file_size);
+                                total_bytes = Some(ciphertext_size);
                                 let msg = serde_json::json!({
                                     "type": "meta",
-                                    "filename": filename,
-                                    "file_size": file_size,
-                                    "mime_type": mime_type
+                                    "version": version,
+                                    "ciphertext_size": ciphertext_size,
+                                    "metadata": metadata
+                                });
+
+                                if ws_sender
+                                    .send(Message::Text(msg.to_string().into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            DownloadEvent::KeyExchange(message) => {
+                                let msg = serde_json::json!({
+                                    "type": "key_exchange",
+                                    "message": message
                                 });
 
                                 if ws_sender
@@ -324,6 +339,50 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                         };
 
                         match message {
+                            ReceiverMessage::KeyExchange { message } => {
+                                if message.len() > MAX_OPAQUE_FIELD_BYTES {
+                                    TransferService::fail_session(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        Some("key exchange message is too large"),
+                                        Some("key exchange message is too large"),
+                                        "receiver key exchange exceeded the opaque field limit",
+                                    )
+                                    .await;
+                                    break;
+                                }
+
+                                // A key exchange is forwarded, never held. One
+                                // that arrives before the sender exists has
+                                // nowhere to go, and dropping it quietly is how
+                                // both peers end up waiting on each other with
+                                // no error to show for it. Say so instead.
+                                if !SessionService::sender_connected(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                )
+                                .await
+                                {
+                                    TransferService::fail_session(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        None,
+                                        Some("key exchange arrived before the sender connected"),
+                                        "receiver key exchange arrived before the sender connected",
+                                    )
+                                    .await;
+                                    break;
+                                }
+
+                                SessionService::touch_session(&state_for_recv, &code_for_recv)
+                                    .await;
+                                TransferService::send_sender(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    SenderEvent::KeyExchange(message),
+                                )
+                                .await;
+                            }
                             ReceiverMessage::ChunkAck { bytes_received } => {
                                 if !SessionService::acknowledge_receiver_bytes(
                                     &state_for_recv,

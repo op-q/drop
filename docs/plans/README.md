@@ -32,19 +32,32 @@ the plan contract unmissable and indexes what is here.
 
 ## Active
 
-None. No implementation work has started.
+None. Encryption has landed; peer-to-peer transport is next and has not
+started.
 
 ## Proposed
 
+- [`peer-to-peer-transport-plan-2026-08-20.md`](peer-to-peer-transport-plan-2026-08-20.md)
+  — connect the two CLIs directly over QUIC with `iroh`, finding each other
+  through a mainline-DHT record derived from the code, so a transfer needs no
+  Drop-operated server. Depends on the encryption envelope landing first.
 - [`receiver-confirmation-plan-2026-08-19.md`](receiver-confirmation-plan-2026-08-19.md)
   — show the receiver what it is about to accept and require a y/n before any
   bytes move. Adds a protocol handshake and a new terminal outcome.
-- [`end-to-end-encryption-plan-2026-08-19.md`](end-to-end-encryption-plan-2026-08-19.md)
-  — encrypt payloads client-side so the relay forwards bytes it cannot read.
-  Largest, and it changes a stated product invariant.
 
 ## Done
 
+- [`end-to-end-encryption-plan-2026-08-19.md`](end-to-end-encryption-plan-2026-08-19.md)
+  — completed 2026-08-21: payloads are sealed with AES-256-GCM under a key both
+  peers derive from the code by SPAKE2, so the relay carries an envelope it
+  cannot read. The code is split into a public nameplate the relay routes on
+  and three secret words that are the PAKE password — a correction made during
+  implementation, because the first design handed the relay the password and so
+  let it sit in the middle. The browser runs the same envelope compiled to
+  WebAssembly rather than a second implementation. Recorded in
+  [`../decisions.md`](../decisions.md) entries 7 and 11. Not covered:
+  `App.svelte`, which is exercised by its build and its shared envelope rather
+  than by a browser.
 - [`relay-teardown-drain-plan-2026-08-19.md`](relay-teardown-drain-plan-2026-08-19.md)
   — completed 2026-08-19: the upload receive task now stays alive through
   teardown and answers the sender's closing handshake, so a socket is no longer
@@ -63,11 +76,20 @@ would have inherited the same reset bug on the day it shipped.
 Confirmation next. It is reviewable without crypto, and it settles what the
 receiver sees and when.
 
-Encryption last. It relocates the very metadata fields the confirmation prompt
-displays, so doing it after means the encryption change is a mechanical move of
-settled fields rather than a simultaneous redesign of the consent flow and the
-crypto envelope.
+**Revised 2026-08-20.** Encryption was moved ahead of confirmation at the
+user's direction, and peer-to-peer transport was added after it. The order is
+now: encryption, then transport, then confirmation.
 
-The one cost of this order: the confirmation prompt ships while the relay can
-still see and forge the filename it displays. That is acceptable as an
-intermediate state provided the documentation does not imply otherwise.
+The cost of the swap is real and was accepted knowingly. Confirmation would
+have settled what the receiver sees before encryption relocated those fields;
+doing encryption first means the confirmation prompt must be designed against
+metadata that is already sealed, and its plan will need revisiting rather than
+implementing as written.
+
+Transport follows encryption because the envelope is what makes a relay
+untrusted, and an untrusted relay is what makes falling back to one acceptable.
+Building the QUIC path first would have produced a fast path with no honest
+story for the slow one.
+
+Confirmation last is otherwise unchanged, and no longer carries the caveat that
+it ships while the relay can forge the filename it displays.

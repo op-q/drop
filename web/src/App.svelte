@@ -1,5 +1,19 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { createSession, openDownloadSocket, openUploadSocket } from "./api";
+  import {
+    Handshake,
+    Metadata,
+    Opener,
+    Sealer,
+    SessionKeys,
+    TransferCode,
+    ciphertextLen,
+    envelopeVersion,
+    loadEnvelope,
+    openMetadata,
+    sealMetadata,
+  } from "./envelope";
   import type {
     DownloadSocketMessage,
     StatusState,
@@ -38,16 +52,26 @@
 
   interface DownloadTarget {
     kind: "disk" | "memory";
-    write(chunk: ArrayBuffer): Promise<void>;
+    /** Opened plaintext, not the sealed bytes that arrived. */
+    write(chunk: Uint8Array): Promise<void>;
     complete(filename: string, mimeType: string): Promise<void>;
     abort(): Promise<void>;
   }
 
   interface UploadFlowControl {
+    // Sealed bytes, not plaintext. The relay meters ciphertext and the
+    // receiver acknowledges ciphertext, so the window has to be counted in the
+    // same units or the sender waits for an acknowledgement that never comes.
     acknowledgedBytes: number;
     error: Error | null;
     wake: (() => void) | null;
   }
+
+  // Instantiating the WebAssembly envelope is asynchronous. Start it as soon
+  // as the page is up so the first transfer does not pay for it.
+  onMount(() => {
+    void loadEnvelope().catch(() => undefined);
+  });
 
   let codeInput = "";
   let fileInput: HTMLInputElement | null = null;
@@ -107,7 +131,11 @@
   }
 
   function normalizeCodeInput(): void {
-    codeInput = codeInput.toUpperCase().replace(/\s+/g, "");
+    // Only whitespace is stripped here. Case is left alone because a code is
+    // now a nameplate plus three lowercase words, and upper-casing the whole
+    // string would corrupt the half that is the password. `TransferCode.parse`
+    // normalizes each half the way that half needs.
+    codeInput = codeInput.trim();
   }
 
   function resetUploadState(): void {
@@ -148,7 +176,7 @@
 
       return {
         kind: "memory",
-        async write(chunk: ArrayBuffer): Promise<void> {
+        async write(chunk: Uint8Array): Promise<void> {
           chunks.push(chunk);
         },
         async complete(filename: string, mimeType: string): Promise<void> {
@@ -178,8 +206,8 @@
 
     return {
       kind: "disk",
-      async write(chunk: ArrayBuffer): Promise<void> {
-        await writable.write(new Uint8Array(chunk));
+      async write(chunk: Uint8Array): Promise<void> {
+        await writable.write(chunk);
       },
       async complete(): Promise<void> {
         await writable.close();
@@ -254,22 +282,42 @@
   async function sendFileChunks(
     socket: WebSocket,
     file: File,
+    sealer: Sealer,
+    sealedSize: number,
     code: string,
     flow: UploadFlowControl
   ): Promise<void> {
     let offset = 0;
+    let sealedSent = 0;
     setStatus(["Upload started.", "Your file is on the way."], code);
 
     while (offset < file.size) {
       const end = Math.min(offset + CHUNK_SIZE, file.size);
-      await waitForUploadCapacity(socket, flow, end);
-      const chunk = await file.slice(offset, end).arrayBuffer();
+      // Sealed before the capacity check rather than after, because the
+      // window is measured in sealed bytes and the sealed length is only
+      // known once the chunk exists. One chunk is held in memory either way.
+      const plaintext = new Uint8Array(
+        await file.slice(offset, end).arrayBuffer()
+      );
+      const sealed = sealer.sealChunk(plaintext);
+
+      await waitForUploadCapacity(socket, flow, sealedSent + sealed.byteLength);
       assertUploadCanContinue(socket, flow);
-      socket.send(chunk);
+      socket.send(sealed);
+      sealedSent += sealed.byteLength;
       offset = end;
+
+      setStatus(
+        [
+          "Uploading your file...",
+          formatProgress("Uploaded", offset, file.size),
+        ],
+        code
+      );
     }
 
-    while (flow.acknowledgedBytes < file.size) {
+    // Sealed bytes again: this is the receiver's cumulative count.
+    while (flow.acknowledgedBytes < sealedSize) {
       assertUploadCanContinue(socket, flow);
       await waitForUploadSignal(flow);
     }
@@ -300,11 +348,20 @@
     setStatus(["Preparing your transfer...", "Creating a one-time code."], null);
 
     try {
-      const session = await createSession(file);
-      uploadCode = session.code;
+      await loadEnvelope();
+
+      // The relay is told the sealed size and nothing else. The name, the MIME
+      // type, and the real length travel inside the sealed blob.
+      const sealedSize = ciphertextLen(file.size);
+      const session = await createSession(sealedSize);
+
+      // The relay allocated the nameplate. The three secret words are drawn
+      // here, in the browser, and are never sent anywhere.
+      const code = TransferCode.generateFor(session.code);
+      uploadCode = code.toString();
       setStatus(
         ["Transfer code created.", "Connecting to the transfer service..."],
-        session.code
+        uploadCode
       );
 
       const socket = await openUploadSocket(session.code);
@@ -331,6 +388,72 @@
         }
       };
 
+      // Key agreement runs before anything is sealed. Either peer may connect
+      // first, so the transfer starts only once both preconditions hold: the
+      // receiver is present, and its half of the exchange has arrived.
+      // Not sent yet. The relay forwards a key exchange to a peer that is
+      // already connected and drops one that arrives before the peer exists,
+      // so a sender that sends on connect strands a receiver waiting for a
+      // half it will never get. `receiver_connected` is the signal that the
+      // other end is there to receive it.
+      const handshake = Handshake.start(code);
+      let peerMessage: string | null = null;
+      let receiverPresent = false;
+      let sentKeyExchange = false;
+
+      const beginTransfer = (): void => {
+        if (uploadStarted || !receiverPresent || !peerMessage || !uploadFile) {
+          return;
+        }
+
+        uploadStarted = true;
+        const payload = uploadFile;
+
+        try {
+          // Consumes the handshake. It is single-use, and the guard above is
+          // what stops this running twice.
+          const keys: SessionKeys = handshake.finish(peerMessage);
+
+          socket.send(
+            JSON.stringify({
+              type: "meta",
+              version: envelopeVersion(),
+              ciphertext_size: sealedSize,
+              metadata: sealMetadata(
+                keys,
+                sealedSize,
+                new Metadata(
+                  payload.name,
+                  payload.type || "application/octet-stream",
+                  payload.size
+                )
+              ),
+            })
+          );
+
+          void sendFileChunks(
+            socket,
+            payload,
+            new Sealer(keys, payload.size),
+            sealedSize,
+            uploadCode ?? session.code,
+            flow
+          ).catch((error: unknown) => {
+            failUpload(
+              error instanceof Error
+                ? error
+                : new Error("the upload could not continue")
+            );
+          });
+        } catch (error: unknown) {
+          failUpload(
+            error instanceof Error
+              ? error
+              : new Error("the key exchange could not be completed")
+          );
+        }
+      };
+
       socket.onmessage = (event: MessageEvent<string>) => {
         if (typeof event.data !== "string") {
           return;
@@ -351,10 +474,16 @@
           return;
         }
 
+        if (message.type === "key_exchange") {
+          peerMessage = message.message;
+          beginTransfer();
+          return;
+        }
+
         if (message.type === "ack") {
           if (
             message.bytes_received < flow.acknowledgedBytes ||
-            message.bytes_received > file.size
+            message.bytes_received > sealedSize
           ) {
             failUpload(new Error("the receiver sent an invalid acknowledgement"));
             return;
@@ -366,17 +495,9 @@
         }
 
         if (message.type === "progress") {
-          setStatus(
-            [
-              "Uploading your file...",
-              formatProgress(
-                "Uploaded",
-                message.bytes_transferred,
-                message.total_bytes
-              ),
-            ],
-            uploadCode
-          );
+          // The relay counts sealed bytes. The status line reports plaintext,
+          // which `sendFileChunks` already keeps current, so these numbers are
+          // deliberately dropped rather than shown in the wrong unit.
           return;
         }
 
@@ -397,28 +518,19 @@
             uploadCode
           );
 
-          if (!uploadStarted && uploadFile) {
-            uploadStarted = true;
+          receiverPresent = true;
+
+          if (!sentKeyExchange) {
+            sentKeyExchange = true;
             socket.send(
               JSON.stringify({
-                type: "meta",
-                filename: uploadFile.name,
-                file_size: uploadFile.size,
-                mime_type: uploadFile.type || "application/octet-stream",
+                type: "key_exchange",
+                message: handshake.message,
               })
-            );
-
-            void sendFileChunks(socket, uploadFile, session.code, flow).catch(
-              (error: unknown) => {
-                failUpload(
-                  error instanceof Error
-                    ? error
-                    : new Error("the upload could not continue")
-                );
-              }
             );
           }
 
+          beginTransfer();
           return;
         }
 
@@ -498,9 +610,9 @@
 
   async function startDownload(): Promise<void> {
     normalizeCodeInput();
-    const code = codeInput.trim();
+    const typed = codeInput.trim();
 
-    if (!code) {
+    if (!typed) {
       setStatus(["Enter a transfer code first."], null);
       return;
     }
@@ -510,13 +622,47 @@
     let downloadTarget: DownloadTarget | null = null;
 
     try {
-      downloadTarget = await createDownloadTarget(code);
+      await loadEnvelope();
+
+      // Parsed before the relay is contacted, so a mistyped code is reported
+      // as a typing mistake rather than as a failed connection. Only the
+      // nameplate is ever sent; the three words stay here as the password for
+      // the key exchange.
+      let code: TransferCode;
+      try {
+        code = TransferCode.parse(typed);
+      } catch (error: unknown) {
+        setStatus(
+          [
+            "That code does not look right.",
+            error instanceof Error
+              ? error.message
+              : "check the code and try again",
+          ],
+          null
+        );
+        return;
+      }
+
+      const nameplate = code.nameplate;
+      downloadTarget = await createDownloadTarget(nameplate);
       const target = downloadTarget;
-      const socket = await openDownloadSocket(code);
+      const socket = await openDownloadSocket(nameplate);
+
+      const handshake = Handshake.start(code);
+      let keys: SessionKeys | null = null;
+      let opener: Opener | null = null;
+
       let filename = "download.bin";
       let mimeType = "application/octet-stream";
+      // Two totals, deliberately. `sealedTotal` is what the relay meters and
+      // what an acknowledgement carries. `total` is plaintext, and is what
+      // reaches the disk and the progress line. Crossing them stalls the
+      // transfer one authentication tag short of finishing.
+      let sealedTotal = 0;
       let total = 0;
       let expectedTotal = 0;
+      let expectedSealedTotal = 0;
       let unacknowledgedBytes = 0;
       let finalized = false;
       let failed = false;
@@ -554,8 +700,27 @@
         if (typeof event.data === "string") {
           const message = JSON.parse(event.data) as DownloadSocketMessage;
 
+          if (message.type === "key_exchange") {
+            // Replied to here rather than sent on open: the relay drops a key
+            // exchange that arrives before the peer is connected, so a receiver
+            // that connects first would have its half discarded and the sender
+            // would wait for it forever.
+            socket.send(
+              JSON.stringify({
+                type: "key_exchange",
+                message: handshake.message,
+              })
+            );
+
+            // Completing this does not prove the sender knew the code. A wrong
+            // code yields a well-formed message and a different key, caught
+            // when the sealed details below fail to open.
+            keys = handshake.finish(message.message);
+            return;
+          }
+
           if (message.type === "progress") {
-            expectedTotal = message.total_bytes;
+            expectedSealedTotal = message.total_bytes;
             setStatus(
               [
                 filename === "download.bin"
@@ -577,9 +742,34 @@
           }
 
           if (message.type === "meta") {
-            filename = message.filename || filename;
-            mimeType = message.mime_type || mimeType;
-            expectedTotal = message.file_size;
+            if (!keys) {
+              throw new Error(
+                "the transfer details arrived before the key exchange"
+              );
+            }
+
+            // A version mismatch is fatal on purpose. A version that can be
+            // negotiated downward is one a hostile relay steers to plaintext.
+            if (message.version !== envelopeVersion()) {
+              throw new Error(
+                `the sender is using envelope version ${message.version}, which this page cannot read — update drop at both ends`
+              );
+            }
+
+            // The first sealed thing opened, and so where a mistyped code is
+            // actually caught: before a byte is written and before any of the
+            // payload is touched.
+            const details = openMetadata(
+              keys,
+              message.ciphertext_size,
+              message.metadata
+            );
+
+            filename = details.filename || filename;
+            mimeType = details.mimeType || mimeType;
+            expectedTotal = details.plaintextSize;
+            expectedSealedTotal = message.ciphertext_size;
+            opener = new Opener(keys, expectedTotal);
 
             if (
               target.kind === "memory" &&
@@ -595,7 +785,7 @@
             setStatus(
               [
                 `Receiving ${filename}...`,
-                `File size: ${formatBytes(message.file_size)}`,
+                `File size: ${formatBytes(expectedTotal)}`,
               ],
               null
             );
@@ -603,13 +793,17 @@
           }
 
           if (message.type === "complete") {
-            if (expectedTotal === 0 || total !== expectedTotal) {
+            if (!opener || expectedTotal === 0 || total !== expectedTotal) {
               throw new Error(
                 `received ${formatBytes(total)} but expected ${formatBytes(
                   expectedTotal
                 )}`
               );
             }
+
+            // Each chunk authenticating on its own does not mean the stream
+            // was not cut short. This is what catches a truncated transfer.
+            opener.finish();
 
             await target.complete(filename, mimeType);
             finalized = true;
@@ -628,7 +822,8 @@
             socket.send(
               JSON.stringify({
                 type: "complete",
-                bytes_received: total,
+                // Sealed bytes: the relay confirms against what crossed it.
+                bytes_received: sealedTotal,
               })
             );
             setStatus(
@@ -648,17 +843,24 @@
           return;
         }
 
-        if (expectedTotal === 0) {
-          throw new Error("received file bytes before file metadata");
+        if (!opener) {
+          throw new Error("received file bytes before the transfer details");
         }
 
-        if (total + event.data.byteLength > expectedTotal) {
-          throw new Error("received more bytes than the declared file size");
+        const sealed = new Uint8Array(event.data);
+
+        if (sealedTotal + sealed.byteLength > expectedSealedTotal) {
+          throw new Error("received more bytes than the declared transfer size");
         }
 
-        await target.write(event.data);
-        total += event.data.byteLength;
-        unacknowledgedBytes += event.data.byteLength;
+        // Fails if the chunk was altered, reordered, duplicated, or sealed
+        // under a different key. Nothing reaches the target unopened.
+        const plaintext = opener.openChunk(sealed);
+
+        await target.write(plaintext);
+        sealedTotal += sealed.byteLength;
+        total += plaintext.byteLength;
+        unacknowledgedBytes += sealed.byteLength;
 
         if (socket.readyState !== WebSocket.OPEN) {
           throw new Error("download connection closed while saving the file");
@@ -670,13 +872,15 @@
         // batch would otherwise never trigger one.
         if (
           unacknowledgedBytes >= ACK_INTERVAL_BYTES ||
-          total === expectedTotal
+          sealedTotal === expectedSealedTotal
         ) {
           unacknowledgedBytes = 0;
           socket.send(
             JSON.stringify({
               type: "chunk_ack",
-              bytes_received: total,
+              // Cumulative sealed bytes. The sender's window is released
+              // against this number, so it must be in the relay's units.
+              bytes_received: sealedTotal,
             })
           );
         }

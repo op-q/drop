@@ -1,0 +1,6 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "bash scripts/vercel-install.sh",
+  "buildCommand": "export PATH=\"$HOME/.cargo/bin:$PATH\" && npm run build",
+  "outputDirectory": "dist"
+}

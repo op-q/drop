@@ -16,9 +16,10 @@ use tracing::{Instrument, debug, info, warn};
 use crate::{
     app_state::AppState,
     config::{
-        MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_LABEL, PROGRESS_INTERVAL_MS,
-        SENDER_EVENT_CHANNEL_CAPACITY, WS_CLOSE_DRAIN_TIMEOUT_SECS, WS_HEARTBEAT_INTERVAL_SECS,
-        WS_IDLE_TIMEOUT_SECS, WS_MAX_MESSAGE_BYTES, client_ip_from_request,
+        ENVELOPE_VERSION, MAX_OPAQUE_FIELD_BYTES, MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_LABEL,
+        PROGRESS_INTERVAL_MS, SENDER_EVENT_CHANNEL_CAPACITY, WS_CLOSE_DRAIN_TIMEOUT_SECS,
+        WS_HEARTBEAT_INTERVAL_SECS, WS_IDLE_TIMEOUT_SECS, WS_MAX_MESSAGE_BYTES,
+        client_ip_from_request,
     },
     domain::{
         messages::SenderMessage,
@@ -225,6 +226,20 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                     break;
                                 }
                             }
+                            SenderEvent::KeyExchange(message) => {
+                                let msg = serde_json::json!({
+                                    "type": "key_exchange",
+                                    "message": message
+                                });
+
+                                if ws_sender
+                                    .send(Message::Text(msg.to_string().into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
                             SenderEvent::Error(message) => {
                                 let msg = serde_json::json!({
                                     "type": "error",
@@ -256,7 +271,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
             // meant taking the global session lock and cloning the whole
             // `Session` several times for every chunk relayed.
             let mut relay_target: Option<mpsc::Sender<DownloadEvent>> = None;
-            let mut expected_file_size = None;
+            let mut expected_ciphertext_size = None;
             let mut bytes_received = 0_u64;
             let mut progress = ProgressThrottle::new();
             // Set when the sender completes normally, so teardown knows this
@@ -286,13 +301,86 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                             protocol::log_incoming_sender_message(&code_for_recv, &message);
 
                             match message {
+                                SenderMessage::KeyExchange { message } => {
+                                    if message.len() > MAX_OPAQUE_FIELD_BYTES {
+                                        TransferService::fail_session(
+                                            &state_for_recv,
+                                            &code_for_recv,
+                                            Some("key exchange message is too large"),
+                                            Some("key exchange message is too large"),
+                                            "sender key exchange exceeded the opaque field limit",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+
+                                    // The same rule the receiver is held to: a
+                                    // key exchange is forwarded, never held, so
+                                    // one sent before the peer connects is lost
+                                    // and strands both sides waiting.
+                                    if !SessionService::receiver_connected(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                    )
+                                    .await
+                                    {
+                                        TransferService::fail_session(
+                                            &state_for_recv,
+                                            &code_for_recv,
+                                            Some(
+                                                "key exchange arrived before the receiver connected",
+                                            ),
+                                            None,
+                                            "sender key exchange arrived before the receiver connected",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+
+                                    SessionService::touch_session(&state_for_recv, &code_for_recv)
+                                        .await;
+                                    TransferService::send_receiver(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        DownloadEvent::KeyExchange(message),
+                                    )
+                                    .await;
+                                }
                                 SenderMessage::Meta {
-                                    filename,
-                                    file_size,
-                                    mime_type,
+                                    version,
+                                    ciphertext_size,
+                                    metadata,
                                 } => {
-                                    let Some(session_file_size) =
-                                        SessionService::session_file_size(
+                                    if version != ENVELOPE_VERSION {
+                                        // A version mismatch is fatal on
+                                        // purpose. Anything softer is a
+                                        // downgrade a hostile relay could
+                                        // steer toward plaintext.
+                                        TransferService::fail_session(
+                                            &state_for_recv,
+                                            &code_for_recv,
+                                            Some("unsupported envelope version"),
+                                            Some("unsupported envelope version"),
+                                            "sender declared an unsupported envelope version",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+
+                                    if metadata.len() > MAX_OPAQUE_FIELD_BYTES {
+                                        TransferService::fail_session(
+                                            &state_for_recv,
+                                            &code_for_recv,
+                                            Some("metadata is too large"),
+                                            Some("metadata is too large"),
+                                            "sender metadata exceeded the opaque field limit",
+                                        )
+                                        .await;
+                                        break;
+                                    }
+
+                                    let Some(session_ciphertext_size) =
+                                        SessionService::session_ciphertext_size(
                                             &state_for_recv,
                                             &code_for_recv,
                                         )
@@ -301,7 +389,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                         break;
                                     };
 
-                                    if file_size != session_file_size {
+                                    if ciphertext_size != session_ciphertext_size {
                                         TransferService::fail_session(
                                             &state_for_recv,
                                             &code_for_recv,
@@ -315,7 +403,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                         break;
                                     }
 
-                                    if file_size > MAX_UPLOAD_SIZE_BYTES {
+                                    if ciphertext_size > MAX_UPLOAD_SIZE_BYTES {
                                         let message = format!(
                                             "file size exceeds the {} upload limit",
                                             MAX_UPLOAD_SIZE_LABEL
@@ -365,7 +453,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                         break;
                                     };
 
-                                    expected_file_size = Some(file_size);
+                                    expected_ciphertext_size = Some(ciphertext_size);
                                     let _ = SessionService::touch_session(
                                         &state_for_recv,
                                         &code_for_recv,
@@ -376,9 +464,9 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                         &state_for_recv,
                                         &code_for_recv,
                                         DownloadEvent::Meta {
-                                            filename,
-                                            file_size,
-                                            mime_type,
+                                            version,
+                                            ciphertext_size,
+                                            metadata,
                                         },
                                     )
                                     .await;
@@ -394,14 +482,14 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                         &download_tx,
                                         &code_for_recv,
                                         0,
-                                        file_size,
+                                        ciphertext_size,
                                     );
 
                                     relay_target = Some(download_tx);
                                 }
 
                                 SenderMessage::Complete => {
-                                    if Some(bytes_received) != expected_file_size {
+                                    if Some(bytes_received) != expected_ciphertext_size {
                                         TransferService::fail_session(
                                             &state_for_recv,
                                             &code_for_recv,
@@ -509,10 +597,10 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                             &code_for_recv,
                             bytes.len(),
                             bytes_received,
-                            expected_file_size,
+                            expected_ciphertext_size,
                         );
 
-                        let exceeds_expected = expected_file_size
+                        let exceeds_expected = expected_ciphertext_size
                             .map(|expected| bytes_received > expected)
                             .unwrap_or(true);
 
@@ -591,7 +679,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                 download_tx,
                                 &code_for_recv,
                                 bytes_received,
-                                expected_file_size.unwrap_or(bytes_received),
+                                expected_ciphertext_size.unwrap_or(bytes_received),
                             );
                         }
                     }

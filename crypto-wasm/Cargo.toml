@@ -1,0 +1,34 @@
+[package]
+name = "drop-crypto-wasm"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "WebAssembly bindings for the Drop encryption envelope"
+license = "MIT"
+repository = "https://github.com/op-q/drop"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+drop-crypto = { path = "../crypto" }
+wasm-bindgen = "0.2"
+
+# Two generations of getrandom end up in this graph, and each needs its
+# WebAssembly backend switched on a different way.
+#
+#   rand 0.10   -> getrandom 0.4   the `wasm_js` feature, plus the rustflag in
+#                                  `.cargo/config.toml`. Draws the code words.
+#   spake2 0.4  -> curve25519-dalek -> rand_core 0.6 -> getrandom 0.2, which
+#                                  predates that mechanism and takes a `js`
+#                                  feature instead. Draws the SPAKE2 scalar.
+#
+# Neither is called from this crate. They are declared so Cargo's feature
+# unification turns the backends on for the transitive copies. Miss either and
+# the build fails at compile time — which is the good outcome, because the
+# alternative failure mode for a missing entropy source is a key that is not
+# random.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_0_2 = { package = "getrandom", version = "0.2", features = ["js"] }

@@ -13,6 +13,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
     client::{self, Socket},
+    crypto,
     payload::{GZIP_MIME, TAR_GZIP_MIME, TAR_MIME},
     progress::Progress,
     untar::TarExtractor,
@@ -109,12 +110,32 @@ enum Target {
 }
 
 pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let code = crypto::TransferCode::parse(code)?;
+
     eprintln!("Connecting to {}...", options.origin);
 
-    let mut socket = client::open_download(&options.origin, code).await?;
-    let meta = wait_for_meta(&mut socket).await?;
+    let mut socket = client::open_download(&options.origin, code.nameplate()).await?;
 
-    let (filename, size, mime_type) = meta;
+    let keys = exchange_keys(&mut socket, &code).await?;
+    let (version, ciphertext_size, sealed_metadata) = wait_for_meta(&mut socket).await?;
+
+    if version != crypto::ENVELOPE_VERSION {
+        return Err(crypto::CryptoError::UnsupportedVersion { found: version }.into());
+    }
+
+    // Opening the metadata is where a mistyped code is caught: it happens
+    // before any destination is created and before a byte is written. The
+    // session is consumed either way, which is what holds an attacker to one
+    // guess.
+    let sealed_metadata = crypto::from_hex(&sealed_metadata)?;
+    let meta = crypto::open_metadata(&keys, ciphertext_size, &sealed_metadata)?;
+
+    let size = meta.plaintext_size;
+    let filename = meta.filename;
+    let mime_type = meta.mime_type;
+
+    let mut opener = crypto::Opener::new(&keys, size);
+
     eprintln!(
         "Receiving {} ({})",
         filename,
@@ -137,26 +158,44 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
     let mut expansion = ExpansionGuard::new(size);
 
     let mut progress = Progress::new("Receiving", size);
+    // Two scales, deliberately kept apart: the relay meters sealed bytes and
+    // acknowledgements are counted in them, while progress, the expansion
+    // guard, and the file on disk are all plaintext.
     let mut received = 0_u64;
+    let mut written = 0_u64;
     let mut unacknowledged = 0_u64;
 
     while let Some(message) = socket.next().await {
         match message? {
             Message::Binary(data) => {
-                if received + data.len() as u64 > size {
+                if received + data.len() as u64 > ciphertext_size {
                     let _ = socket
                         .send(Message::Text(json!({ "type": "error" }).to_string().into()))
                         .await;
-                    return Err("the relay sent more bytes than the file declared".into());
+                    return Err("the relay sent more bytes than the transfer declared".into());
                 }
 
                 received += data.len() as u64;
                 unacknowledged += data.len() as u64;
 
-                write_bytes(&mut target, decoder.as_mut(), &mut expansion, &data)?;
-                progress.update(received);
+                // A chunk that fails here is not written. The alternative is
+                // putting bytes on disk that nobody vouched for.
+                let plaintext = match opener.open_chunk(&data) {
+                    Ok(plaintext) => plaintext,
+                    Err(error) => {
+                        let _ = socket
+                            .send(Message::Text(json!({ "type": "error" }).to_string().into()))
+                            .await;
+                        discard_partial(target);
+                        return Err(error.into());
+                    }
+                };
 
-                if unacknowledged >= ACK_INTERVAL_BYTES || received == size {
+                written += plaintext.len() as u64;
+                write_bytes(&mut target, decoder.as_mut(), &mut expansion, &plaintext)?;
+                progress.update(written);
+
+                if unacknowledged >= ACK_INTERVAL_BYTES || received == ciphertext_size {
                     unacknowledged = 0;
                     socket
                         .send(Message::Text(
@@ -172,8 +211,19 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
 
                 match payload["type"].as_str() {
                     Some("complete") => {
+                        // Every chunk that arrived was authentic; only the
+                        // count against the sealed total shows a stream that
+                        // simply stopped early.
+                        if let Err(error) = opener.finish() {
+                            let _ = socket
+                                .send(Message::Text(json!({ "type": "error" }).to_string().into()))
+                                .await;
+                            discard_partial(target);
+                            return Err(error.into());
+                        }
+
                         finish(&mut target, decoder, &mut expansion)?;
-                        progress.finish(received);
+                        progress.finish(written);
 
                         socket
                             .send(Message::Text(
@@ -183,7 +233,7 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
                             ))
                             .await?;
 
-                        report(&target, received);
+                        report(&target, written);
                         let _ = socket.close(None).await;
                         return Ok(());
                     }
@@ -205,9 +255,83 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
     Err("the transfer connection closed before the file was complete".into())
 }
 
+/// Runs the receiver's half of the key exchange.
+///
+/// The half is sent in reply to the sender's, not on connect. The relay
+/// forwards a key exchange to a peer that is connected and drops one that is
+/// not, so a receiver that arrives first and sends immediately has its half
+/// discarded — and the sender then waits for a message that no longer exists,
+/// with neither side seeing an error. The sender's half arriving is the proof
+/// that there is somebody to reply to.
+async fn exchange_keys(
+    socket: &mut Socket,
+    code: &crypto::TransferCode,
+) -> Result<crypto::SessionKeys, Box<dyn Error + Send + Sync>> {
+    let (handshake, outbound) = crypto::Handshake::start(code);
+
+    while let Some(message) = socket.next().await {
+        let Message::Text(text) = message? else {
+            continue;
+        };
+
+        let payload: Value = serde_json::from_str(&text)?;
+
+        match payload["type"].as_str() {
+            Some("key_exchange") => {
+                let peer = payload["message"]
+                    .as_str()
+                    .ok_or("the sender sent a malformed key exchange message")?;
+
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "type": "key_exchange",
+                            "message": crypto::to_hex(&outbound),
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await?;
+
+                return Ok(handshake.finish(&crypto::from_hex(peer)?)?);
+            }
+            Some("status") => {
+                if payload["status"].as_str() == Some("waiting_for_sender") {
+                    eprintln!("Waiting for the sender...");
+                }
+            }
+            Some("error") => {
+                return Err(payload["message"]
+                    .as_str()
+                    .unwrap_or("the relay reported an error")
+                    .to_string()
+                    .into());
+            }
+            _ => {}
+        }
+    }
+
+    Err("the connection closed before the sender completed the key exchange".into())
+}
+
+/// Removes a partially written file after a failure.
+///
+/// A decryption failure at chunk N leaves N-1 chunks already on disk, and they
+/// look exactly like a real file. Leaving one behind after telling the user
+/// the transfer failed is how a truncated payload gets mistaken for a whole
+/// one. Extraction into a directory is left alone: the entries written are
+/// individually authentic, and deleting a tree the receiver may already have
+/// had files in is a worse failure than reporting the stop.
+fn discard_partial(target: Target) {
+    if let Target::File { path, file } = target {
+        drop(file);
+        let _ = fs::remove_file(&path);
+    }
+}
+
 async fn wait_for_meta(
     socket: &mut Socket,
-) -> Result<(String, u64, String), Box<dyn Error + Send + Sync>> {
+) -> Result<(u8, u64, String), Box<dyn Error + Send + Sync>> {
     while let Some(message) = socket.next().await {
         let Message::Text(text) = message? else {
             continue;
@@ -217,11 +341,13 @@ async fn wait_for_meta(
 
         match payload["type"].as_str() {
             Some("meta") => {
-                let filename = payload["filename"].as_str().unwrap_or("download.bin");
-                let size = payload["file_size"].as_u64().unwrap_or(0);
-                let mime_type = payload["mime_type"].as_str().unwrap_or("");
+                let version = payload["version"].as_u64().unwrap_or(0) as u8;
+                let ciphertext_size = payload["ciphertext_size"].as_u64().unwrap_or(0);
+                let metadata = payload["metadata"]
+                    .as_str()
+                    .ok_or("the sender sent transfer details this build cannot read")?;
 
-                return Ok((filename.to_string(), size, mime_type.to_string()));
+                return Ok((version, ciphertext_size, metadata.to_string()));
             }
             Some("status") => {
                 if payload["status"].as_str() == Some("waiting_for_sender") {

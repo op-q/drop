@@ -80,8 +80,7 @@ mod tests {
     fn detects_expired_sessions() {
         let last_activity = Instant::now() - Duration::from_secs(301);
         let session = Session {
-            filename: "file.bin".into(),
-            file_size: 1,
+            ciphertext_size: 1,
             created_at: last_activity,
             last_activity,
             sender_tx: None,
@@ -100,8 +99,7 @@ mod tests {
     fn keeps_active_transfers_alive() {
         let now = Instant::now();
         let session = Session {
-            filename: "file.bin".into(),
-            file_size: 1,
+            ciphertext_size: 1,
             created_at: now - Duration::from_secs(301),
             last_activity: now,
             sender_tx: None,

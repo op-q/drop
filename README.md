@@ -136,14 +136,29 @@ Refusals are reported as warnings and do not abort the rest of the extraction.
 
 ## Privacy and security model
 
-Drop is an ephemeral relay, not peer-to-peer or end-to-end encrypted storage.
-When HTTPS is configured, TLS protects each connection to the deployment, but
-the Drop server still handles file bytes in memory while relaying them. The
-server operator and a compromised server could therefore access an active
-transfer.
+Drop is an ephemeral relay. Payloads are encrypted by the sending client and
+opened by the receiving one: both derive the key from the secret half of the
+transfer code, which never reaches the server. The server sees ciphertext, a
+byte count, and the routing half of the code — not your file, its name, or its
+type.
 
-The session code acts as a temporary capability: anyone who learns an active
-code may be able to join that session. Share codes through a trusted channel.
+**The two clients do not carry the same guarantee.**
+
+- **`drop` to `drop` is end-to-end encrypted.** You installed the binary out of
+  band, so the relay has no part in delivering the code that holds your key.
+- **The web client is encrypted in your browser, and is only as strong as the
+  page the site served you.** It is the same encryption, but the site delivers
+  the code that performs it, so an operator willing to serve you a modified page
+  could capture a transfer before it is sealed. That still defeats a passive
+  operator and anyone who obtains the traffic afterwards. If that distinction
+  matters to you, use the CLI.
+
+A transfer code reads `7F2A91-crossover-clockwork-ridge`. Only the leading
+`7F2A91` is sent to the server, to route the two ends together; the three words
+are the password that derives the key and never leave your machine. A wrong
+guess gets exactly one attempt — it fails and burns the session. Share codes
+through a trusted channel anyway: whoever presents one first becomes the
+session's receiver.
 Drop removes sessions after completion, cancellation, disconnect, or five
 minutes without transfer activity, but operating-system, proxy, and
 infrastructure behavior is outside the application's no-storage guarantee.
@@ -159,6 +174,7 @@ Please report vulnerabilities privately according to the
 | Runtime | Tokio | async connections, channels, timeouts, cleanup |
 | State | in-memory store | active session metadata and connection channels |
 | Web | Svelte, TypeScript, Vite | sender and receiver browser flows |
+| Envelope | Rust, compiled to WebAssembly | the same encryption in both clients |
 | Edge | Caddy or GKE Ingress | optional HTTPS termination and reverse proxy |
 
 Each session connects:

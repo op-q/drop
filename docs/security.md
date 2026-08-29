@@ -11,17 +11,32 @@ Drop is pre-release. Nothing here should be read as an assurance claim.
 | Party | What they can do |
 | --- | --- |
 | Network observer | Sees TLS-protected traffic when HTTPS is configured; sees connection metadata |
-| Relay operator | Sees file bytes, filenames, sizes, MIME types, session codes, and client IP addresses |
+| Relay operator | Sees ciphertext, its length, the nameplate, and client IP addresses. Not file bytes, filenames, or MIME types |
 | A third party holding an active code | May be able to join that session as its one receiver |
 | The sending peer | Chooses every byte and every path inside an archive |
 | The receiving peer | Chooses where bytes land, and whether to keep them |
 
-The relay is a trusted component today. It handles plaintext file bytes in
-memory while relaying them, so the operator and a compromised server can access
-an active transfer. Removing that is the goal of the encryption work in
-[`implementation-checklist.md`](implementation-checklist.md).
+The relay no longer sees plaintext. Both clients derive an AES-256-GCM key from
+the secret half of the transfer code by SPAKE2, and that half never reaches the
+relay; what crosses it is ciphertext, a byte count, and a nameplate that routes
+the two peers together. See [`decisions.md`](decisions.md) entry 7.
 
-Do not describe Drop as peer-to-peer or end-to-end encrypted while this is true.
+**The CLI case and the browser case are not the same, and must never be
+described in wording that blurs them.**
+
+- **CLI to CLI is end-to-end encrypted.** The binary is fetched once, out of
+  band, and the relay has no part in delivering it.
+- **Browser transfers are encrypted in the browser, and are only as strong as
+  the code the site delivered.** The page fetches its JavaScript and the
+  WebAssembly envelope from the same origin as the relay, so an operator
+  willing to serve modified client code can capture a transfer at the point
+  where it is still plaintext. Compiling the envelope from the same Rust the
+  CLI uses (entry 11) removes a class of implementation bugs; it does not
+  remove this. What browser encryption does defeat is a passive operator, a
+  compromised store of relayed traffic, and anyone who obtains the ciphertext
+  later.
+
+Do not describe Drop as peer-to-peer.
 
 ## What the relay does not do
 
@@ -37,9 +52,21 @@ intermediate proxy is not something the application controls.
 
 ## Session codes
 
-A code is six uppercase hexadecimal characters taken from a UUIDv4, so roughly
-24 bits. It is a temporary capability: whoever presents it first becomes the
-session's one receiver.
+A code has two halves and they do different jobs:
+
+```text
+7F2A91-crossover-clockwork-ridge
+^^^^^^ nameplate — six hex characters, the only half the relay is told
+       ^^^^^^^^^^^^^^^^^^^^^^^^^ three words, 33 bits — the key-exchange
+                                  password, which never leaves either client
+```
+
+The split is load-bearing. A relay given the password could run the exchange
+against both peers at once and read everything, so the routing half and the
+authenticating half have to be different bytes.
+
+The nameplate is a temporary capability: whoever presents it first becomes the
+session's one receiver. It no longer carries the payload's secrecy.
 
 What bounds an attacker guessing codes:
 
@@ -50,13 +77,18 @@ What bounds an attacker guessing codes:
 - per-IP limits cap connection attempts per minute.
 
 What does not bound it: an attacker distributed across many source addresses.
-24 bits is small, and the per-IP rate limit is the main thing standing in the
-way. This is accepted for now because the window is short and a hit is loud,
-but it is a real weakness and it is the reason codes should be shared through a
-trusted channel.
+The nameplate is small and the per-IP rate limit is the main thing in the way.
 
-Encryption changes this materially: once the key lives beside the code rather
-than in it, guessing a code no longer yields readable bytes.
+What makes that survivable is that guessing a nameplate no longer yields
+readable bytes. An attacker who claims a session still has to know the three
+words, and SPAKE2 gives them exactly one attempt: a wrong password produces a
+different key, the sealed metadata fails to open, and claiming the session
+consumed it. Guessing is online-only and non-repeatable, so 33 bits is measured
+against a single try rather than an offline cracking rate.
+
+The remaining cost of a guessed nameplate is denial of service — the attacker
+burns the session and the real receiver is refused. Codes should still be
+shared through a trusted channel.
 
 ## Hostile input from a peer
 
@@ -118,7 +150,7 @@ the per-IP limits off.
 
 Recorded honestly rather than fixed:
 
-- the relay sees plaintext;
+- browser transfers are bounded by the code the site delivered, as above;
 - 24-bit session codes, as discussed above;
 - no resume or retry, so a disconnect loses the transfer;
 - release binaries are verified against checksums published in the same release,

@@ -6,8 +6,10 @@ use crate::services::relay_budget::RelayReservation;
 
 #[derive(Clone)]
 pub struct Session {
-    pub filename: String,
-    pub file_size: u64,
+    /// Ciphertext bytes. The relay bounds and accounts for what it relays, and
+    /// what it relays is sealed — it has no notion of a plaintext size, and no
+    /// filename to go with it.
+    pub ciphertext_size: u64,
     pub created_at: Instant,
     pub last_activity: Instant,
     pub sender_tx: Option<mpsc::Sender<SenderEvent>>,
@@ -29,6 +31,8 @@ pub enum SenderEvent {
     Acknowledgement {
         bytes_received: u64,
     },
+    /// The receiver's key-exchange message, forwarded verbatim.
+    KeyExchange(String),
     Error(String),
 }
 
@@ -41,10 +45,12 @@ pub enum DownloadEvent {
         bytes_transferred: u64,
         total_bytes: u64,
     },
+    /// The sender's key-exchange message, forwarded verbatim.
+    KeyExchange(String),
     Meta {
-        filename: String,
-        file_size: u64,
-        mime_type: String,
+        version: u8,
+        ciphertext_size: u64,
+        metadata: String,
     },
     Chunk {
         data: Vec<u8>,

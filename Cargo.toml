@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli"]
+members = ["cli", "crypto", "crypto-wasm"]
 
 # One version for the whole workspace. Every member inherits it, so the relay
 # and the CLI cannot drift apart and there is a single line to bump before a

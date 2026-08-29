@@ -19,10 +19,16 @@ use drop_cli::{
 use tokio::sync::oneshot;
 
 async fn spawn_relay() -> String {
+    spawn_relay_with_state().await.0
+}
+
+/// As [`spawn_relay`], but handing back the relay's state so a test can watch
+/// a session rather than guess at its timing.
+async fn spawn_relay_with_state() -> (String, api::app_state::AppState) {
     let state = api::build_state();
     api::start_background_services(state.clone());
 
-    let app = api::build_app(state);
+    let app = api::build_app(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("relay listener");
@@ -33,7 +39,7 @@ async fn spawn_relay() -> String {
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    format!("http://{addr}")
+    (format!("http://{addr}"), state)
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -243,10 +249,12 @@ async fn reports_a_clear_error_for_an_unknown_code() {
     let origin = spawn_relay().await;
     let base = scratch("badcode");
 
+    // Well formed, so it gets past the client-side parse and is actually put
+    // to the relay — which is the path this test exists to cover.
     let error = recv::run(
-        "ZZZZZZ",
+        "ZZZZZZ-abandon-ability-able",
         ReceiveOptions {
-            origin,
+            origin: origin.clone(),
             out_dir: base.clone(),
             extract: true,
             force: true,
@@ -257,6 +265,34 @@ async fn reports_a_clear_error_for_an_unknown_code() {
 
     assert!(
         error.to_string().contains("invalid session code"),
+        "unexpected error: {error}"
+    );
+
+    fs::remove_dir_all(&base).ok();
+}
+
+/// A code that cannot be a code is rejected here rather than spent against the
+/// relay. It matters because a session is consumed by the first receiver to
+/// claim it: a typo that reached the relay would burn the transfer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_malformed_code_fails_before_the_relay_is_contacted() {
+    let base = scratch("malformedcode");
+
+    let error = recv::run(
+        "7F2A91-abandon-ability-frobnicate",
+        ReceiveOptions {
+            // Nothing is listening here. Reaching it at all is the failure.
+            origin: "http://127.0.0.1:1".to_string(),
+            out_dir: base.clone(),
+            extract: true,
+            force: true,
+        },
+    )
+    .await
+    .expect_err("a malformed code must fail");
+
+    assert!(
+        error.to_string().contains("frobnicate"),
         "unexpected error: {error}"
     );
 
@@ -432,6 +468,217 @@ async fn extraction_replaces_existing_files_only_when_forced() {
         fs::read_to_string(destination.join("project/notes.txt")).expect("read"),
         "from the sender",
         "--force must replace the file: {forced:?}"
+    );
+
+    fs::remove_dir_all(&base).ok();
+}
+
+/// The property the short code depends on: a receiver who mistypes a word
+/// derives a different key, cannot open the transfer details, and writes
+/// nothing. It also does not get to try again — the relay consumed the session
+/// when this receiver claimed it — which is what holds an attacker to a single
+/// online guess against the words.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wrong_code_is_refused_and_leaves_nothing_on_disk() {
+    let origin = spawn_relay().await;
+    let base = scratch("wrongcode");
+
+    let source = base.join("source/secret.bin");
+    write_file(&source, &vec![7_u8; 64 * 1024]);
+    let destination = base.join("destination");
+
+    let (code_tx, code_rx) = oneshot::channel();
+    let mut code_tx = Some(code_tx);
+
+    let sender = tokio::spawn({
+        let origin = origin.clone();
+        let source = source.clone();
+
+        async move {
+            send::run(
+                &source,
+                SendOptions {
+                    origin,
+                    compress: None,
+                    on_code: Box::new(move |code| {
+                        if let Some(sender) = code_tx.take() {
+                            let _ = sender.send(code.to_string());
+                        }
+                    }),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+    });
+
+    let code = tokio::time::timeout(Duration::from_secs(10), code_rx)
+        .await
+        .expect("the sender never produced a session code")
+        .expect("the sender failed before producing a session code");
+
+    // Keep the nameplate, so the receiver reaches the right session, and
+    // change one word so only the password is wrong.
+    let mut parts: Vec<String> = code.split('-').map(str::to_string).collect();
+    let last = parts.len() - 1;
+    parts[last] = if parts[last] == "zoo" { "zebra" } else { "zoo" }.to_string();
+    let wrong_code = parts.join("-");
+    assert_ne!(wrong_code, code, "the mangled code must actually differ");
+
+    let error = recv::run(
+        &wrong_code,
+        ReceiveOptions {
+            origin: origin.clone(),
+            out_dir: destination.clone(),
+            extract: true,
+            force: true,
+        },
+    )
+    .await
+    .expect_err("a wrong code must fail");
+
+    assert!(
+        error.to_string().contains("check the code"),
+        "unexpected error: {error}"
+    );
+
+    // Nothing was written, because the failure happens on the sealed transfer
+    // details — before a destination file is opened.
+    let leftovers: Vec<_> = fs::read_dir(&destination)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        leftovers.is_empty(),
+        "a refused transfer left files behind: {leftovers:?}"
+    );
+
+    let _ = sender.await;
+    fs::remove_dir_all(&base).ok();
+}
+
+/// A transfer where the receiver claims its socket before the sender claims
+/// its own.
+///
+/// Both orders are allowed, and this one was broken. The receiver sent its half
+/// of the key exchange on connect; the relay had no sender to give it to and
+/// dropped it, since a key exchange is forwarded and never held; and the sender
+/// then waited for a half that no longer existed, with no error on either side.
+/// The other transfer tests race the two connections and the sender almost
+/// always wins, which is why this survived. Here the sender is held at its code
+/// callback until the relay has actually recorded the receiver, so the order is
+/// pinned rather than hoped for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_receiver_that_connects_first_still_completes_the_transfer() {
+    let (origin, state) = spawn_relay_with_state().await;
+    let base = scratch("receiver-first");
+
+    let contents: Vec<u8> = (0..(64 * 1024 + 7))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let source = base.join("source/early.bin");
+    write_file(&source, &contents);
+    let destination = base.join("destination");
+
+    let (code_tx, code_rx) = oneshot::channel();
+    let mut code_tx = Some(code_tx);
+    // Blocking, not async, because `on_code` is a synchronous callback. It
+    // parks the sender's worker thread, which the runtime has three more of.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+    let sender = tokio::spawn({
+        let origin = origin.clone();
+        let source = source.clone();
+
+        async move {
+            send::run(
+                &source,
+                SendOptions {
+                    origin,
+                    compress: None,
+                    on_code: Box::new(move |code| {
+                        if let Some(sender) = code_tx.take() {
+                            let _ = sender.send(code.to_string());
+                        }
+
+                        let _ = release_rx.recv();
+                    }),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+    });
+
+    let code = tokio::time::timeout(Duration::from_secs(10), code_rx)
+        .await
+        .expect("the sender never produced a session code")
+        .expect("the sender failed before producing a session code");
+
+    let nameplate = code
+        .split('-')
+        .next()
+        .expect("a code always has a nameplate")
+        .to_string();
+
+    let receiver = tokio::spawn({
+        let origin = origin.clone();
+        let destination = destination.clone();
+
+        async move {
+            recv::run(
+                &code,
+                ReceiveOptions {
+                    origin,
+                    out_dir: destination,
+                    extract: true,
+                    force: true,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+    });
+
+    let mut connected = false;
+    for _ in 0..500 {
+        if state
+            .sessions
+            .get(&nameplate)
+            .await
+            .is_some_and(|session| session.receiver_connected)
+        {
+            connected = true;
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(connected, "the receiver never claimed its socket");
+
+    release_tx.send(()).expect("the sender is still waiting");
+
+    let (sent, received) = tokio::time::timeout(
+        Duration::from_secs(60),
+        futures_util::future::join(sender, receiver),
+    )
+    .await
+    .expect("the transfer did not finish in time");
+
+    sent.expect("the sender task panicked")
+        .expect("send should succeed");
+    received
+        .expect("the receiver task panicked")
+        .expect("receive should succeed");
+
+    assert_eq!(
+        fs::read(destination.join("early.bin")).expect("received file"),
+        contents,
+        "the received bytes must match the sent bytes exactly"
     );
 
     fs::remove_dir_all(&base).ok();

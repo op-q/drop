@@ -1,0 +1,6 @@
+# `getrandom` has no default entropy source on a target with no operating
+# system, so a wasm32 build fails to link until one is named. This points it at
+# the browser's `crypto.getRandomValues`. It is scoped to the wasm target on
+# purpose: applying it globally would break every native build.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

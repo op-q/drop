@@ -14,8 +14,9 @@ use crate::{
 
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
-    pub filename: String,
-    pub file_size: u64,
+    /// Sealed size, not plaintext size. The relay bounds what crosses it, and
+    /// what crosses it is ciphertext; it has no way to learn the original.
+    pub ciphertext_size: u64,
 }
 
 #[derive(Serialize)]
@@ -31,9 +32,7 @@ pub async fn create_session(
 ) -> Result<Json<CreateSessionResponse>, AppError> {
     state.ensure_accepting_connections()?;
     let client_ip = client_ip_from_request(addr.ip(), &headers);
-    let code =
-        SessionService::create_session(&state, client_ip, payload.filename, payload.file_size)
-            .await?;
+    let code = SessionService::create_session(&state, client_ip, payload.ciphertext_size).await?;
 
     Ok(Json(CreateSessionResponse { code }))
 }
@@ -68,8 +67,7 @@ mod tests {
             axum::http::HeaderMap::new(),
             State(state),
             axum::Json(CreateSessionRequest {
-                filename: "too-big.bin".into(),
-                file_size: MAX_UPLOAD_SIZE_BYTES + 1,
+                ciphertext_size: MAX_UPLOAD_SIZE_BYTES + 1,
             }),
         )
         .await;
@@ -78,7 +76,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creates_session_when_file_size_is_within_limit() {
+    async fn creates_session_when_ciphertext_size_is_within_limit() {
         let state = AppState::new(
             InMemorySessionStore::new(),
             RateLimitService::new(),
@@ -90,8 +88,7 @@ mod tests {
             axum::http::HeaderMap::new(),
             State(state.clone()),
             axum::Json(CreateSessionRequest {
-                filename: "ok.bin".into(),
-                file_size: MAX_UPLOAD_SIZE_BYTES,
+                ciphertext_size: MAX_UPLOAD_SIZE_BYTES,
             }),
         )
         .await;
@@ -103,8 +100,7 @@ mod tests {
             .await
             .expect("expected stored session to exist");
 
-        assert_eq!(stored.file_size, MAX_UPLOAD_SIZE_BYTES);
-        assert_eq!(stored.filename, "ok.bin");
+        assert_eq!(stored.ciphertext_size, MAX_UPLOAD_SIZE_BYTES);
     }
 
     #[tokio::test]
@@ -115,8 +111,7 @@ mod tests {
                 .insert(
                     format!("CODE{:03}", index),
                     Session {
-                        filename: "ok.bin".into(),
-                        file_size: 1,
+                        ciphertext_size: 1,
                         created_at: Instant::now(),
                         last_activity: Instant::now(),
                         sender_tx: None,
@@ -137,10 +132,7 @@ mod tests {
             ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4321))),
             axum::http::HeaderMap::new(),
             State(state),
-            axum::Json(CreateSessionRequest {
-                filename: "full.bin".into(),
-                file_size: 1,
-            }),
+            axum::Json(CreateSessionRequest { ciphertext_size: 1 }),
         )
         .await;
 
@@ -160,10 +152,7 @@ mod tests {
             ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))),
             axum::http::HeaderMap::new(),
             State(state),
-            axum::Json(CreateSessionRequest {
-                filename: "late.bin".into(),
-                file_size: 1,
-            }),
+            axum::Json(CreateSessionRequest { ciphertext_size: 1 }),
         )
         .await;
 
