@@ -2,7 +2,7 @@
 name = "drop-cli"
 version.workspace = true
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 description = "Terminal client for the Drop ephemeral file-transfer relay"
 license = "MIT"
 repository = "https://github.com/op-q/drop"
@@ -31,6 +31,17 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # the same code to WebAssembly rather than reimplementing it — see
 # docs/decisions.md entry 11.
 drop-crypto = { path = "../crypto" }
+
+# The direct transport. `iroh` is the QUIC endpoint and hole punching; it
+# raises this crate's rust-version to 1.91, which is why only this crate moves.
+iroh = "1.0.3"
+# The compact string form of an EndpointAddr, small enough for one TXT record.
+iroh-tickets = "1.0.0"
+# Rendezvous on the mainline DHT. iroh 1.0 has no DHT support of its own — its
+# pkarr records travel only over n0's HTTP relay — and decisions.md entry 10
+# specifies the mainline DHT, so this is used directly. `default-features =
+# false` drops the relay client, which is the only thing pulling in reqwest.
+pkarr = { version = "8.0.0", default-features = false, features = ["dht"] }
 
 [dev-dependencies]
 api = { path = ".." }

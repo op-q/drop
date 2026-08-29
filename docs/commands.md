@@ -86,14 +86,58 @@ DROP_ALLOWED_ORIGINS=http://127.0.0.1:5173 cargo run
 
 ## Local transfer
 
-With a relay running, in two terminals:
+Nothing here needs a published release. The relay and the `drop` binary both
+come out of this checkout, and the whole round trip stays on loopback.
+
+The scripted version, which starts a relay, sends, receives and compares the
+bytes:
+
+```bash
+scripts/dev-transfer.sh                 # a generated 2.9 MiB file, over one chunk
+scripts/dev-transfer.sh ./some-folder   # something of your own
+```
+
+It exits non-zero if the received bytes differ, so it is usable as a smoke test.
+`DROP_DEV_PORT` moves it off 8080; an existing listener on that port is reused
+rather than fought over.
+
+By hand, which is what you want when poking at a failure. With a relay running,
+in two terminals:
 
 ```bash
 cargo run -p drop-cli -- send ./some-folder --server http://127.0.0.1:8080
 cargo run -p drop-cli -- recv <CODE> --server http://127.0.0.1:8080 --out /tmp/drop-test
 ```
 
+`scripts/dev-transfer.sh --relay` starts just the relay and prints the two
+commands with the port filled in.
+
+`--server` and `DROP_SERVER` are equivalent; without either, the CLI talks to
+the public instance, which is not what you want while testing.
+
+**A mistyped code is worth seeing at least once.** Keep the nameplate, change a
+word, and the receiver fails where it should — at the metadata, not the
+handshake:
+
+```text
+$ drop recv A1B2C3-zone-zoo-zebra --server http://127.0.0.1:8080
+error: could not decrypt the transfer details — check the code and try again
+```
+
+The sender's session is consumed by that attempt and it exits `receiver
+disconnected`. That is the relay refusing a second claim, and it is the
+one-guess enforcement [`decisions.md`](decisions.md) entry 13 has to reproduce
+on the direct path, where there is no relay to do it.
+
 Use synthetic files. Never point a test at the public instance.
+
+## What a local transfer does not cover
+
+The direct QUIC path is not reachable from the `drop` binary yet, so everything
+above goes through the relay even though both peers are on one machine. The
+direct path is exercised only by `cargo test -p drop-cli --lib transport::quic`,
+and those tests bind with relays disabled and meet over loopback. See the plan
+under "What cannot be verified on the development machine".
 
 ## Container
 

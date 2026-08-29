@@ -11,6 +11,7 @@
 pub mod code;
 pub mod envelope;
 pub mod handshake;
+pub mod rendezvous;
 mod wordlist;
 
 use std::fmt;
@@ -21,6 +22,7 @@ pub use envelope::{
     open_metadata, seal_metadata, total_chunks,
 };
 pub use handshake::{Handshake, SessionKeys};
+pub use rendezvous::{RENDEZVOUS_SECRET_BYTES, rendezvous_secret};
 
 /// The largest payload a transfer may carry, matching the relay's
 /// `MAX_UPLOAD_SIZE_BYTES`. It lives here as well as in the relay because the

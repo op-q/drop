@@ -25,7 +25,14 @@ this repository.
   not only against path text: a lexical check alone misses an entry that
   escapes by traversing a symlink an earlier entry created. Extraction must not
   replace files the receiver already has unless it was asked to.
-- Do not describe Drop as peer-to-peer.
+- **Peer-to-peer is a claim about one path, never about Drop as a whole.** Every
+  transfer today crosses the relay, so Drop itself must not be described as
+  peer-to-peer. The direct CLI-to-CLI QUIC path in
+  [`docs/plans/peer-to-peer-transport-plan-2026-08-20.md`](docs/plans/peer-to-peer-transport-plan-2026-08-20.md)
+  genuinely involves no Drop-operated server, and once it ships it may be
+  described that way **for that path**, naming the relay fallback alongside it.
+  Browser transfers never qualify. This is the same rule the encryption claim
+  below follows: a headline must not claim what only one path delivers.
 - CLI-to-CLI transfers are end-to-end encrypted and may be described so. Browser
   transfers are encrypted in the browser but are only as strong as the code the
   site delivered, which defeats a passive operator and stored traffic but not a

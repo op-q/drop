@@ -1,8 +1,8 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — end-to-end encryption is complete across both clients
-Last updated: **2026-08-24**
+Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — Phases 1-3 and the one-guess gate built; Phase 4 is what makes any of it reachable
+Last updated: **2026-08-29**
 
 The tactical view of what is being built and what state it is in. The detailed
 reasoning, risks, and validation for each item live in its plan under
@@ -95,16 +95,52 @@ pinned by a test rather than raced. Detail in the plan.
 ## 3. Peer-to-peer transport
 
 Plan: [`peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md)
-Status: **proposed**
+Status: **active**
 
 Two CLIs connect directly over QUIC and find each other through a mainline-DHT
 record derived from the code, so a transfer needs no Drop-operated server. The
 relay stays as an untrusted fallback for browsers and for networks where this
 cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
 
-- [ ] Phase 1 — transport abstraction, existing WebSocket path moved behind it
-- [ ] Phase 2 — `iroh` QUIC transport
-- [ ] Phase 3 — rendezvous: code-derived keypair, `pkarr` publish and resolve
+- [x] Phase 1 — transport abstraction, existing WebSocket path moved behind it.
+      113 tests pass, up from 104; the new ones drive the transfer paths over a
+      second implementation of the trait that is not a socket. Two findings in
+      the plan: establishing a connection is deliberately not on the trait, and
+      the relay turns out to rename and invent control frames, so Phase 2 has
+      to decide who does that over a direct connection.
+- [x] Phase 2 — `iroh` QUIC transport. 138 tests pass, up from 113. Two peers
+      complete a whole encrypted transfer over a direct QUIC connection with no
+      Drop server anywhere in it, running the same `send_transfer` and
+      `receive_transfer` the relay drives. The control vocabulary is settled by
+      [`decisions.md`](decisions.md) entry 12, the framing is written up in
+      [`protocol.md`](protocol.md), and two orderings turned out to be
+      load-bearing: the sender opens the stream although it accepts the
+      connection, and only the sender may close it. **Caveat, and it is not
+      small:** both test endpoints bind with relays disabled and meet over
+      loopback. Nothing here has exercised a home relay, a NAT, or hole
+      punching, which is the feature's whole value proposition. Not an
+      oversight and not fixable by trying harder: outbound UDP is blocked on the
+      development machine, so every part of this that uses the network is
+      unverifiable there. The plan says so under "What cannot be verified on the
+      development machine".
+- [x] Phase 3 — rendezvous. 145 tests pass. The nameplate-derived keypair, the
+      `pkarr` record, publish and resolve, and the address filter from
+      [`decisions.md`](decisions.md) entry 14 all exist. The DHT is behind a
+      `Directory` trait, so what is tested is everything except the network and
+      what is untested is one named struct that says so.
+- [x] **The one-guess enforcement, which was the actual gate.** Done 2026-08-29.
+      153 tests pass, up from 145. The checkpoint after `meta` exists, the
+      sender consumes an attempt on any way of not hearing `meta_ok`, and it
+      asks a human before allowing another — `AskTheTerminal`, strict when
+      there is no terminal. Which carrier polices guessing is a method on the
+      transport trait with no default, because both wrong answers are security
+      bugs: `false` on a direct connection is an unlimited guessing oracle, and
+      `true` over the relay fails every transfer, since the relay rejects
+      receiver frames outside a closed set. The retry loop hands the payload
+      back rather than re-reading it, which the type states. **What is not
+      proved:** none of it has run over a real network, for the same UDP reason
+      as Phases 2 and 3 — the pair tests use an in-memory byte pipe and
+      loopback QUIC.
 - [ ] Phase 4 — selection, automatic fallback, and reporting the path taken
 - [ ] Phase 5 — documentation, including the DHT address-disclosure weakness
 

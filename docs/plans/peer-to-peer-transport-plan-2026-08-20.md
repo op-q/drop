@@ -1,8 +1,8 @@
 # Peer-to-peer transport plan
 
-Status: **proposed**
+Status: **active**
 Created: **2026-08-20**
-Last updated: **2026-08-23**
+Last updated: **2026-08-29**
 
 ## Goal
 
@@ -70,26 +70,164 @@ unshippable.
 
 ### Phase 1 — Transport abstraction
 
-- [ ] Define a transport trait the send and receive paths use: establish,
-      send a control frame, send a chunk, receive, close.
-- [ ] Move the existing WebSocket client behind it with no behaviour change.
-- [ ] Gate: the full existing test suite passes against the refactored relay
-      transport before any QUIC code exists.
+Done 2026-08-24.
+
+- [x] Define a transport trait the send and receive paths use: send a control
+      frame, send a chunk, receive, close. **Establish is deliberately not on
+      the trait** — see the findings below.
+- [x] Move the existing WebSocket client behind it with no behaviour change.
+      `cli/src/transport/relay.rs` holds the socket; `cli/src/client.rs` keeps
+      only the relay's HTTP API, which is relay-specific by nature since a
+      transfer that needs no server creates no session.
+- [x] Gate: the full existing test suite passes against the refactored relay
+      transport before any QUIC code exists. 113 tests, up from 104: the nine
+      new ones drive the transfer paths over `ScriptedTransport`, a second
+      implementation of the trait that is not a socket. Without a second
+      implementation the trait is an assertion rather than a seam.
+
+#### Findings
+
+**Establish is not on the trait.** The relay is reached at an origin URL with a
+nameplate it allocated over HTTP; a direct connection is reached by resolving a
+record and punching a hole. Those constructors share no arguments, so each
+transport module owns its own and the choice between them belongs at the single
+call site in Phase 4 that makes it. Putting `establish` on the trait would have
+produced a parameter bag every implementation ignores half of.
+
+**The relay is not a dumb pipe for control frames — it translates, and Phase 2
+has to decide who does that instead.** This is the substantive thing Phase 1
+surfaced, and it is not mechanical:
+
+| The receiver sends | The sender hears | Produced by |
+| --- | --- | --- |
+| `chunk_ack` | `ack` | the relay, renaming |
+| `complete` | `status: transfer_complete` | the relay, after the receiver confirms its byte count |
+| — | `status: receiver_connected` | the relay, on claim |
+| — | `status: sending` | the relay |
+
+`wait_for_receiver` and `await_completion` both block on frames no peer ever
+sends. Over a direct connection there is no third party to invent them. The two
+honest options:
+
+1. **The QUIC transport synthesizes them.** `receiver_connected` when the
+   connection is established, and the receiver's own `complete` mapped to
+   `transfer_complete`. The transfer paths stay untouched and every transport
+   presents the same vocabulary. The cost is that a transport starts having
+   opinions about protocol semantics rather than only carrying frames.
+2. **The paths learn the peer's vocabulary** and treat the relay's extra
+   statuses as the relay's own embellishment. Cleaner in the long run, but it
+   changes the relay path too, which Phase 1 was careful not to.
+
+Option 1 is the smaller change and keeps the relay path frozen while QUIC is
+unproven; option 2 is where this should end up. Decide at the start of Phase 2,
+not during it, and record it in [`../decisions.md`](../decisions.md) if it goes
+the second way, because that changes the wire contract.
+
+**Error wording outlives the relay.** `the relay reported an error`, `the relay
+sent more bytes than the transfer declared`, and `relay_error` are user-facing
+strings on paths that will no longer always involve a relay. Left alone here on
+purpose: Phase 1 promised no behaviour change and an error string is behaviour.
+Fix with Phase 4, when a transfer can actually take either path and the word is
+wrong rather than merely imprecise.
 
 ### Phase 2 — QUIC transport
 
-- [ ] `iroh` (1.0) endpoint, one bidirectional stream per transfer.
-- [ ] Map the existing control messages onto the stream framing.
-- [ ] Direct connection and n0-relay-assisted connection both exercised.
+- [x] **Settle the control vocabulary first.** Decided 2026-08-24 and recorded
+      as [`../decisions.md`](../decisions.md) entry 12: the paths speak the
+      peer's vocabulary and a relay only embellishes it. The sender accepts
+      `chunk_ack` and the receiver's `complete` alongside the relay's `ack` and
+      `status: transfer_complete`, and checks the byte count itself when it
+      arrives directly. Waiting for the peer became `Transport::await_peer`,
+      because whether a peer must be waited for is a property of the carrier
+      rather than of the protocol. Nothing on the wire changed, so no released
+      client is affected.
+
+      The receive path needed no changes at all — the receiver already spoke
+      peer vocabulary, and only the sender was listening for things the relay
+      invented. That is the strongest evidence available that this was the
+      right half of the seam to move.
+- [x] **Map the control messages onto stream framing.** Done 2026-08-24 as
+      `cli/src/transport/framed.rs`, ahead of the connection rather than after
+      it, because the framing is the part that needs no network to test:
+
+      ```text
+      ┌──────┬────────────────┬─────────────────┐
+      │ kind │ length (BE u32)│ payload         │
+      │ 1 B  │ 4 B            │ `length` bytes  │
+      └──────┴────────────────┴─────────────────┘
+        0x01 control — UTF-8 JSON
+        0x02 chunk   — sealed bytes, opaque to the transport
+      ```
+
+      Written against `AsyncRead`/`AsyncWrite` rather than against QUIC, so the
+      QUIC transport becomes a thin wrapper and the framing itself is exercised
+      over an in-memory pipe. The length is read before the payload, so it is
+      an allocation request from an unauthenticated peer: it is checked against
+      a ceiling of one sealed chunk before a byte is read.
+
+      A stream that ends **between** frames is the peer finishing; one that
+      ends **inside** a header is a truncation. `read_exact` reports both as
+      `UnexpectedEof`, so the header read counts bytes itself — reporting a
+      truncation as a clean end would turn a cut-off transfer into a
+      successful-looking short read.
+- [x] **A whole transfer over a bare byte pipe**, sender to receiver, with no
+      relay and no socket in the path —
+      `a_whole_transfer_crosses_a_bare_byte_pipe`. This is the first transfer
+      in the project involving no Drop-operated process at all, and it also
+      pins entry 12: over a pipe the sender is ready immediately, hears the
+      receiver's own `chunk_ack`, and finishes on the receiver's own `complete`
+      after checking the count itself. If the sender still required the relay's
+      wording, it would hang.
+- [x] `iroh` (1.0.3) endpoint, one bidirectional stream per transfer. Done
+      2026-08-25 as `cli/src/transport/quic.rs`, with
+      `a_whole_transfer_crosses_a_quic_connection` carrying a 2 MiB file end to
+      end over a real connection with no Drop server in it.
+- [ ] Direct connection and n0-relay-assisted connection both exercised. **Only
+      direct is.** Both test endpoints bind with `RelayMode::Disabled` and meet
+      over loopback, so nothing here has exercised a relay, a home relay, or
+      hole punching. That is the same gap section 6 of the API survey names, and
+      it does not close on this machine.
+
+Two things the connection settled that the framing work could only assume:
+
+- **The sender accepts the connection but opens the stream**, and the receiver
+  dials but accepts it. `accept_bi` resolves when the peer first *writes*, not
+  when it opens a stream, and Drop's sender is the one that speaks first.
+  Reversed, both sides park forever instead of failing.
+- **Only the sender may close.** A `CONNECTION_CLOSE` permits the peer to drop
+  stream data it received but has not yet handed up, acknowledged or not. The
+  receiver's last act is writing the `complete` that the sender is blocked
+  reading, so a receiver that closed immediately destroyed it in flight and the
+  sender reported `connection lost` for a transfer whose file was already
+  correct on disk. iroh states the rule on `Connection::close`: only the peer
+  last *receiving* application data can be certain everything arrived. Here that
+  is the sender, so `close()` branches on role and the receiver waits.
+
+The framing now belongs in [`../protocol.md`](../protocol.md), since it ships.
 
 ### Phase 3 — Rendezvous
 
-- [ ] Derive an ed25519 keypair from the **nameplate** by HKDF, domain-separated
+- [x] Derive an ed25519 seed from the **nameplate** by HKDF, domain-separated
       from every key in the encryption plan. Never from the words: see above.
-- [ ] Sender publishes its `NodeAddr` as a `pkarr` record; receiver resolves.
+      Done 2026-08-24 as `crypto/src/rendezvous.rs`, with
+      `the_meeting_point_ignores_the_words` holding that property open. The
+      derivation takes a whole `TransferCode` rather than a string so the
+      nameplate is normalised — a receiver retyping it in lowercase has to
+      arrive where the sender published.
+- [x] Sender publishes its address as a `pkarr` record; receiver resolves. Done
+      2026-08-25 as `cli/src/transport/rendezvous.rs`. The DHT is behind a
+      `Directory` trait so the record layer — filtering, ticketing, signing,
+      parsing — is tested against an in-memory implementation; see "What cannot
+      be verified on the development machine" for why that split exists.
+      `MainlineDirectory` itself is **untested** and says so in its own doc
+      comment. The address is carried as an `EndpointTicket` in a `_drop` TXT
+      record, and `record_for` filters through `publishable` so a private
+      address cannot reach a record by a caller forgetting a step.
 - [ ] Handle the publish/resolve latency honestly in the UI — this is seconds,
       not milliseconds, and the sender must not print "waiting" before the
-      record is actually retrievable.
+      record is actually retrievable. The ordering the survey's measurements
+      imply: bind, `online()`, publish, *then* print the code. Nothing calls any
+      of this yet, so the ordering is not yet enforced anywhere.
 - [ ] Republish while waiting, since DHT records expire.
 
 ### Phase 4 — Selection and fallback
@@ -108,6 +246,145 @@ unshippable.
 - [ ] `security.md`: the DHT address-disclosure weakness from entry 10, stated
       plainly.
 - [ ] `protocol.md`: the QUIC framing, so a third client can interoperate.
+
+## Who enforces one guess when there is no relay — settled
+
+Found 2026-08-24 while deriving the rendezvous key. **Settled 2026-08-25 and
+recorded as [`../decisions.md`](../decisions.md) entry 13: the sender enforces
+it, and asks a human before granting another attempt.** The two details the
+proposal left open are decided with it, at the bottom of this section. The
+problem statement below is kept because the reasoning is worth not losing.
+
+The whole security argument for a 33-bit password is that an attacker gets
+**one** attempt. The plan above already says so. What it does not say is what
+enforces it, and the answer today is the relay: `claim_receiver` refuses a
+second claim on a session, so a wrong guess consumes the session and the real
+receiver is turned away. That is a server-side mechanism, and a serverless
+transfer does not have it.
+
+Without it the attack is straightforward and cheap:
+
+1. Enumerate a nameplate — 24 bits, and the DHT answers.
+2. Derive the same rendezvous keypair; the input is public, so this is free.
+3. Connect to the sender and run SPAKE2 with a guessed password.
+4. SPAKE2 reveals nothing on failure, but the sealed metadata does: it either
+   opens or it does not. That is one bit per attempt.
+5. Disconnect and repeat.
+
+An online oracle with no limit is not 33 bits of security, it is 33 bits of
+work at network speed. Nothing in the envelope prevents this, because the
+envelope was never what was providing the guarantee.
+
+**The proposed answer is that the sender enforces it.** The first peer to
+complete a key exchange is the transfer's one counterpart. If that peer fails
+to produce a valid acknowledgement, or disconnects mid-handshake, the sender
+stops rather than waiting for another connection. That reproduces exactly what
+the relay's single claim provided, on the only participant that a direct
+transfer is guaranteed to have.
+
+It carries the same cost the relay design already carries and already
+documents: an attacker who guesses a nameplate can burn a transfer without
+learning anything, which is denial of service. `security.md` says that of the
+relay path today, and it stays true here.
+
+Two details needed deciding with it. Both are now decided:
+
+- **Does a genuine mistype cost the sender the transfer?** No, but only with a
+  human's consent. The sender prints what happened and asks whether to allow
+  another attempt; declining, or running with no terminal, ends the transfer.
+  This beats both a flat one-attempt rule and a bounded retry count, because an
+  attacker grinding the code then needs human approval per guess — capping the
+  attack at human speed and, more importantly, making it *visible* to the person
+  being attacked.
+- **When does the sender consider a peer to have committed?** On the peer's
+  response to the sealed metadata, not on the handshake. Completing SPAKE2
+  proves nothing — an attacker completes it trivially, which is the whole reason
+  a wrong password fails at the metadata instead. An explicit failure, a timeout
+  and a disconnect all count as one consumed attempt, which makes the honest
+  mistyper and the silent attacker indistinguishable to the sender, as they
+  should be.
+
+The QUIC path still must not be reachable by default until this is
+*implemented*. Deciding it does not enforce it.
+
+### Building it
+
+Broken in two, because the halves fail differently and only the first touches
+the wire.
+
+**A — the checkpoint after `meta`.** The sender streams the whole payload today
+without ever learning whether the peer opened the metadata, so there is no
+moment at which a failed guess is observable. Add one:
+
+- [x] `Transport::peers_enforce_one_guess()`. The relay answers no — it refuses
+      a second claim on a session, so a wrong guess is burned server-side. A
+      direct connection answers yes. No default implementation: a carrier that
+      forgets to state this should fail to compile, because both wrong answers
+      are security bugs rather than papercuts.
+- [x] Receiver: after `open_metadata` succeeds send `meta_ok`, after it fails
+      send `error` and stop — **only when the carrier says the peers enforce
+      it.** This cannot be additive, and that is the trap: the relay parses
+      receiver frames into a typed enum and calls `fail_session` on anything it
+      does not recognise (`src/routes/download_ws.rs:322`), so a receiver that
+      sends `meta_ok` unconditionally breaks every relay transfer against the
+      deployed relay.
+- [x] Sender: wait for `meta_ok` before the first chunk, bounded by
+      `META_CHECKPOINT_TIMEOUT`. An explicit `error`, a timeout, a disconnect
+      and any other frame all resolve to one consumed attempt, per entry 13.
+- [x] `send_transfer` reports that outcome distinctly rather than as a generic
+      error, since the caller has to tell "the peer failed the code" apart from
+      "the network broke" to know whether prompting is even the right response.
+- [x] Gate: a wrong code over a direct connection stops the sender before a
+      single chunk is written, and the relay path's frames stay byte-identical
+      to today's. Both are testable with no network — `ScriptedTransport` for
+      the sender's policy, an in-memory duplex for the pair.
+
+**B — the attempt loop and the prompt.** `QuicEndpoint::accept_transfer`
+consumes the endpoint, so a failed attempt currently ends the process: strict
+one-attempt, which is the behaviour entry 13 rejected because a mistype should
+not cost the transfer.
+
+- [x] Accept without consuming the endpoint, so a second attempt has somewhere
+      to land. `iroh::Endpoint` is `Clone`, and `QuicTransport::close` has to
+      stop closing an endpoint it no longer solely owns.
+- [x] Prompt on stderr and read from the TTY, in entry 13's wording. Count the
+      attempts and show the count: a climbing counter is the whole point of
+      choosing the prompt over a retry limit.
+- [x] No TTY means strict — end the transfer. That is the safe direction.
+- [x] Gate: two failed guesses need two separate approvals, and a
+      non-interactive sender ends after the first.
+
+Deliberately out of scope here: which transport `drop send` picks. That is
+Phase 4. This makes the direct path *safe* to reach, not reachable.
+
+#### Findings
+
+Done 2026-08-29. 153 tests, up from 145.
+
+**The carrier split had to be explicit, and nearly was not.** The first shape
+tried was a receiver that always sends `meta_ok` and a sender that ignores it
+over the relay — additive, no trait change, no relay change. It would have
+broken every relay transfer in production. `src/routes/download_ws.rs:322`
+parses receiver frames into a typed `ReceiverMessage` and calls `fail_session`
+on a parse error, so an unknown frame is not ignored, it is fatal. Hence a
+trait method with no default rather than a convention.
+
+**The payload comes back from a failed guess, and the type says so.** The
+checkpoint fires before `into_chunks`, so nothing has been read, compressed or
+spooled. Returning `Attempt::FailedTheCode { payload, .. }` rather than an
+error keeps a retry costing a connection instead of a recompressed folder — and
+it removed the downcast the first draft needed to tell a failed guess from a
+broken network.
+
+**A test can deadlock where the protocol cannot.** Restructuring the QUIC
+ordering test to join both tasks before writing anything hung: `accept_bi`
+resolves on the peer's first *write*, so the write has to stay inside the
+sending task. The same ordering the module's own doc comment warns about, met
+from the other direction.
+
+**`AskTheTerminal` takes its TTY answer at construction.** Reading
+`stdin().is_terminal()` inside the prompt would make the unattended test pass or
+block depending on how `cargo test` was launched.
 
 ## Risks
 
@@ -132,6 +409,41 @@ unshippable.
 - **The 4 GiB limit becomes ambiguous.** It exists to protect the relay. Peer
   to peer there is nothing to protect, but silently changing a documented limit
   based on invisible transport selection is worse than keeping it.
+
+## What cannot be verified on the development machine
+
+Recorded 2026-08-25, because it silently shapes what "the tests pass" is worth.
+
+**Outbound UDP is blocked in the sandbox the agent tooling runs commands in.** A
+`sendto` to any non-local address fails outright, and the system resolver hangs
+because it cannot reach a nameserver. TCP is unaffected, so crates.io and the
+toolchain download fine and the restriction is easy to miss.
+
+Everything the peer-to-peer path is *for* travels over UDP:
+
+| | Needs | Verifiable here |
+| --- | --- | --- |
+| Framing over a byte pipe | nothing | yes |
+| QUIC over loopback | local UDP | yes |
+| n0-relay-assisted connection | outbound UDP | **no** |
+| NAT traversal and hole punching | outbound UDP | **no** |
+| `pkarr` publish and resolve | outbound UDP (mainline DHT) | **no** |
+
+So the QUIC tests pass, and they prove less than they look like they prove. Two
+endpoints on one host with relays disabled exercise the framing, the stream
+orchestration and the close ordering — all of which were worth pinning, and one
+of which was wrong — but they do not exercise the feature's premise.
+
+The consequence for Phase 3 is that `pkarr` publish and resolve can be *written*
+here but not *run* here. Two honest ways forward, and they should be chosen
+between rather than blurred:
+
+- Write it with the DHT behind a trait, test the record's construction and
+  parsing against an in-memory implementation, and mark the network path
+  untested until someone runs it on an unrestricted machine.
+- Run it unsandboxed. This publishes a real record to a public DHT, which is an
+  outward-facing action rather than a local test, and it should be a deliberate
+  decision rather than something that happens inside a test run.
 
 ## Validation
 
