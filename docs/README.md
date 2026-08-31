@@ -58,6 +58,7 @@ docs/
 | [`../README.md`](../README.md) | Installation, CLI usage, and basic operation |
 | [`../AGENTS.md`](../AGENTS.md) | Working rules, product invariants, validation commands |
 | [`../k8s/README.md`](../k8s/README.md) | Kubernetes manifests and the GKE overlay |
+| [`../netlab/README.md`](../netlab/README.md) | The network-topology lab: what it runs, and what it does not prove |
 
 ## Project policies
 
@@ -67,6 +68,17 @@ docs/
 - [`../.github/SECURITY.md`](../.github/SECURITY.md) — private vulnerability
   reporting.
 - [`../.github/CODE_OF_CONDUCT.md`](../.github/CODE_OF_CONDUCT.md).
+
+## Directories outside `docs/`
+
+Documentation that lives with the thing it describes:
+
+- [`../netlab/`](../netlab/README.md) — network-topology tests. Builds the real
+  binaries and runs them in Linux network namespaces against constructed
+  networks, covering what loopback cannot: a router, NAT, latency and loss. Its
+  README owns the list of what it does **not** prove, which is the part worth
+  reading before quoting a result.
+- [`../k8s/`](../k8s/README.md) — Kubernetes manifests and the GKE overlay.
 
 ## Where information belongs
 

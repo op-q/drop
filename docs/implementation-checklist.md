@@ -217,7 +217,19 @@ binaries and inspects what comes out.
       reworded. Asserted against the real binary as a subprocess, because
       in-process assertions would leave the flag parsing and the choice of
       stream unchecked — which is precisely what a lab depends on.
-- [ ] Phase 1 — namespaces, the UDP-blocked topology, one passing test
+- [x] Phase 1 — namespaces, the first topologies, three passing tests. Done
+      2026-08-31. `netlab/` runs the real binaries across a router and two
+      segments in Linux network namespaces, as an ordinary user: an
+      unprivileged user namespace grants `CAP_NET_ADMIN` inside itself, so the
+      pytest session re-executes into `unshare -Urnm` and skips cleanly only
+      where a kernel refuses. **The phase's stated gate was unmeetable and was
+      replaced.** It asked that the UDP-blocked test fail when the `iptables`
+      rule is removed; in a lab with no route to the internet the direct path
+      cannot be set up either way, so nothing can attribute the fallback to the
+      block. The topology honestly shows the fallback firing, completing, and
+      being reported — and says so. Two negative controls that do discriminate
+      replace the gate: the router is shown to be carrying the transfer, and
+      the relay to be relaying it.
 - [ ] Phase 2 — latency, and the `window / RTT` claim in
       [`protocol.md`](protocol.md)
 - [ ] Phase 3 — packet loss

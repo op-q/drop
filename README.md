@@ -54,6 +54,7 @@ either way. Run `drop --help` for the full flag list, including
 - [Protocol](docs/protocol.md) — the wire format
 - [Deployment](docs/deployment.md) — requirements, configuration, Docker, Kubernetes/GKE
 - [Commands](docs/commands.md) — running from source, local dev workflows
+- [Network lab](netlab/README.md) — topology tests, and what they do not prove
 - [Contributing](.github/CONTRIBUTING.md)
 - [Full documentation index](docs/README.md)
 

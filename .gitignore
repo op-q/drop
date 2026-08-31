@@ -5,6 +5,11 @@
 /node_modules/
 /web/node_modules/
 
+# Python state from the network lab in netlab/
+__pycache__/
+.venv/
+.pytest_cache/
+
 # Local tools, editors, and operating-system state
 /.claude/settings.local.json
 /.codex/

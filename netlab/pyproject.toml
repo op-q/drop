@@ -1,0 +1,16 @@
+[project]
+name = "netlab"
+version = "0.1.0"
+description = "Network-topology tests for Drop, running the real binaries in Linux network namespaces"
+requires-python = ">=3.11"
+dependencies = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+# The lab builds binaries, constructs networks, and moves real bytes over them.
+# A run is measured in minutes, so the default output says which topology is in
+# progress rather than going quiet.
+addopts = "-v --tb=short --durations=10"
+# Namespace names are fixed, so two tests building a topology at once would
+# fight over them. Serial is not a performance oversight; it is the design.
+markers = []

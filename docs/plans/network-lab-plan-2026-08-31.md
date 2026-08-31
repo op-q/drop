@@ -322,33 +322,88 @@ entry points in one transfer.
 alone would pass just as well if the line were unconditional, and an unasked-for
 `key=value` in a user's terminal is the thing the flag exists to prevent.
 
-### Phase 1 — Namespaces, one topology, one passing test
+### Phase 1 — Namespaces, one topology, one passing test — **done 2026-08-31**
 
 The narrowest thing that proves the plumbing. **Topology 4** rather than the
 brief's suggested topology 1, because 4 is the simplest one that is not blocked
 on open question 1.
 
-- [ ] `netlab/netns.py` — namespace lifecycle, veth pairs, addressing, routes,
+- [x] `netlab/netns.py` — namespace lifecycle, veth pairs, addressing, routes,
       NAT rules, `tc netem`, and a context manager that tears down on every
       exit path including a failed assertion. Everything is `ip`, `iptables`
       and `tc` driven through `subprocess`; nothing here parses a packet.
-- [ ] `netlab/conftest.py` — build the binaries once per session with
+- [x] `netlab/conftest.py` — build the binaries once per session with
       `cargo build --workspace --bins`; establish namespace capability by the
       three-way probe in finding 1; skip with a specific message if none works.
-- [ ] `netlab/runner.py` — spawn `drop send` and `drop recv` in their
+- [x] `netlab/runner.py` — spawn `drop send` and `drop recv` in their
       namespaces, carry the code from one to the other, capture both streams,
       enforce a wall-clock timeout, and kill the process group on the way out.
-- [ ] `netlab/topologies.py` — `udp_blocked()` only, so far.
-- [ ] `netlab/test_transfer.py` — one test: a 4 MiB synthetic payload crosses,
+- [x] `netlab/topologies.py` — `udp_blocked()` only, so far.
+- [x] `netlab/test_transfer.py` — one test: a 4 MiB synthetic payload crosses,
       the SHA-256 matches, and `drop-status:` reports `path=relay`.
-- [ ] `netlab/pyproject.toml`, `netlab/README.md` including the
+- [x] `netlab/pyproject.toml`, `netlab/README.md` including the
       "what this does not prove" section.
-- [ ] Housekeeping: `__pycache__/` and `.venv/` in `.gitignore`, a `pip`
+- [x] Housekeeping: `__pycache__/` and `.venv/` in `.gitignore`, a `pip`
       ecosystem entry in `.github/dependabot.yml`, and `netlab/` registered in
       the documentation map [`docs/README.md`](../README.md).
 
-Gate: this test fails if the `iptables` rule that drops UDP is removed, and
-passes with it. A test that passes either way is testing nothing.
+Gate as written: *this test fails if the `iptables` rule that drops UDP is
+removed.* **That gate is wrong and was not met — it cannot be.** See the
+findings below; it is replaced by two negative controls that do work.
+
+#### Findings
+
+Done 2026-08-31. Three topologies, three tests, 51 seconds.
+
+**The stated gate was unmeetable, and noticing why is the most useful thing
+this phase produced.** In a lab with no route to the internet, the direct path
+cannot be set up whether or not the router forwards UDP — `online()` times out
+either way. So removing the `iptables` rule leaves `udp_blocked` passing, and
+the topology cannot attribute the fallback to the block. This is precisely the
+risk the plan's own list names as "the lab passes while proving less than it
+looks like", met on the first topology attempted.
+
+It is not fixable by trying harder, and it is the *same* blocker as open
+question 1: attributing a fallback to a cause requires the direct path to be
+able to succeed when the cause is absent. What the topology does honestly show
+— the fallback fires, the transfer completes across a routed network, and the
+carrier is reported — is worth having, and is now what the test claims. Both
+the test and `netlab/README.md` say what it does not show.
+
+The gate is replaced by two negative controls that do discriminate, in
+`test_the_topology_is_load_bearing`: with the router not forwarding, the ends
+cannot reach each other at all; with no relay process running, a relayed
+transfer fails. The first proves the namespaces are really separated by the
+router, the second that the relay is really carrying the bytes.
+
+**Nothing here needs root, and it took one line to find out.** Finding 1 held:
+the whole suite runs as an ordinary user. The re-execution into `unshare -Urnm`
+had one non-obvious requirement — pytest has already replaced file descriptors
+1 and 2 with its own capture buffers by the time any hook runs, and a process
+that `exec`s inherits them, so the re-executed session wrote its entire output
+into a buffer no surviving process would ever read. The run appeared to pass
+instantly and silently. Suspending the capture manager before the `exec` fixes
+it; doing the `exec` at conftest import time cannot, which is why it happens in
+`pytest_configure`.
+
+**A namespace directory needs a tmpfs, because fake root is not root.** Inside a
+user namespace this process is uid 0, but file ownership is not remapped, so
+`/run` still belongs to real root and `mkdir /run/netns` fails. A tmpfs mounted
+over the namespace directory is writable and, being in a private mount
+namespace, invisible to the host.
+
+**A failed transfer is a result, not a lab error.** The first draft raised from
+the runner when the sender died before announcing a code, which made "the relay
+is not running" indistinguishable from "the lab is broken" — and the negative
+control that depends on that difference had to catch a bare `Exception`. The
+runner now returns a failed `Transfer`, and `LabError` means only what its
+docstring says: the network could not be built as asked.
+
+**Timings, for calibration.** A 4 MiB relayed transfer across the router: ~11 s
+wall including relay startup. The same on `auto` with no internet: ~26 s, of
+which 15 s is `ONLINE_TIMEOUT` before the sender gives up on a home relay. That
+15 s is a floor under every `auto` topology in this lab and should be assumed
+in Phase 2's budget.
 
 ### Phase 2 — Latency and the `window / RTT` claim
 
