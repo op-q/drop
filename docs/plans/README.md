@@ -42,6 +42,11 @@ the plan contract unmissable and indexes what is here.
   connection has nobody to do that.
 
 ## Proposed
+- [`meta-ok-key-confirmation-plan-2026-08-31.md`](meta-ok-key-confirmation-plan-2026-08-31.md)
+  — make the receiver prove it opened the sealed metadata instead of saying so.
+  `meta_ok` carries a key-confirmation value derived from the agreed secret and
+  compared in constant time, closing the case where an attacker who guessed
+  wrong claims success and so suppresses the prompt entry 13 exists to raise.
 - [`receiver-confirmation-plan-2026-08-19.md`](receiver-confirmation-plan-2026-08-19.md)
   — show the receiver what it is about to accept and require a y/n before any
   bytes move. Adds a protocol handshake and a new terminal outcome.

@@ -141,6 +141,15 @@ cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
       proved:** none of it has run over a real network, for the same UDP reason
       as Phases 2 and 3 — the pair tests use an in-memory byte pipe and
       loopback QUIC.
+- [ ] **Make `meta_ok` provable rather than self-reported.** Proposed
+      2026-08-31, in
+      [`plans/meta-ok-key-confirmation-plan-2026-08-31.md`](plans/meta-ok-key-confirmation-plan-2026-08-31.md).
+      The frame above is an unauthenticated assertion made by the party being
+      rate-limited, so a wrong guesser can send it anyway: the attempt counter
+      never climbs and the human is never prompted. The rate limit holds; the
+      *noticing* that entry 13 chose the prompt for does not. Fix is a fourth
+      HKDF output under `drop/v1/confirm`, compared in constant time. Land it
+      before the direct path ships — after that it is a wire break.
 - [x] Phase 4 — selection, automatic fallback, and reporting the path taken.
       Done 2026-08-29. `--transport p2p|relay|auto` (and `DROP_TRANSPORT`),
       defaulting to `auto`; a locally drawn nameplate, since a serverless send
