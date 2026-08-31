@@ -10,7 +10,7 @@ use std::{
 use serde_json::json;
 
 use crate::{
-    crypto,
+    crypto, direct,
     payload::{GZIP_MIME, TAR_GZIP_MIME, TAR_MIME},
     progress::Progress,
     transport::{Frame, Transport, relay},
@@ -89,6 +89,8 @@ impl ExpansionGuard {
 
 pub struct ReceiveOptions {
     pub origin: String,
+    /// Which carrier to use. See [`crate::direct::Path`].
+    pub path: crate::direct::Path,
     pub out_dir: PathBuf,
     pub extract: bool,
     pub force: bool,
@@ -110,11 +112,66 @@ enum Target {
 pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Error + Send + Sync>> {
     let code = crypto::TransferCode::parse(code)?;
 
+    // The nameplate says where to look, and looking is what decides the path:
+    // a record under it means the sender went direct, and its absence means
+    // the sender fell back. A missing record is not a wrong code — a wrong code
+    // is not detectable here at all, and surfaces at the sealed metadata.
+    if options.path != direct::Path::Relay {
+        match try_direct(&code, &options).await {
+            Ok(Some(outcome)) => return outcome,
+            Ok(None) => {
+                direct::may_fall_back(options.path, &*missing_record())?;
+                eprintln!("No sender published for this code; trying the relay.");
+            }
+            Err(error) => {
+                direct::may_fall_back(options.path, error.as_ref())?;
+                eprintln!("No peer-to-peer path: {error}");
+                eprintln!("Falling back to the relay.");
+            }
+        }
+    }
+
     eprintln!("Connecting to {}...", options.origin);
+    direct::report("relay (encrypted; the relay cannot read it)");
 
     let mut transport = relay::connect_receiver(&options.origin, code.nameplate()).await?;
 
     receive_transfer(&mut transport, &code, &options).await
+}
+
+fn missing_record() -> Box<dyn Error + Send + Sync> {
+    "nobody has published a peer-to-peer address for this code".into()
+}
+
+/// Looks the sender up and, if it is there, receives from it directly.
+///
+/// `Ok(None)` distinguishes "the sender is not on this path" from "this path is
+/// broken", because only the first is an ordinary outcome worth falling back
+/// from quietly.
+#[allow(clippy::type_complexity)]
+async fn try_direct(
+    code: &crypto::TransferCode,
+    options: &ReceiveOptions,
+) -> Result<Option<Result<(), Box<dyn Error + Send + Sync>>>, Box<dyn Error + Send + Sync>> {
+    eprintln!("Looking for the sender...");
+
+    let directory = direct::Directory::new()?;
+
+    let Some(mut dialled) = direct::dial_sender(&directory, code).await? else {
+        return Ok(None);
+    };
+
+    direct::report("peer-to-peer (no Drop server)");
+
+    // The endpoint has to outlive the transfer. It owns the connection's
+    // driver, so dropping it early kills a transfer that had just started —
+    // which is exactly what happened the first time this ran over a real
+    // network, and what the loopback tests could not see.
+    let outcome = receive_transfer(&mut dialled.transport, code, options).await;
+
+    dialled.endpoint.shutdown().await;
+
+    Ok(Some(outcome))
 }
 
 /// The receiver's half of a transfer, over whatever is carrying it.

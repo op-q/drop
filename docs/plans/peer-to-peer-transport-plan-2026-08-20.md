@@ -232,12 +232,50 @@ The framing now belongs in [`../protocol.md`](../protocol.md), since it ships.
 
 ### Phase 4 — Selection and fallback
 
-- [ ] Try peer-to-peer, fall back to the relay on rendezvous failure,
-      hole-punch failure, or timeout.
-- [ ] `--transport p2p|relay|auto` to force a path, defaulting to `auto`.
-- [ ] Report the path taken, so a slow transfer is diagnosable.
-- [ ] The fallback must not leak: a transfer that falls back is still encrypted
+- [x] Try peer-to-peer, fall back to the relay on rendezvous or setup failure.
+- [x] `--transport p2p|relay|auto` to force a path, defaulting to `auto`.
+      Also `DROP_TRANSPORT`.
+- [x] Report the path taken, so a slow transfer is diagnosable.
+- [x] The fallback must not leak: a transfer that falls back is still encrypted
       under the same envelope, and the relay still cannot read it.
+- [x] A locally drawn nameplate, since a serverless send has nobody to allocate
+      one. `TransferCode::generate` draws one and resolves it first, which both
+      catches a collision and proves the DHT answers before a code is shown.
+
+#### Where the fallback can and cannot happen
+
+Established 2026-08-29, and it is narrower than the bullet above reads.
+
+**A failed hole punch is not a failed connection.** iroh does hole punching
+"complemented by relay servers under the hood" — when a direct path cannot be
+established it carries the same QUIC connection over n0's relay instead, and
+neither peer has to do anything. So the Drop relay is not a fallback for
+connectivity. It is a fallback for **rendezvous and setup**: binding, reaching a
+home relay, publishing to the DHT, resolving from it.
+
+That places every fallback decision *before the code is printed*, which is what
+makes the design tractable:
+
+```text
+sender                                     receiver
+  bind, online, publish ──┐                  resolve the nameplate ──┐
+    ok  → print a code    │                    found → dial          │
+    fail→ relay session ──┘                    miss  → relay ────────┘
+          (a different nameplate)
+```
+
+The receiver can decide per transfer because the nameplate tells it where to
+look: a record under that nameplate means the sender went direct, and its
+absence means the sender fell back. **Once the sender has printed a code the
+path is fixed**, because a relay-allocated nameplate and a locally drawn one are
+different strings and the code names one of them.
+
+**What this does not cover**, and it must be documented rather than discovered:
+a sender that published, and a receiver that resolved but cannot reach it at all
+— both behind symmetric NAT *and* unable to reach n0's relay. The receiver falls
+back to the Drop relay and finds nobody, because the sender is not there. Rare,
+and the honest fix is a sender that holds both paths open at once, which needs
+the relay to accept a nameplate it did not allocate.
 
 ### Phase 5 — Documentation
 
@@ -412,22 +450,63 @@ block depending on how `cargo test` was launched.
 
 ## What cannot be verified on the development machine
 
-Recorded 2026-08-25, because it silently shapes what "the tests pass" is worth.
+**Superseded 2026-08-29 — outbound UDP now works here, and the whole path has
+been run end to end.** The section is kept because it explains the shape of
+everything built before that date, and because the restriction it describes is
+a property of an environment rather than of the code: it can come back.
 
-**Outbound UDP is blocked in the sandbox the agent tooling runs commands in.** A
-`sendto` to any non-local address fails outright, and the system resolver hangs
-because it cannot reach a nameserver. TCP is unaffected, so crates.io and the
-toolchain download fine and the restriction is easy to miss.
+### What the first real-network run proved, and what it cost
+
+With `DROP_SERVER` pointed at a dead port and `--transport p2p` forbidding any
+fallback, two CLIs moved 3,000,000 bytes byte-identical. Publishing to the
+mainline DHT, resolving the same record from a second process, and dialling a
+peer that had never been heard of all work. **That is the plan's gate, met.**
+
+It failed on the first attempt, and the failure is the point. `dial_sender`
+bound a `QuicEndpoint`, dialled, returned the `QuicTransport`, and let the
+endpoint drop on the way out — so the connection died the instant the transfer
+began, and the sender reported `connection lost` immediately after `Receiver
+connected.`
+
+The cause was a consequence of the one-guess work: `QuicTransport` stopped
+owning its endpoint so the *sender's* endpoint could outlive a failed guess and
+accept another attempt. That made endpoint lifetime the caller's job, the
+sender's path did it right, and the receiver's did not. **Every loopback test
+passed throughout**, because each holds both endpoints in the test function's
+own scope for the whole test and so cannot express the bug. It is now pinned by
+`dropping_an_endpoint_ends_the_transfer_on_it`, which asserts the consequence
+rather than the fix.
+
+The lesson worth keeping: the tests were not weak, they were *shaped* so that
+one class of error was invisible. A local pipe and a loopback socket keep
+objects alive that a real deployment does not.
+
+### The original restriction
+
+Recorded 2026-08-25, because it silently shapes what "the tests pass" is worth
+for everything built before that date.
+
+**Outbound UDP was blocked in the sandbox the agent tooling ran commands in.** A
+`sendto` to any non-local address failed outright, and the system resolver hung
+because it could not reach a nameserver. TCP was unaffected, so crates.io and
+the toolchain downloaded fine and the restriction was easy to miss.
 
 Everything the peer-to-peer path is *for* travels over UDP:
 
-| | Needs | Verifiable here |
-| --- | --- | --- |
-| Framing over a byte pipe | nothing | yes |
-| QUIC over loopback | local UDP | yes |
-| n0-relay-assisted connection | outbound UDP | **no** |
-| NAT traversal and hole punching | outbound UDP | **no** |
-| `pkarr` publish and resolve | outbound UDP (mainline DHT) | **no** |
+| | Needs | Was verifiable | Is now |
+| --- | --- | --- | --- |
+| Framing over a byte pipe | nothing | yes | yes |
+| QUIC over loopback | local UDP | yes | yes |
+| n0-relay-assisted connection | outbound UDP | **no** | yes |
+| `pkarr` publish and resolve | outbound UDP (mainline DHT) | **no** | **yes, run** |
+| NAT traversal and hole punching | outbound UDP | **no** | **still not** |
+
+The last row has not moved and is worth being precise about. Both peers in the
+run were on one machine behind one NAT, so whether a *direct* path was punched
+or the connection rode n0's relay is not something that run distinguishes —
+iroh does the same thing either way and the transfer succeeds regardless. Two
+peers on genuinely different networks remains untested, and that is the row
+that carries the feature's performance claim rather than its correctness.
 
 So the QUIC tests pass, and they prove less than they look like they prove. Two
 endpoints on one host with relays disabled exercise the framing, the stream

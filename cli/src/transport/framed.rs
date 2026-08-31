@@ -400,6 +400,7 @@ mod tests {
         let (mut sending, mut receiving) = joined();
 
         let options = crate::recv::ReceiveOptions {
+            path: crate::direct::Path::Relay,
             origin: String::new(),
             out_dir: destination.clone(),
             extract: true,
@@ -468,6 +469,7 @@ mod tests {
         let (mut sending, mut receiving) = joined();
 
         let options = crate::recv::ReceiveOptions {
+            path: crate::direct::Path::Relay,
             origin: String::new(),
             out_dir: destination.clone(),
             extract: true,

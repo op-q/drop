@@ -290,7 +290,7 @@ impl Transport for QuicTransport {
 
 #[cfg(test)]
 mod tests {
-    use super::{DROP_ALPN, QuicEndpoint};
+    use super::{DROP_ALPN, Duration, QuicEndpoint};
     use crate::transport::{Frame, Transport};
     use serde_json::json;
 
@@ -347,6 +347,72 @@ mod tests {
         // caller's job rather than the transport's.
         sender.shutdown().await;
         receiver.shutdown().await;
+    }
+
+    /// A dropped endpoint takes its connections with it.
+    ///
+    /// Written after a real-network run failed where every loopback test
+    /// passed. `QuicTransport` deliberately does not own its endpoint — the
+    /// sender needs one endpoint to outlive several connections, which is what
+    /// makes another attempt possible at all — so keeping it alive is the
+    /// caller's job. The receiver's dial path got that wrong: it bound an
+    /// endpoint, dialled, returned the transport, and let the endpoint drop on
+    /// the way out. The peer saw the transfer die the instant it began.
+    ///
+    /// Every other test in this module holds both endpoints in its own scope
+    /// for the whole test, so none of them could observe this. This one drops
+    /// one on purpose, and asserts the consequence rather than the fix, so that
+    /// a future refactor which reintroduces it has something to fail against.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_an_endpoint_ends_the_transfer_on_it() {
+        let sender = QuicEndpoint::bind_without_relays()
+            .await
+            .expect("a sender endpoint");
+        let receiver = QuicEndpoint::bind_without_relays()
+            .await
+            .expect("a receiver endpoint");
+        let address = sender.addr();
+
+        let sending = tokio::spawn(async move {
+            let mut transport = sender.accept_transfer().await.expect("a peer dialled");
+            transport
+                .send_control(json!({ "type": "key_exchange", "message": "5e4de5" }))
+                .await
+                .expect("the sender speaks first");
+            // Bounded rather than read to the end: the failure being pinned is
+            // that nothing useful arrives, and waiting out QUIC's idle timeout
+            // to prove it would cost the suite half a minute for one assertion.
+            let result = tokio::time::timeout(Duration::from_secs(3), transport.receive()).await;
+            (transport, sender, result)
+        });
+
+        // The shape the bug had: keep the transport, drop the endpoint.
+        let mut dialled = {
+            let transport = receiver
+                .connect_transfer(address)
+                .await
+                .expect("the sender was reachable");
+            drop(receiver);
+            transport
+        };
+
+        let (mut sending, sender, sender_saw) = sending.await.expect("the sending task");
+
+        // Three outcomes are all correct and all fatal to a transfer: an error,
+        // a clean end, or nothing at all. What must never happen is a frame,
+        // because that would mean the connection outlived its endpoint and the
+        // invariant this pins does not exist.
+        let carried_a_frame = matches!(sender_saw, Ok(Ok(Some(_))));
+        assert!(
+            !carried_a_frame,
+            "a connection must not outlive the endpoint that owns it"
+        );
+
+        // The receiver side is equally dead; it must not look healthy either.
+        let _ = tokio::time::timeout(Duration::from_secs(3), dialled.receive()).await;
+
+        sending.close().await;
+        sender.shutdown().await;
     }
 
     /// The ALPN is the version gate. Two builds whose framing disagrees must
@@ -436,6 +502,7 @@ mod tests {
                     &mut transport,
                     &code,
                     &crate::recv::ReceiveOptions {
+                        path: crate::direct::Path::Relay,
                         origin: String::new(),
                         out_dir: destination,
                         extract: true,

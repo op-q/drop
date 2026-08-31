@@ -174,7 +174,13 @@ test("CLI to browser: the browser opens what the CLI sealed", { skip: !haveBinar
   const source = join(workDir, "holiday.bin");
   await writeFile(source, payload);
 
-  const sender = spawn(CLI, ["send", source, "--server", origin], {
+  // `--transport relay` is not optional here even though `auto` is the
+  // default. The peer on the other side of this test is the browser envelope,
+  // which can only reach the relay — so a sender left on `auto` publishes to
+  // the DHT and waits for a QUIC peer that is never coming, while the receiver
+  // waits on a relay session that was never created. Both then sit until CI
+  // kills the job.
+  const sender = spawn(CLI, ["send", source, "--server", origin, "--transport", "relay"], {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -227,7 +233,16 @@ test("browser to CLI: the CLI opens what the browser sealed", { skip: !haveBinar
   await mkdir(destination, { recursive: true });
   const receiver = spawn(
     CLI,
-    ["recv", code.toString(), "--server", origin, "--out", destination],
+    [
+      "recv",
+      code.toString(),
+      "--server",
+      origin,
+      "--out",
+      destination,
+      "--transport",
+      "relay",
+    ],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
   let receiverErr = "";
