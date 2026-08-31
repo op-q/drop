@@ -42,6 +42,16 @@ the plan contract unmissable and indexes what is here.
   connection has nobody to do that.
 
 ## Proposed
+
+- [`network-lab-plan-2026-08-31.md`](network-lab-plan-2026-08-31.md)
+  — a `netlab/` directory that runs the real binaries inside Linux network
+  namespaces against constructed topologies, so the peer-to-peer plan's
+  validation gates stop being unreachable by hand. Two findings shape it: the
+  lab needs no root, because an unprivileged user namespace grants
+  `CAP_NET_ADMIN` inside itself; and the direct path cannot run hermetically as
+  the code stands, because rendezvous needs the public DHT, n0's relays, and an
+  address that [`../decisions.md`](../decisions.md) entry 14 deliberately
+  refuses to publish. The relay-path topologies are unblocked and come first.
 - [`meta-ok-key-confirmation-plan-2026-08-31.md`](meta-ok-key-confirmation-plan-2026-08-31.md)
   — make the receiver prove it opened the sealed metadata instead of saying so.
   `meta_ok` carries a key-confirmation value derived from the agreed secret and
