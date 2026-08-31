@@ -6,7 +6,8 @@ scoped features.
 
 ## Before you start
 
-1. Read the [README](../README.md), especially the privacy and security model.
+1. Read the [README](../README.md) and the
+   [security model](../docs/security.md).
 2. Search existing issues and pull requests for overlapping work.
 3. Open an issue before a substantial protocol, security, persistence, or
    deployment change so the behavior can be agreed first.
