@@ -1,8 +1,8 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — reachable and proved over a real network; Phase 5 (documentation) is what remains
-Last updated: **2026-08-29**
+Current work: **[network topology lab](plans/network-lab-plan-2026-08-31.md)** — item 5, giving the peer-to-peer plan's unreachable validation gates a network to run on. Peer-to-peer transport is reachable and proved over a real network; its Phase 5 (documentation) still remains
+Last updated: **2026-08-31**
 
 The tactical view of what is being built and what state it is in. The detailed
 reasoning, risks, and validation for each item live in its plan under
@@ -28,6 +28,11 @@ Reordered 2026-08-20 at the user's direction: encryption moved ahead of
 confirmation, and transport was added. The reasoning and the cost of the swap
 are in
 [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law).
+
+The network lab (item 5) was added 2026-08-31 and runs alongside rather than in
+that sequence. It builds nothing the other items depend on; it gives item 3's
+unchecked validation gates somewhere to run, so it follows transport and does
+not block confirmation.
 
 ## 1. Relay teardown reset
 
@@ -193,6 +198,46 @@ bytes move.
 Gate: declining leaves nothing on disk and is not counted as a failure; a
 filename carrying escape sequences renders inert; a non-TTY without `--yes`
 fails clearly.
+
+## 5. Network topology lab
+
+Plan: [`network-lab-plan-2026-08-31.md`](plans/network-lab-plan-2026-08-31.md)
+Status: **active**
+
+A `netlab/` directory that builds the real binaries and runs them inside Linux
+network namespaces against constructed topologies — NAT, latency, loss, blocked
+UDP — so the peer-to-peer plan's validation gates stop being unreachable by
+hand. No part of the Drop protocol is reimplemented there; the lab starts real
+binaries and inspects what comes out.
+
+- [x] Phase 0 — machine-readable carrier reporting in the CLI. Done
+      2026-08-31. 156 tests, up from 153. `--status` and `DROP_STATUS` add one
+      `drop-status: path=... fallback=...` line beside the prose, so a harness
+      matches on a stable string rather than on sentences written to be
+      reworded. Asserted against the real binary as a subprocess, because
+      in-process assertions would leave the flag parsing and the choice of
+      stream unchecked — which is precisely what a lab depends on.
+- [ ] Phase 1 — namespaces, the UDP-blocked topology, one passing test
+- [ ] Phase 2 — latency, and the `window / RTT` claim in
+      [`protocol.md`](protocol.md)
+- [ ] Phase 3 — packet loss
+- [ ] Phase 4 — the direct-path topologies. **Blocked**, and not on effort:
+      the direct path reaches the public internet in three independent places,
+      and one of them cannot be routed around. `rendezvous::publishable`
+      refuses every address a lab may use — RFC 1918, carrier-grade NAT, the
+      benchmarking range, and the documentation ranges — because
+      [`decisions.md`](decisions.md) entry 14 strips private addresses from a
+      published record on purpose. Entry 14 states the consequence itself: two
+      peers on one LAN can no longer find each other through the DHT, and a
+      netns lab is a LAN. The plan's open question 1 has the three candidate
+      answers; it is a decision about production surface, not about test code.
+- [ ] Phase 5 — dated report under [`validation/`](validation/) and a separate
+      CI workflow, nightly and label-triggered, never blocking pull requests
+
+Gate: every topology fails when its defining condition is removed, demonstrated
+once per topology and recorded. A lab that passes either way is measuring
+nothing, which is the failure the peer-to-peer plan's loopback tests already
+document about themselves.
 
 ## Not scheduled
 

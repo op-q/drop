@@ -165,13 +165,93 @@ pub async fn dial_sender(
     }))
 }
 
+/// Which carrier actually moved the bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Carrier {
+    /// Two terminals, no Drop process anywhere in the path.
+    Direct,
+    /// Through a Drop relay, which carries an envelope it cannot read.
+    Relay,
+}
+
+impl Carrier {
+    /// What a person reads.
+    fn prose(self) -> &'static str {
+        match self {
+            Self::Direct => "peer-to-peer (no Drop server)",
+            Self::Relay => "relay (encrypted; the relay cannot read it)",
+        }
+    }
+
+    /// What a program reads. Short, lowercase, and the same spelling
+    /// `--transport` already accepts, so one vocabulary covers asking for a
+    /// path and being told which one happened.
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Direct => "p2p",
+            Self::Relay => "relay",
+        }
+    }
+}
+
+/// Why the direct path was not the one taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fallback {
+    /// Nothing was fallen back from. Either the direct path worked, or the
+    /// relay is what was asked for.
+    None,
+    /// A direct path could not be set up: binding, becoming reachable,
+    /// publishing, or a directory that did not answer.
+    Rendezvous,
+    /// Receiver-side only. Nobody had published under this nameplate, which
+    /// means the sender itself fell back before it printed a code. Distinct
+    /// from [`Self::Rendezvous`] because nothing here failed — this receiver
+    /// looked in the right place and correctly found the sender absent.
+    NoRecord,
+}
+
+impl Fallback {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Rendezvous => "rendezvous",
+            Self::NoRecord => "no-record",
+        }
+    }
+}
+
 /// Says which way a transfer actually travelled.
 ///
 /// Printed rather than inferred, because the two paths differ in latency by
 /// enough that a user watching a slow transfer needs to know which one they
 /// are on before they can say anything useful about it.
-pub fn report(path: &str) {
-    eprintln!("Path    {path}");
+///
+/// `status` adds [`status_line`] beside the prose rather than instead of it.
+/// A person gets the sentence; a program gets the line.
+pub fn report(carrier: Carrier, fallback: Fallback, status: bool) {
+    eprintln!("Path    {}", carrier.prose());
+
+    if status {
+        eprintln!("{}", status_line(carrier, fallback));
+    }
+}
+
+/// The machine-readable half of [`report`].
+///
+/// Deliberately one line of `key=value` rather than a `--json` mode. A JSON
+/// object invites a reporting schema to grow inside it, and then the schema is
+/// a compatibility surface; what anything actually needs to know is which
+/// carrier moved the bytes and why it was not the other one. One line is also
+/// greppable from a shell, which is where this gets read.
+///
+/// Rendered rather than printed so it can be tested without capturing a
+/// stream.
+pub fn status_line(carrier: Carrier, fallback: Fallback) -> String {
+    format!(
+        "drop-status: path={} fallback={}",
+        carrier.tag(),
+        fallback.tag()
+    )
 }
 
 /// Whether falling back to the relay is allowed, and what to say when it is not.
@@ -190,7 +270,7 @@ pub fn may_fall_back(path: Path, failure: &dyn Error) -> Result<(), Box<dyn Erro
 
 #[cfg(test)]
 mod tests {
-    use super::Path;
+    use super::{Carrier, Fallback, Path, status_line};
 
     #[test]
     fn a_transport_choice_accepts_the_names_the_help_advertises() {
@@ -216,5 +296,33 @@ mod tests {
 
         assert!(super::may_fall_back(Path::Auto, failure.as_ref()).is_ok());
         assert!(super::may_fall_back(Path::Direct, failure.as_ref()).is_err());
+    }
+
+    /// Every combination that can actually be printed, spelled out.
+    ///
+    /// This is the whole point of the line: something reading it is reading an
+    /// exact string, so a reworded prose message must not be able to change it
+    /// and neither must a refactor here. Written as literals rather than built
+    /// from the same `tag` methods the code uses, because a test that composes
+    /// the answer the same way the implementation does agrees with it by
+    /// construction and checks nothing.
+    #[test]
+    fn the_status_line_says_which_carrier_and_why() {
+        assert_eq!(
+            status_line(Carrier::Direct, Fallback::None),
+            "drop-status: path=p2p fallback=none"
+        );
+        assert_eq!(
+            status_line(Carrier::Relay, Fallback::None),
+            "drop-status: path=relay fallback=none"
+        );
+        assert_eq!(
+            status_line(Carrier::Relay, Fallback::Rendezvous),
+            "drop-status: path=relay fallback=rendezvous"
+        );
+        assert_eq!(
+            status_line(Carrier::Relay, Fallback::NoRecord),
+            "drop-status: path=relay fallback=no-record"
+        );
     }
 }

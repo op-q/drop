@@ -9,6 +9,7 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
+    process::Stdio,
     time::Duration,
 };
 
@@ -16,7 +17,10 @@ use drop_cli::{
     recv::{self, ReceiveOptions},
     send::{self, SendOptions},
 };
-use tokio::sync::oneshot;
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    sync::oneshot,
+};
 
 async fn spawn_relay() -> String {
     spawn_relay_with_state().await.0
@@ -98,6 +102,7 @@ async fn transfer_forcing(
                     // These drive a real relay in-process, so they pin the
                     // path rather than letting `auto` reach for a DHT.
                     path: drop_cli::direct::Path::Relay,
+                    status: false,
                     on_code: Box::new(move |code| {
                         if let Some(sender) = code_tx.take() {
                             let _ = sender.send(code.to_string());
@@ -124,6 +129,7 @@ async fn transfer_forcing(
                 &code,
                 ReceiveOptions {
                     path: drop_cli::direct::Path::Relay,
+                    status: false,
                     origin,
                     out_dir: destination,
                     extract: true,
@@ -259,6 +265,7 @@ async fn reports_a_clear_error_for_an_unknown_code() {
         "ZZZZZZ-abandon-ability-able",
         ReceiveOptions {
             path: drop_cli::direct::Path::Relay,
+            status: false,
             origin: origin.clone(),
             out_dir: base.clone(),
             extract: true,
@@ -287,6 +294,7 @@ async fn a_malformed_code_fails_before_the_relay_is_contacted() {
         "7F2A91-abandon-ability-frobnicate",
         ReceiveOptions {
             path: drop_cli::direct::Path::Relay,
+            status: false,
             // Nothing is listening here. Reaching it at all is the failure.
             origin: "http://127.0.0.1:1".to_string(),
             out_dir: base.clone(),
@@ -507,6 +515,7 @@ async fn a_wrong_code_is_refused_and_leaves_nothing_on_disk() {
                     origin,
                     compress: None,
                     path: drop_cli::direct::Path::Relay,
+                    status: false,
                     on_code: Box::new(move |code| {
                         if let Some(sender) = code_tx.take() {
                             let _ = sender.send(code.to_string());
@@ -536,6 +545,7 @@ async fn a_wrong_code_is_refused_and_leaves_nothing_on_disk() {
         &wrong_code,
         ReceiveOptions {
             path: drop_cli::direct::Path::Relay,
+            status: false,
             origin: origin.clone(),
             out_dir: destination.clone(),
             extract: true,
@@ -609,6 +619,7 @@ async fn a_receiver_that_connects_first_still_completes_the_transfer() {
                     origin,
                     compress: None,
                     path: drop_cli::direct::Path::Relay,
+                    status: false,
                     on_code: Box::new(move |code| {
                         if let Some(sender) = code_tx.take() {
                             let _ = sender.send(code.to_string());
@@ -643,6 +654,7 @@ async fn a_receiver_that_connects_first_still_completes_the_transfer() {
                 &code,
                 ReceiveOptions {
                     path: drop_cli::direct::Path::Relay,
+                    status: false,
                     origin,
                     out_dir: destination,
                     extract: true,
@@ -692,4 +704,202 @@ async fn a_receiver_that_connects_first_still_completes_the_transfer() {
     );
 
     fs::remove_dir_all(&base).ok();
+}
+
+/// The machine-readable carrier line, asserted against the real binary.
+///
+/// This is the one test here that spawns `drop` as a process rather than
+/// calling into the library, and it is deliberate. What the network lab in
+/// `netlab/` consumes is a line on the **stderr of a subprocess**, so an
+/// in-process assertion would pin the string while leaving every step between
+/// it and a shell — the flag parsing, the option plumbing, the stream it is
+/// written to — unchecked. The unit tests in `direct.rs` pin the wording; this
+/// pins that the wording reaches a program that spawned the binary.
+///
+/// `--transport relay` for the same reason the fixtures above use it: this
+/// drives a real relay in-process and must not reach for a DHT.
+///
+/// The sender is asked with the flag and the receiver with `DROP_STATUS`, so
+/// one transfer covers both ways of asking. A harness exporting the variable
+/// once and spawning many `drop` processes is the case the variable exists
+/// for, and it would be embarrassing for it to be the untested one.
+#[tokio::test]
+async fn the_carrier_line_reaches_a_program_that_spawned_the_binary() {
+    let origin = spawn_relay().await;
+    let base = scratch("status-line");
+    let source = base.join("payload.bin");
+    let destination = base.join("received");
+    fs::create_dir_all(&destination).expect("destination directory");
+
+    let contents = b"a synthetic payload, carried by a relay that cannot read it";
+    write_file(&source, contents);
+
+    let mut sender = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .args([
+            "send",
+            source.to_str().expect("a printable source path"),
+            "--server",
+            &origin,
+            "--transport",
+            "relay",
+            "--status",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the sender");
+
+    // The code is the one thing on stdout, so it can be read without waiting
+    // for the process — which has not started transferring yet and will not
+    // until a receiver arrives with this code.
+    let mut announced = BufReader::new(sender.stdout.take().expect("the sender's stdout")).lines();
+    let code = tokio::time::timeout(Duration::from_secs(30), announced.next_line())
+        .await
+        .expect("the sender announced a code in time")
+        .expect("reading the sender's stdout")
+        .expect("the sender announced a code at all");
+
+    let receiver = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .args([
+            "recv",
+            &code,
+            "--server",
+            &origin,
+            "--transport",
+            "relay",
+            "--out",
+            destination.to_str().expect("a printable destination path"),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("DROP_STATUS", "1")
+        .spawn()
+        .expect("spawn the receiver")
+        .wait_with_output();
+
+    let receiver = tokio::time::timeout(Duration::from_secs(60), receiver)
+        .await
+        .expect("the receiver finished in time")
+        .expect("the receiver ran");
+
+    let sender = tokio::time::timeout(Duration::from_secs(60), sender.wait_with_output())
+        .await
+        .expect("the sender finished in time")
+        .expect("the sender ran");
+
+    let sent = String::from_utf8_lossy(&sender.stderr);
+    let received = String::from_utf8_lossy(&receiver.stderr);
+
+    assert!(sender.status.success(), "the sender failed:\n{sent}");
+    assert!(
+        receiver.status.success(),
+        "the receiver failed:\n{received}"
+    );
+
+    // Nothing was fallen back from: the relay is what `--transport relay`
+    // asked for, and saying `rendezvous` here would be the line reporting a
+    // failure that did not happen.
+    let expected = "drop-status: path=relay fallback=none";
+    assert!(
+        sent.lines().any(|line| line == expected),
+        "the sender did not report its carrier:\n{sent}"
+    );
+    assert!(
+        received.lines().any(|line| line == expected),
+        "the receiver did not report its carrier:\n{received}"
+    );
+
+    assert_eq!(
+        fs::read(destination.join("payload.bin")).expect("the received file"),
+        contents,
+        "the payload did not survive the transfer this line describes"
+    );
+}
+
+/// Off unless asked for, because the ordinary output is the product.
+///
+/// Paired with the test above rather than folded into it: together they say
+/// the flag is what turns the line on, which neither says alone.
+#[tokio::test]
+async fn the_carrier_line_stays_out_of_an_ordinary_transfer() {
+    let origin = spawn_relay().await;
+    let base = scratch("no-status-line");
+    let source = base.join("payload.bin");
+    let destination = base.join("received");
+    fs::create_dir_all(&destination).expect("destination directory");
+    write_file(&source, b"a synthetic payload");
+
+    let mut sender = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .args([
+            "send",
+            source.to_str().expect("a printable source path"),
+            "--server",
+            &origin,
+            "--transport",
+            "relay",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_remove("DROP_STATUS")
+        .spawn()
+        .expect("spawn the sender");
+
+    let mut announced = BufReader::new(sender.stdout.take().expect("the sender's stdout")).lines();
+    let code = tokio::time::timeout(Duration::from_secs(30), announced.next_line())
+        .await
+        .expect("the sender announced a code in time")
+        .expect("reading the sender's stdout")
+        .expect("the sender announced a code at all");
+
+    let receiver = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .args([
+            "recv",
+            &code,
+            "--server",
+            &origin,
+            "--transport",
+            "relay",
+            "--out",
+            destination.to_str().expect("a printable destination path"),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_remove("DROP_STATUS")
+        .spawn()
+        .expect("spawn the receiver")
+        .wait_with_output();
+
+    let receiver = tokio::time::timeout(Duration::from_secs(60), receiver)
+        .await
+        .expect("the receiver finished in time")
+        .expect("the receiver ran");
+
+    let sender = tokio::time::timeout(Duration::from_secs(60), sender.wait_with_output())
+        .await
+        .expect("the sender finished in time")
+        .expect("the sender ran");
+
+    let sent = String::from_utf8_lossy(&sender.stderr);
+    let received = String::from_utf8_lossy(&receiver.stderr);
+
+    assert!(sender.status.success(), "the sender failed:\n{sent}");
+    assert!(
+        receiver.status.success(),
+        "the receiver failed:\n{received}"
+    );
+
+    assert!(
+        !sent.contains("drop-status:"),
+        "the sender printed a machine line nobody asked for:\n{sent}"
+    );
+    assert!(
+        !received.contains("drop-status:"),
+        "the receiver printed a machine line nobody asked for:\n{received}"
+    );
+
+    // The prose is what a person gets, and it must still be there.
+    assert!(
+        sent.contains("Path    relay"),
+        "the sender stopped saying which path it took:\n{sent}"
+    );
 }

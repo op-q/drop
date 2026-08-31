@@ -37,6 +37,14 @@ OPTIONS
         --no-extract     (recv) Write the archive as a file instead of
                          unpacking it
     -f, --force          (recv) Overwrite an existing file
+        --status         Print one machine-readable line naming the carrier
+                         that moved the bytes [env: DROP_STATUS]
+
+                             drop-status: path=relay fallback=rendezvous
+
+                         For scripts and test harnesses. The ordinary output
+                         above it says the same thing in words, and that is
+                         what it is there for.
     -h, --help           Show this help
     -V, --version        Show the version
 
@@ -90,7 +98,12 @@ fn run(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + 
 
             runtime()?.block_on(send::run(
                 &PathBuf::from(path),
-                send::SendOptions::printing(options.origin(), compress, options.path()?),
+                send::SendOptions::printing(
+                    options.origin(),
+                    compress,
+                    options.path()?,
+                    options.status(),
+                ),
             ))
         }
         "recv" | "receive" | "get" => {
@@ -105,6 +118,7 @@ fn run(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + 
                 recv::ReceiveOptions {
                     origin: options.origin(),
                     path: options.path()?,
+                    status: options.status(),
                     out_dir: options
                         .out
                         .clone()
@@ -138,6 +152,7 @@ struct Options {
     compress: bool,
     no_extract: bool,
     force: bool,
+    status: bool,
 }
 
 impl Options {
@@ -164,6 +179,18 @@ impl Options {
 
         direct::Path::parse(configured.trim()).map_err(Into::into)
     }
+
+    /// Whether to add the machine-readable line.
+    ///
+    /// The environment can only turn this on, never off, so a harness that
+    /// exports `DROP_STATUS` once gets the line from every `drop` it spawns
+    /// without having to thread a flag through each invocation. Any value
+    /// counts, including an empty one: this is a switch, and inventing a
+    /// vocabulary of truthy strings for it would be a second thing to get
+    /// wrong.
+    fn status(&self) -> bool {
+        self.status || std::env::var_os("DROP_STATUS").is_some()
+    }
 }
 
 fn parse(arguments: &[String]) -> Result<Options, Box<dyn std::error::Error + Send + Sync>> {
@@ -189,6 +216,7 @@ fn parse(arguments: &[String]) -> Result<Options, Box<dyn std::error::Error + Se
             "-c" | "--compress" => options.compress = true,
             "--no-extract" => options.no_extract = true,
             "-f" | "--force" => options.force = true,
+            "--status" => options.status = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);

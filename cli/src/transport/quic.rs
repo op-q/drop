@@ -503,6 +503,7 @@ mod tests {
                     &code,
                     &crate::recv::ReceiveOptions {
                         path: crate::direct::Path::Relay,
+                        status: false,
                         origin: String::new(),
                         out_dir: destination,
                         extract: true,

@@ -91,6 +91,9 @@ pub struct ReceiveOptions {
     pub origin: String,
     /// Which carrier to use. See [`crate::direct::Path`].
     pub path: crate::direct::Path,
+    /// Print [`crate::direct::status_line`] beside the prose, for a caller
+    /// that is a program rather than a person.
+    pub status: bool,
     pub out_dir: PathBuf,
     pub extract: bool,
     pub force: bool,
@@ -112,6 +115,11 @@ enum Target {
 pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Error + Send + Sync>> {
     let code = crypto::TransferCode::parse(code)?;
 
+    // Why a transfer ends up on the relay, recorded as it is decided. The
+    // receiver is the half that can tell the two reasons apart, so it is the
+    // half that reports them distinctly.
+    let mut fallback = direct::Fallback::None;
+
     // The nameplate says where to look, and looking is what decides the path:
     // a record under it means the sender went direct, and its absence means
     // the sender fell back. A missing record is not a wrong code — a wrong code
@@ -122,17 +130,19 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
             Ok(None) => {
                 direct::may_fall_back(options.path, &*missing_record())?;
                 eprintln!("No sender published for this code; trying the relay.");
+                fallback = direct::Fallback::NoRecord;
             }
             Err(error) => {
                 direct::may_fall_back(options.path, error.as_ref())?;
                 eprintln!("No peer-to-peer path: {error}");
                 eprintln!("Falling back to the relay.");
+                fallback = direct::Fallback::Rendezvous;
             }
         }
     }
 
     eprintln!("Connecting to {}...", options.origin);
-    direct::report("relay (encrypted; the relay cannot read it)");
+    direct::report(direct::Carrier::Relay, fallback, options.status);
 
     let mut transport = relay::connect_receiver(&options.origin, code.nameplate()).await?;
 
@@ -161,7 +171,11 @@ async fn try_direct(
         return Ok(None);
     };
 
-    direct::report("peer-to-peer (no Drop server)");
+    direct::report(
+        direct::Carrier::Direct,
+        direct::Fallback::None,
+        options.status,
+    );
 
     // The endpoint has to outlive the transfer. It owns the connection's
     // driver, so dropping it early kills a transfer that had just started —

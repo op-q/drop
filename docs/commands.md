@@ -115,6 +115,21 @@ commands with the port filled in.
 `--server` and `DROP_SERVER` are equivalent; without either, the CLI talks to
 the public instance, which is not what you want while testing.
 
+**`--status` when something else is reading the output.** It adds one line
+naming the carrier that actually moved the bytes, beside the prose that says
+the same thing to a person:
+
+```text
+Path    relay (encrypted; the relay cannot read it)
+drop-status: path=relay fallback=none
+```
+
+`path` is `p2p` or `relay`; `fallback` is `none`, `rendezvous` (a direct path
+could not be set up) or `no-record` (the receiver looked and the sender was not
+there, so the sender had already fallen back). `DROP_STATUS` turns it on for
+every `drop` a harness spawns. Match on this rather than on the sentences,
+which are written to be reworded.
+
 **A mistyped code is worth seeing at least once.** Keep the nameplate, change a
 word, and the receiver fails where it should — at the metadata, not the
 handshake:
@@ -133,11 +148,18 @@ Use synthetic files. Never point a test at the public instance.
 
 ## What a local transfer does not cover
 
-The direct QUIC path is not reachable from the `drop` binary yet, so everything
-above goes through the relay even though both peers are on one machine. The
-direct path is exercised only by `cargo test -p drop-cli --lib transport::quic`,
-and those tests bind with relays disabled and meet over loopback. See the plan
-under "What cannot be verified on the development machine".
+The direct QUIC path *is* reachable from the binary — `--transport p2p` forces
+it — but the commands above pass `--server`, so they use the relay. Two peers
+on one machine also cannot show you much: a loopback or single-host run has no
+NAT and no round-trip time, so hole punching, fallback and the acknowledgement
+window are all unexercised however the transfer is carried. The QUIC tests
+under `cargo test -p drop-cli --lib transport::quic` bind with relays disabled
+and meet over loopback for the same reason.
+
+Constructing a network that does exercise them is what
+[`plans/network-lab-plan-2026-08-31.md`](plans/network-lab-plan-2026-08-31.md)
+is for. See also the peer-to-peer plan under "What cannot be verified on the
+development machine".
 
 ## Container
 

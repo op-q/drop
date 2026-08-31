@@ -69,6 +69,9 @@ pub struct SendOptions {
     pub compress: Option<u32>,
     /// Which carrier to use. See [`crate::direct::Path`].
     pub path: crate::direct::Path,
+    /// Print [`crate::direct::status_line`] beside the prose, for a caller
+    /// that is a program rather than a person.
+    pub status: bool,
     /// Called once with the session code, as soon as the relay issues it.
     ///
     /// The code is what the other terminal needs, so it is handed to the caller
@@ -80,11 +83,17 @@ pub struct SendOptions {
 impl SendOptions {
     /// Options that print the code to stdout, one line, nothing else, so it
     /// survives being piped into another command.
-    pub fn printing(origin: String, compress: Option<u32>, path: crate::direct::Path) -> Self {
+    pub fn printing(
+        origin: String,
+        compress: Option<u32>,
+        path: crate::direct::Path,
+        status: bool,
+    ) -> Self {
         Self {
             origin,
             compress,
             path,
+            status,
             on_code: Box::new(|code| println!("{code}")),
         }
     }
@@ -131,12 +140,18 @@ pub async fn run(
                 eprintln!("No peer-to-peer path: {}", failed.error);
                 eprintln!("Falling back to the relay.");
 
-                return send_over_relay(&mut options, *failed.payload, sealed_size).await;
+                return send_over_relay(
+                    &mut options,
+                    *failed.payload,
+                    sealed_size,
+                    direct::Fallback::Rendezvous,
+                )
+                .await;
             }
         }
     }
 
-    send_over_relay(&mut options, payload, sealed_size).await
+    send_over_relay(&mut options, payload, sealed_size, direct::Fallback::None).await
 }
 
 /// A direct path that could not be set up, carrying the payload back.
@@ -172,7 +187,11 @@ async fn try_direct(
 
     let code = published.code.clone();
     announce(options, &code);
-    direct::report("peer-to-peer (no Drop server)");
+    direct::report(
+        direct::Carrier::Direct,
+        direct::Fallback::None,
+        options.status,
+    );
     eprintln!("Waiting for the receiver to connect...");
 
     // Only from here does a failure stop being a fallback: the code is out, a
@@ -203,10 +222,15 @@ impl SetupFailed {
 }
 
 /// The path with a Drop server in it, unchanged.
+///
+/// `fallback` is why this is the relay rather than what the relay did, so it
+/// is passed in rather than decided here: this function cannot tell being
+/// asked for from being fallen back to.
 async fn send_over_relay(
     options: &mut SendOptions,
     payload: Payload,
     sealed_size: u64,
+    fallback: direct::Fallback,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     // Session creation is a blocking HTTP call, so it runs on the blocking
     // pool rather than stalling a runtime worker.
@@ -220,7 +244,7 @@ async fn send_over_relay(
     // sent anywhere. Together they are what the receiver types.
     let code = crypto::TransferCode::generate_for(&nameplate)?;
     announce(options, &code);
-    direct::report("relay (encrypted; the relay cannot read it)");
+    direct::report(direct::Carrier::Relay, fallback, options.status);
     eprintln!("Waiting for the receiver to connect...");
 
     let mut transport = relay::connect_sender(&options.origin, code.nameplate()).await?;
