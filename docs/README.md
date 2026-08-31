@@ -38,6 +38,7 @@ docs/
   implementation-checklist.md   tactical status mirror
   release-checklist.md          evidence gate for tagging
   commands.md       short commands for humans and agents
+  deployment.md     configuration variables, Docker, split, and Kubernetes deployment
 ```
 
 ## Document ownership
@@ -53,7 +54,8 @@ docs/
 | [`release-checklist.md`](release-checklist.md) | Repeatable evidence gate for tagging a release |
 | [`validation/`](validation/) | Exploratory test recipes and dated findings reports |
 | [`commands.md`](commands.md) | The commands, including the ones easy to forget |
-| [`../README.md`](../README.md) | Installation, CLI usage, configuration, deployment, operational limits |
+| [`deployment.md`](deployment.md) | Configuration variables, Docker, split frontend/backend deployment, Kubernetes and GKE |
+| [`../README.md`](../README.md) | Installation, CLI usage, and basic operation |
 | [`../AGENTS.md`](../AGENTS.md) | Working rules, product invariants, validation commands |
 | [`../k8s/README.md`](../k8s/README.md) | Kubernetes manifests and the GKE overlay |
 
@@ -68,8 +70,8 @@ docs/
 
 ## Where information belongs
 
-- User-facing CLI options, configuration variables, and deployment steps belong
-  in the root README.
+- User-facing CLI options and basic usage belong in the root README.
+  Configuration variables and deployment steps belong in `deployment.md`.
 - Anything a third client would need to interoperate belongs in `protocol.md`.
 - Attacker capabilities, hostile-input handling, and accepted risk belong in
   `security.md`.

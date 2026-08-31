@@ -120,6 +120,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Only for web/public/install.sh below; the binaries and checksums come
+      # from the build job's artifacts, not from this checkout.
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+          sparse-checkout: web/public/install.sh
+          sparse-checkout-cone-mode: false
+
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
@@ -140,4 +150,5 @@ jobs:
           files: |
             artifacts/drop-*.tar.gz
             artifacts/checksums.txt
+            web/public/install.sh
           fail_on_unmatched_files: true

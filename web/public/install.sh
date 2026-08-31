@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installer for the Drop command-line client.
 #
-#   curl -fsSL https://drop.lifbom.com/install.sh | sh
+#   curl -fsSL https://github.com/op-q/drop/releases/latest/download/install.sh | sh
 #
 # Downloads a prebuilt binary from the project's GitHub releases, verifies it
 # against the published checksums, and installs it.

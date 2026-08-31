@@ -5,7 +5,7 @@ members = ["cli", "crypto", "crypto-wasm"]
 # and the CLI cannot drift apart and there is a single line to bump before a
 # release.
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 
 [package]
 name = "api"
