@@ -326,7 +326,23 @@ class Lab:
         A topology that did not come out as asked must fail the run rather than
         producing a number that looks like a finding. This is what lets the
         throughput lane say the RTT it divides by is the RTT that existed.
+
+        The first packet to an unresolved neighbour is discarded, because it
+        does not measure the link. Resolving the address costs its own round
+        trip across the same delayed path, so the first reply arrives at twice
+        the RTT and drags the average up by `RTT / count` — on a 50 ms link,
+        `min/avg/max` reads `100.3/120.4/200.9` cold and `100.05/100.07/100.09`
+        once warm. Averaging the cold run would have this lane divide by an RTT
+        20% larger than the one the transfer actually saw, and the error grows
+        with the delay being injected.
         """
+        run(
+            ["ping", "-c", "1", "-W", "5", target],
+            netns=namespace,
+            check=False,
+            timeout=30.0,
+        )
+
         ran = run(
             ["ping", "-c", str(count), "-i", "0.2", "-W", "5", target],
             netns=namespace,
@@ -336,6 +352,41 @@ class Lab:
         match = re.search(r"= [\d.]+/([\d.]+)/", ran.stdout)
         if match is None:
             raise LabError(f"could not read a round-trip time from:\n{ran.stdout}")
+
+        return float(match.group(1))
+
+    def netem_on(self, namespace: str, interface: str) -> str:
+        """What `tc` believes it is doing to an interface, as it reports it.
+
+        Read back rather than remembered. An impairment this lab asked for and
+        `tc` silently declined would leave every topology below it describing a
+        network that was never built, and the tests would pass.
+        """
+        for line in run(
+            ["tc", "qdisc", "show", "dev", interface], netns=namespace
+        ).stdout.splitlines():
+            if "netem" in line:
+                return line.strip()
+        return ""
+
+    def measure_loss(self, namespace: str, target: str, count: int = 200) -> float:
+        """Percentage of probes that did not come back.
+
+        Evidence for a report rather than a gate. The outcome is binomial, so a
+        run that happens to lose nothing is an unremarkable event at these rates
+        and must not be able to fail a build; what is asserted instead is that
+        the qdisc really carries the setting.
+        """
+        ran = run(
+            ["ping", "-c", str(count), "-i", "0.01", "-W", "2", target],
+            netns=namespace,
+            check=False,
+            timeout=120.0,
+        )
+
+        match = re.search(r"([\d.]+)% packet loss", ran.stdout)
+        if match is None:
+            raise LabError(f"could not read a loss figure from:\n{ran.stdout}")
 
         return float(match.group(1))
 

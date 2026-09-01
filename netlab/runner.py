@@ -193,10 +193,16 @@ class Transfer:
     receiver: Half
     seconds: float
     bytes_sent: int
+    #: An end was still running when the deadline passed and had to be killed.
+    #: Reported rather than raised: a transfer that hangs is a *result*, and one
+    #: of the more interesting ones this lab can produce — a flow-control or
+    #: acknowledgement bug looks exactly like this from outside. Raising would
+    #: file it as a broken lab, which is what `LabError` is for.
+    timed_out: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.sender.ok and self.receiver.ok
+        return not self.timed_out and self.sender.ok and self.receiver.ok
 
     @property
     def mib_per_second(self) -> float:
@@ -205,9 +211,10 @@ class Transfer:
         return self.bytes_sent / self.seconds / (1024 * 1024)
 
     def why_it_failed(self) -> str:
+        timed_out = " (killed at the deadline)" if self.timed_out else ""
         return (
-            f"sender exited {self.sender.returncode}:\n{self.sender.stderr}\n"
-            f"receiver exited {self.receiver.returncode}:\n{self.receiver.stderr}"
+            f"sender exited {self.sender.returncode}{timed_out}:\n{self.sender.stderr}\n"
+            f"receiver exited {self.receiver.returncode}{timed_out}:\n{self.receiver.stderr}"
         )
 
 
@@ -256,12 +263,13 @@ def transfer(
             # failed, not a lab that broke — the relay being unreachable is a
             # result worth asserting on. Reported as an outcome so a caller can
             # tell the two apart, which is the whole reason `LabError` exists.
-            sender_out, sender_err = _wait(sender, timeout)
+            sender_out, sender_err, sender_hung = _wait(sender, timeout)
             return Transfer(
                 sender=Half(sender.returncode, sender_out, sender_err),
                 receiver=Half(-1, "", "the receiver was never started"),
                 seconds=0.0,
                 bytes_sent=payload_size,
+                timed_out=sender_hung,
             )
 
         started = time.monotonic()
@@ -277,8 +285,8 @@ def transfer(
             start_new_session=True,
         )
 
-        receiver_out, receiver_err = _wait(receiver, timeout)
-        sender_out, sender_err = _wait(sender, timeout)
+        receiver_out, receiver_err, receiver_hung = _wait(receiver, timeout)
+        sender_out, sender_err, sender_hung = _wait(sender, timeout)
         seconds = time.monotonic() - started
     finally:
         _terminate(sender)
@@ -288,6 +296,7 @@ def transfer(
         receiver=Half(receiver.returncode, receiver_out, receiver_err),
         seconds=seconds,
         bytes_sent=payload_size,
+        timed_out=sender_hung or receiver_hung,
     )
 
 
@@ -303,12 +312,21 @@ def _read_code(sender: subprocess.Popen[str]) -> str | None:
     return sender.stdout.readline().strip() or None
 
 
-def _wait(process: subprocess.Popen[str], timeout: float) -> tuple[str, str]:
+def _wait(process: subprocess.Popen[str], timeout: float) -> tuple[str, str, bool]:
+    """Collects a process's output, reporting a deadline rather than raising."""
     try:
-        return process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(timeout=timeout)
+        return stdout, stderr, False
     except subprocess.TimeoutExpired:
         _terminate(process)
-        raise LabError(f"a transfer did not finish within {timeout:.0f}s") from None
+        try:
+            # The group is gone, so the pipes are closed and this returns what
+            # was written before the kill — which is where a hung transfer says
+            # how far it got.
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover - the pipes outlived SIGKILL
+            stdout, stderr = "", ""
+        return stdout, stderr, True
 
 
 def _terminate(process: subprocess.Popen[str]) -> None:
@@ -369,3 +387,89 @@ def relay_is_running() -> bool:
         raise LabError("pgrep is needed to prove no relay is running")
 
     return run(["pgrep", "-x", "api"], check=False).ok
+
+
+@dataclass
+class Rate:
+    """A streaming rate, with the cost of setting the transfer up removed."""
+
+    mib_per_second: float
+    #: The intercept: what a transfer costs before any payload moves. Reported
+    #: because it is large on a slow link and explains the raw figures.
+    setup_seconds: float
+    #: `(MiB, seconds)` for each transfer the rate was derived from.
+    points: list[tuple[float, float]]
+
+    def __str__(self) -> str:
+        measured = ", ".join(f"{mib:.0f}MiB in {s:.2f}s" for mib, s in self.points)
+        return (
+            f"{self.mib_per_second:.1f} MiB/s streaming "
+            f"(setup {self.setup_seconds:.2f}s; {measured})"
+        )
+
+
+def measure_streaming_rate(
+    binaries: Binaries,
+    net: Net,
+    workspace: Path,
+    small: int,
+    large: int,
+    *,
+    transport: str = "relay",
+) -> Rate:
+    """How fast bytes actually stream, timed by difference rather than directly.
+
+    A transfer's wall clock is `setup + bytes / rate`, and on a high-latency
+    link the setup term is not a rounding error: it is a handshake whose cost
+    is several round trips, so it *grows with the very quantity this lane
+    varies*. Timing one transfer and dividing would therefore measure the
+    handshake and report it as throughput — and would do so in a way that still
+    looked inversely proportional to the RTT, which is the shape this lane
+    exists to check. That is the plan's "passes while proving less than it
+    looks like", and it would have been invisible.
+
+    Two payloads and a slope remove the term instead of estimating it:
+
+    ```text
+        rate = (large - small) / (seconds(large) - seconds(small))
+    ```
+
+    Whatever setup costs, it costs the same in both runs and cancels. Making
+    the payload large enough to drown it is not an alternative here: at an
+    800 ms loop the setup is around 10 s, so a run would need most of a
+    gigabyte before the error fell under a tenth.
+    """
+    if large <= small:
+        raise LabError(f"the large payload must exceed the small one, got {large} and {small}")
+
+    points = []
+    for size in (small, large):
+        source = workspace / f"payload-{size}.bin"
+        destination = workspace / f"received-{size}"
+        synthetic_payload(source, size)
+
+        with Relay(binaries, net):
+            result = transfer(binaries, net, source, destination, transport=transport)
+
+        if not result.ok:
+            raise LabError(f"a rate measurement needs a completed transfer:\n{result.why_it_failed()}")
+
+        arrived = destination / source.name
+        if sha256(arrived) != sha256(source):
+            raise LabError(f"{size} bytes arrived corrupted, so its timing means nothing")
+
+        points.append((size / 1024 / 1024, result.seconds))
+
+    (small_mib, small_seconds), (large_mib, large_seconds) = points
+    if large_seconds <= small_seconds:
+        raise LabError(
+            f"the larger payload was not slower ({large_seconds:.2f}s against "
+            f"{small_seconds:.2f}s), so this link is too fast to time by difference"
+        )
+
+    rate = (large_mib - small_mib) / (large_seconds - small_seconds)
+    return Rate(
+        mib_per_second=rate,
+        setup_seconds=small_seconds - small_mib / rate,
+        points=points,
+    )

@@ -1,8 +1,8 @@
 # Network lab plan
 
-Status: **proposed**
+Status: **in progress** — phases 0 to 3 done, 4 blocked, 5 outstanding
 Created: **2026-08-31**
-Last updated: **2026-08-31**
+Last updated: **2026-09-01**
 
 ## Goal
 
@@ -405,7 +405,7 @@ which 15 s is `ONLINE_TIMEOUT` before the sender gives up on a home relay. That
 15 s is a floor under every `auto` topology in this lab and should be assumed
 in Phase 2's budget.
 
-### Phase 2 — Latency and the `window / RTT` claim
+### Phase 2 — Latency and the `window / RTT` claim — **done 2026-09-01**
 
 [`../protocol.md`](../protocol.md) line 356 states 16 MiB in flight and 4 MiB
 acknowledgement batches; `cli/src/send.rs:19` is where `WINDOW_BYTES` lives.
@@ -417,38 +417,162 @@ the ceiling is 160 MiB/s, which is far above what a veth pair carrying AES-GCM
 through a relay process will reach — so a single run at 100 ms would pass while
 measuring the pipeline's own speed and proving nothing about the window.
 
-- [ ] Measure at three RTTs chosen so the window is the binding constraint:
+- [x] Measure at three RTTs chosen so the window is the binding constraint:
       200 ms (80 MiB/s ceiling), 400 ms (40), 800 ms (20). Confirm during
       implementation that the unconstrained rate on this link comfortably
       exceeds 80 MiB/s; if it does not, raise every value until it does and
       record the measured unconstrained rate in the report.
-- [ ] Assert two things, and the second is the real one:
+- [x] Assert two things, and the second is the real one:
       - throughput never **exceeds** `WINDOW_BYTES / RTT`, which would mean the
         window is not being enforced;
       - throughput is **inversely proportional to RTT** across the three
         points, within a tolerance wide enough for scheduler noise — a doubled
         RTT halves the rate. That relationship is what the claim asserts, and
         it cannot be satisfied by accident.
-- [ ] Netem `delay` is applied on both router interfaces at half the target, so
-      the end-to-end round trip is the stated figure rather than double it.
-      Assert the achieved RTT with `ping` before the transfer, and fail if the
-      network is not the network that was asked for.
-- [ ] Record the numbers rather than only the pass. A ratio that is right for
+- [x] Netem `delay` is applied at the router, so the round trip that matters is
+      the stated figure. Assert the achieved RTT with `ping` before the
+      transfer, and fail if the network is not the network that was asked for.
+      **The arithmetic in the original wording was wrong** — see the findings.
+- [x] Record the numbers rather than only the pass. A ratio that is right for
       the wrong reason is visible in the table and invisible in a green tick.
 
-Files: `netlab/topologies.py`, `netlab/test_transfer.py`, `netlab/netns.py`.
+Files: `netlab/topologies.py`, `netlab/test_transfer.py`, `netlab/netns.py`,
+and — not foreseen — `netlab/runner.py` and `netlab/conftest.py`.
 
-### Phase 3 — Loss
+#### Findings
 
-- [ ] 1% loss in both directions, applied at the router. A 16 MiB payload, so
+Done 2026-09-01. One test, three measured points, about 143 seconds.
+
+**The round trip in the claim is four traversals, not two.** The phase as
+written says to apply delay "on both router interfaces at half the target, so
+the end-to-end round trip is the stated figure rather than double it". That is
+the arithmetic for two hosts talking directly, and it is the wrong network.
+[`../protocol.md`](../protocol.md) line 86 has the *receiver* acknowledge
+bytes, with the relay forwarding the acknowledgement on, so the loop that
+releases the sender's window is `sender → relay → receiver` for the chunk and
+`receiver → relay → sender` for its acknowledgement. Halving would have
+produced a ceiling twice the real one, and every measured rate would have sat
+comfortably under it — the lane would have passed while checking nothing.
+
+Delay is applied to each of the router's three interfaces at a **quarter** of
+the target, and the result is verified rather than assumed by an identity that
+holds however asymmetric the impairment turns out to be:
+
+```text
+    ack loop = ping(sender, relay) + ping(receiver, relay)
+```
+
+Those two round trips are between them the four one-way traversals, each
+counted exactly once.
+
+**`measure_rtt` was overstating every RTT it was given, and the throughput lane
+divides by it.** Resolving an unresolved neighbour costs its own round trip
+across the same delayed link, so `ping`'s first reply arrives at twice the RTT
+and drags the mean up by `RTT / count`. On a 50 ms link, cold reads
+`min/avg/max = 100.3/120.4/200.9` and warm reads `100.05/100.07/100.09`. The
+error is not constant — it depends on which ARP entries happen to be cold — and
+the first measurements taken here read 230 ms, 461 ms and 960 ms for loops of
+200, 400 and 800. A discarded warm-up probe fixes it, and the same three now
+measure 200.4, 400.5 and 800.2.
+
+**A single transfer cannot measure throughput on a slow link, and would have
+produced the right-looking answer anyway.** A transfer's wall clock is
+`setup + bytes / rate`, and setup here is a handshake costing several round
+trips: measured at **2.8 s, 5.3 s and 9.6 s** for the three loops. At 800 ms
+that is more than half the wall clock of an 80 MiB transfer. Dividing bytes by
+seconds would therefore have reported the handshake as throughput — and because
+the handshake scales with RTT too, the result would still have looked
+inversely proportional to RTT, which is the very shape this lane exists to
+check. This is the plan's own "passes while proving less than it looks like",
+and it would have been invisible in a green tick.
+
+Two payloads and a slope remove the term instead of estimating it: the rate is
+`(large − small) / (seconds(large) − seconds(small))`, and setup cancels
+because it is paid identically in both. Enlarging the payload until setup
+stopped mattering was not an option — at a 800 ms loop it would take most of a
+gigabyte to push the error under a tenth.
+
+**The lab must run release binaries, and this is a correctness matter rather
+than an impatient one.** Debug moves about **6 MiB/s** through this lab against
+roughly **600 MiB/s** optimised, the difference being AES-GCM with its bounds
+checks left in. Every ceiling this lane reasons about — 80, 40 and 20 MiB/s —
+sits *above* 6 MiB/s, so under debug the window could never be the binding
+constraint, and the lane would have measured the absence of the optimiser and
+reported it as a protocol property. The `binaries` fixture now builds
+`--release` for the whole session.
+
+**The results.** Ceilings are computed from the measured loop, not the
+requested one. Four consecutive full runs:
+
+| Ack loop | Measured | Ceiling | Streaming rate, four runs | Setup |
+| --- | --- | --- | --- | --- |
+| 200 ms | 200.4–200.6 ms | 79.8 MiB/s | 36.4 / 36.4 / 37.3 / 41.1 MiB/s | 2.7–2.8 s |
+| 400 ms | 400.5–400.7 ms | 39.9 MiB/s | 18.5 / 19.9 / 19.9 / 20.9 MiB/s | 5.3–5.5 s |
+| 800 ms | 800.2–800.6 ms | 20.0 MiB/s | 8.3 / 10.7 / 9.4 / 8.8 MiB/s | 9.5–9.8 s |
+
+Unimpaired, the same link carries at least 460–610 MiB/s, which is what makes
+the ceilings binding and the lane falsifiable.
+
+Observed halving ratios were 1.97/2.23, 1.83/1.86, 1.87/2.12 and 1.97/2.38
+against an expected 2.0. **The 800 ms point is the noisy one** — it is the
+fewest streaming seconds spread over the longest setup — and the 400→800 ratio
+is what will fail first if this lane ever goes flaky. The assertion tolerates
+35%, so it admits up to 2.7; the widest ratio seen is 2.38, which is a margin
+of about 13% rather than a comfortable one. It is recorded here so that a
+future failure at 2.7 is read as the known-noisy point drifting rather than as
+a discovery about the window. The tolerance is not widened further because the
+lower bound is what keeps the lane falsifiable: 1.0 is what "no relationship"
+looks like, and there needs to be daylight between that and the floor.
+
+**One number is unexplained and is recorded rather than dressed up.** Every
+measured rate sits at **41–53% of its ceiling**, consistently across loops and
+runs. The window is plainly being enforced and plainly scales with RTT, but
+something costs about half the theoretical maximum. A sender that fills a
+16 MiB window and then waits on a 4 MiB acknowledgement batch before resuming
+would produce this shape, and that is a guess. It is not asserted on, and the
+ceiling assertion is deliberately one-sided so that this gap cannot quietly
+become the thing being tested.
+
+### Phase 3 — Loss — **done 2026-09-01**
+
+- [x] 1% loss in both directions, applied at the router. A 16 MiB payload, so
       loss is certain rather than probable.
-- [ ] Assert byte-identical arrival and completion inside a bounded wall clock.
+- [x] Assert byte-identical arrival and completion inside a bounded wall clock.
       The second half is the point: the failure this looks for is a transfer
       that never finishes and never errors, which is what a flow-control or
       acknowledgement bug looks like from outside.
-- [ ] A deliberately harsher run — 5% — recorded but **not asserted on**, so
+- [x] A deliberately harsher run — 5% — recorded but **not asserted on**, so
       the report carries a data point about degradation without turning a
       probabilistic outcome into a flaky test.
+
+#### Findings
+
+Done 2026-09-01. One test, about 15 seconds.
+
+**A hung transfer was being reported as a broken lab.** The phase's real
+assertion is that a lossy transfer terminates, and the runner raised
+`LabError` when an end outlived its deadline — the same exception that means
+"the network could not be built as asked". Phase 1 had already found and fixed
+this conflation once, for a sender that died before announcing a code; the
+timeout path was the remaining instance of it. A deadline is now a
+`Transfer.timed_out` outcome, so the exact failure this phase hunts is
+reported as a result of the transfer rather than as an error in the harness.
+
+**Speed proves nothing about whether loss was applied, so it is asserted
+directly.** At 1% a hop the 16 MiB payload completes in about a tenth of a
+second — the same order as an unimpaired run — because TCP recovers almost
+instantly when the RTT is effectively zero. "It was fast" is therefore no
+evidence either way, and a topology whose `tc` command had silently failed
+would look identical. The qdisc is read back and asserted to carry the
+setting, and observed loss is measured by probe and recorded (1.5% and 3.5%
+across runs, against about 2% expected for two hops at 1% each). The
+measurement is evidence and not a gate: the outcome is binomial, and a run
+that happened to lose nothing must not be able to fail a build.
+
+**Degradation, recorded not asserted.** Raising loss to 5% a hop takes the same
+payload from ~0.1 s to 2.3–4.2 s, a slowdown of roughly 30x, and it still
+arrives intact. That the harsher run is dramatically slower is also the
+clearest evidence available that the impairment is real and load-bearing.
 
 ### Phase 4 — The direct path
 

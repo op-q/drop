@@ -35,9 +35,9 @@ publish, and no report can quote something that looks like a real host.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from netns import Lab
+from netns import Lab, LabError
 
 SENDER_SUBNET = "10.10.0.0"
 RECEIVER_SUBNET = "10.20.0.0"
@@ -61,8 +61,11 @@ class Net:
     #: What this topology is meant to demonstrate, carried into the report so a
     #: reader does not have to infer it from the name.
     proves: str
-    #: Filled in by topologies that inject delay, after measuring it.
-    rtt_ms: float | None = None
+    #: The router's own interface facing each namespace, keyed by that
+    #: namespace's name. An impairment is applied to an interface rather than
+    #: to a host, so a topology that shapes the network has to name one, and
+    #: deriving the name at the call site would duplicate `netns`'s convention.
+    router_interfaces: dict[str, str] = field(default_factory=dict)
 
     @property
     def relay_url(self) -> str | None:
@@ -84,11 +87,17 @@ def _base(lab: Lab, *, with_relay: bool) -> Net:
     lab.route_default(receiver, to_receiver.left_address)
     lab.forward(router)
 
+    interfaces = {
+        sender: to_sender.left_interface,
+        receiver: to_receiver.left_interface,
+    }
+
     relay = None
     if with_relay:
         relay = lab.add("relay")
         to_relay = lab.connect(router, relay, RELAY_SUBNET)
         lab.route_default(relay, to_relay.left_address)
+        interfaces[relay] = to_relay.left_interface
 
     return Net(
         lab=lab,
@@ -98,6 +107,7 @@ def _base(lab: Lab, *, with_relay: bool) -> Net:
         relay=relay,
         name="base",
         proves="nothing on its own",
+        router_interfaces=interfaces,
     )
 
 
@@ -129,4 +139,86 @@ def udp_blocked(lab: Lab) -> Net:
     lab.drop_udp(net.router)
     net.name = "udp-blocked"
     net.proves = "the transfer falls back to the relay, completes, and reports it"
+    return net
+
+
+def high_latency(lab: Lab, ack_loop_ms: float) -> Net:
+    """A router that holds every packet, so the acknowledgement loop is long.
+
+    `ack_loop_ms` is the round trip that *matters*, and it is not the round trip
+    between any two hosts. `docs/protocol.md` line 86 has the receiver — not the
+    relay — acknowledge bytes, and the relay merely forwards that
+    acknowledgement on. So the loop releasing the sender's window is
+
+    ```text
+        sender -> relay -> receiver        the chunk
+        receiver -> relay -> sender        its acknowledgement
+    ```
+
+    which is four traversals, not two. Delay is applied to each of the router's
+    three interfaces at a quarter of the target: every one of those traversals
+    crosses exactly one of them, in one direction, once.
+
+    That arithmetic is checked rather than trusted, by `measure_ack_loop` below.
+    """
+    net = _base(lab, with_relay=True)
+
+    for interface in net.router_interfaces.values():
+        lab.delay(net.router, interface, ack_loop_ms / 4)
+
+    net.name = f"high-latency-{ack_loop_ms:.0f}ms"
+    net.proves = "throughput is bounded by the window and falls as the round trip grows"
+    return net
+
+
+def measure_ack_loop(net: Net) -> float:
+    """The round trip an acknowledgement really makes, in milliseconds.
+
+    Measured, never assumed, because dividing a byte count by an RTT that was
+    only asked for would turn a misbuilt network into a finding.
+
+    The loop is the sum of two pings, and that identity holds however
+    asymmetric the impairment turns out to be:
+
+    ```text
+        ping(sender, relay)    = (sender->relay) + (relay->sender)
+        ping(receiver, relay)  = (receiver->relay) + (relay->receiver)
+    ```
+
+    Between them those are the four one-way traversals a chunk and its
+    acknowledgement make, each counted once. No traversal is assumed to cost
+    the same as its reverse.
+    """
+    if net.relay is None:
+        raise LabError("the acknowledgement loop runs through a relay, and there is none")
+
+    return net.lab.measure_rtt(net.sender, RELAY_ADDRESS) + net.lab.measure_rtt(
+        net.receiver, RELAY_ADDRESS
+    )
+
+
+def lossy(lab: Lab, percent: float) -> Net:
+    """A router that drops a fraction of what it forwards, in both directions.
+
+    Applied to each of the router's interfaces, which is what puts loss on both
+    directions of the path: a chunk crosses the router twice on its way from
+    sender to relay to receiver, and its acknowledgement crosses twice coming
+    back, each time leaving by a different interface.
+
+    So `percent` is the chance of losing one *hop*, and an end-to-end direction
+    crosses two of them — at 1% each way, about 2% of chunks meet a drop
+    somewhere. The number is quoted per hop rather than end to end because that
+    is what `tc` was told, and a report should be able to name the setting.
+
+    Loss is uniform and independent. Real loss arrives in bursts, and a
+    congested link drops tail packets together rather than at random; this
+    models neither. See `README.md`.
+    """
+    net = _base(lab, with_relay=True)
+
+    for interface in net.router_interfaces.values():
+        lab.loss(net.router, interface, percent)
+
+    net.name = f"lossy-{percent:g}pc"
+    net.proves = "a lossy path still delivers the file intact, and terminates"
     return net

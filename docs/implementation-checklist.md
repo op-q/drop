@@ -230,9 +230,32 @@ binaries and inspects what comes out.
       being reported — and says so. Two negative controls that do discriminate
       replace the gate: the router is shown to be carrying the transfer, and
       the relay to be relaying it.
-- [ ] Phase 2 — latency, and the `window / RTT` claim in
-      [`protocol.md`](protocol.md)
-- [ ] Phase 3 — packet loss
+- [x] Phase 2 — latency, and the `window / RTT` claim in
+      [`protocol.md`](protocol.md). Done 2026-09-01. Throughput is measured at
+      200, 400 and 800 ms acknowledgement loops, asserted never to exceed
+      `WINDOW_BYTES / RTT` and to halve as the round trip doubles. **Three
+      corrections were needed to make the lane measure anything.** The round
+      trip that binds the window is the receiver's acknowledgement loop —
+      four traversals, not the two the phase assumed — so a halved delay would
+      have doubled the ceiling and passed under it without checking anything.
+      `measure_rtt` was reading 15-20% high because `ping`'s first packet pays
+      for address resolution across the delayed link, and the lane divides by
+      that number. And a single transfer's wall clock is mostly handshake at
+      these round trips (2.8 s, 5.3 s, 9.6 s of setup), which scales with RTT
+      too — so dividing bytes by seconds would have reported the handshake as
+      throughput *and still looked inversely proportional*. Rates are now taken
+      as a slope across two payload sizes. The lab builds `--release`: debug
+      moves 6 MiB/s against 600 MiB/s optimised, below every ceiling under
+      test, so the window could never have been the binding constraint.
+- [x] Phase 3 — packet loss. Done 2026-09-01. 16 MiB across a router dropping
+      1% a hop arrives byte-identical and terminates, with a 5% run recorded
+      and not asserted. The deadline is the real assertion — a transfer that
+      never finishes and never errors is what a flow-control bug looks like
+      from outside — so a timeout became a `Transfer` outcome rather than the
+      `LabError` that means the lab itself broke, which is the same conflation
+      Phase 1 fixed for a different path. Loss is proved present by reading the
+      qdisc back rather than inferred from timing: at zero RTT, 1% loss
+      completes as fast as no loss at all.
 - [ ] Phase 4 — the direct-path topologies. **Blocked**, and not on effort:
       the direct path reaches the public internet in three independent places,
       and one of them cannot be routed around. `rendezvous::publishable`

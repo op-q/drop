@@ -114,8 +114,22 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
 @pytest.fixture(scope="session")
 def binaries() -> runner.Binaries:
-    """The real `drop` and `api`, built once for the session."""
-    return runner.build()
+    """The real `drop` and `api`, built once for the session, optimised.
+
+    Release rather than debug, and that is a throughput decision rather than an
+    impatient one. An unoptimised build moves about **6 MiB/s** through this
+    lab against roughly **600 MiB/s** optimised, because the chunk sealing is
+    doing AES-GCM with the bounds checks left in. At 6 MiB/s every ceiling this
+    lab reasons about sits far above what the pipeline can reach, so the
+    acknowledgement window could never be the binding constraint and the
+    latency lane would measure the optimiser's absence and call it a protocol
+    property.
+
+    One profile for the whole session, not release for the lane that needs it:
+    two builds would double the wait, and a failure would raise the question of
+    which binary saw it.
+    """
+    return runner.build("release")
 
 
 @pytest.fixture
@@ -135,3 +149,39 @@ def lab():
 def workspace(tmp_path: Path) -> Path:
     """Somewhere to put a synthetic payload and whatever arrives."""
     return tmp_path
+
+
+#: What the run measured, in the order it was measured. Printed at the end of
+#: every run by the hook below.
+_measurements: list[tuple[str, str]] = []
+
+
+@pytest.fixture
+def record_measurement():
+    """Records a number the run produced, for printing when it ends.
+
+    A pass is not the whole result of a lane that measures something. A
+    throughput ratio can come out right for the wrong reason — a link that is
+    slow for an unrelated cause satisfies a ceiling just as well as an enforced
+    window does — and that is visible in the numbers and invisible in a green
+    tick. So the numbers are shown whether or not anything failed.
+
+    Deliberately not pytest's `record_property`, which warns under the default
+    `xunit2` family and records into an XML file nobody reading the terminal
+    will open.
+    """
+
+    def record(label: str, value: object) -> None:
+        _measurements.append((label, str(value)))
+
+    return record
+
+
+def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
+    if not _measurements:
+        return
+
+    terminalreporter.write_sep("=", "measured")
+    width = max(len(label) for label, _ in _measurements)
+    for label, value in _measurements:
+        terminalreporter.write_line(f"{label:<{width}}  {value}")
