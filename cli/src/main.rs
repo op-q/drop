@@ -2,7 +2,7 @@
 
 use std::{path::PathBuf, process::ExitCode};
 
-use drop_cli::{client, direct, recv, send};
+use drop_cli::{client, direct, recv, send, ui};
 
 const USAGE: &str = "\
 drop — send a file or folder between two terminals
@@ -17,6 +17,11 @@ COMMANDS
     recv <CODE>     Receive using the code shown by the sender.
     help            Show this help. Also -h, --help.
     version         Show the version. Also -V, --version.
+
+    Typed on their own in a terminal — `drop`, `drop send`, `drop recv` —
+    these open an interface that asks for what they need. Given anything at
+    all, or run where the output is not a terminal, they behave as below and
+    the options apply.
 
     Everything below is an option to send or recv and belongs after one of
     them: `drop send notes.pdf --compress`, never `drop --compress`.
@@ -86,6 +91,15 @@ fn main() -> ExitCode {
 
 fn run(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let Some(command) = arguments.first().map(String::as_str) else {
+        // Bare `drop`. On a terminal it asks which of the two commands the
+        // person wants; anywhere else it stays exactly as loud as it was,
+        // because a script that ran `drop` with no arguments made a mistake.
+        if ui::Invocation::from_process(false, false, status_requested()).surface()
+            == ui::Surface::Interface
+        {
+            return interactive(None);
+        }
+
         eprint!("{USAGE}");
         return Err("no command given".into());
     };
@@ -101,6 +115,10 @@ fn run(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + 
         }
         "send" => {
             let options = parse(&arguments[1..])?;
+
+            if options.surface() == ui::Surface::Interface {
+                return interactive(Some(ui::app::Choice::Send));
+            }
 
             let path = options
                 .positional
@@ -125,6 +143,10 @@ fn run(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + 
         }
         "recv" | "receive" | "get" => {
             let options = parse(&arguments[1..])?;
+
+            if options.surface() == ui::Surface::Interface {
+                return interactive(Some(ui::app::Choice::Receive));
+            }
 
             let code = options
                 .positional
@@ -155,6 +177,58 @@ fn run(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + 
     }
 }
 
+/// `--status` cannot have been parsed yet when `drop` is typed bare, so only
+/// the environment can be asked.
+fn status_requested() -> bool {
+    std::env::var_os("DROP_STATUS").is_some()
+}
+
+/// Runs whatever the interface collected.
+///
+/// `chosen` is the command already named on the command line, or `None` for
+/// bare `drop`, which asks first.
+///
+/// The interface has closed by the time a transfer starts: it collects the
+/// plan, gives the terminal back, and the transfer then prints exactly what it
+/// prints for a flag-driven run. Putting progress on the interface is phase 3
+/// of the plan. Quitting is not an error — the person chose to leave, so this
+/// returns success and says nothing.
+fn interactive(
+    chosen: Option<ui::app::Choice>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Ok(plan) = ui::app::run(chosen)? else {
+        return Ok(());
+    };
+
+    let rendezvous = direct::Rendezvous::from_env()?;
+
+    match plan {
+        ui::app::Plan::Send(plan) => runtime()?.block_on(send::run(
+            &plan.path,
+            send::SendOptions::printing(
+                plan.server,
+                plan.compress.then_some(6),
+                plan.carrier,
+                false,
+                rendezvous,
+            ),
+        )),
+
+        ui::app::Plan::Receive(plan) => runtime()?.block_on(recv::run(
+            &plan.code,
+            recv::ReceiveOptions {
+                origin: plan.server,
+                path: plan.carrier,
+                status: false,
+                rendezvous,
+                out_dir: plan.out_dir,
+                extract: true,
+                force: plan.force,
+            },
+        )),
+    }
+}
+
 fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -172,6 +246,10 @@ struct Options {
     no_extract: bool,
     force: bool,
     status: bool,
+    /// Whether any flag at all was given. Flags are the program-facing
+    /// surface, so using one is how an invocation says which audience it is.
+    /// See [`drop_cli::ui::Invocation`].
+    flagged: bool,
 }
 
 impl Options {
@@ -229,6 +307,12 @@ impl Options {
     fn status(&self) -> bool {
         self.status || std::env::var_os("DROP_STATUS").is_some()
     }
+
+    /// Whether this invocation gets the interface or the command.
+    fn surface(&self) -> ui::Surface {
+        ui::Invocation::from_process(self.positional.is_some(), self.flagged, self.status())
+            .surface()
+    }
 }
 
 fn parse(arguments: &[String]) -> Result<Options, Box<dyn std::error::Error + Send + Sync>> {
@@ -245,6 +329,10 @@ fn parse(arguments: &[String]) -> Result<Options, Box<dyn std::error::Error + Se
                 .cloned()
                 .ok_or_else(|| format!("{name} needs a value").into())
         };
+
+        if argument.starts_with('-') {
+            options.flagged = true;
+        }
 
         match argument {
             "-s" | "--server" => options.server = Some(value("--server")?),

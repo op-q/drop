@@ -126,6 +126,16 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
         .into());
     }
 
+    // The receiver has no spool file to clean up, so it had no termination
+    // handler at all and a signal simply killed it. That was harmless until the
+    // interface put the terminal in raw mode: the default SIGINT disposition
+    // runs no Rust code, so nothing would hand it back.
+    tokio::spawn(async {
+        crate::payload::wait_for_termination().await;
+        crate::ui::terminal::restore();
+        std::process::exit(130);
+    });
+
     let code = crypto::TransferCode::parse(code)?;
 
     // Why a transfer ends up on the relay, recorded as it is decided. The

@@ -117,6 +117,12 @@ pub async fn run(
     tokio::spawn(async {
         payload::wait_for_termination().await;
 
+        // The terminal first, and then the spool file. This exit does not
+        // unwind, so no destructor anywhere will give the terminal back, and a
+        // person left unable to see what they type cannot deal with whatever
+        // comes next either. Both are a handful of syscalls, so putting the
+        // one that cannot be recovered from first costs nothing.
+        crate::ui::terminal::restore();
         payload::remove_spool_files();
         std::process::exit(130);
     });
@@ -297,9 +303,13 @@ async fn send_over_relay(
 fn announce(options: &mut SendOptions, code: &crypto::TransferCode) {
     let shareable = code.to_shareable();
 
+    // The bare code goes to stdout, alone on its line, so it survives a pipe.
+    // Everything below is stderr and is for the person watching.
     (options.on_code)(&shareable);
+
     eprintln!();
-    eprintln!("  Run this on the other computer:");
+    eprintln!("  Give that code to whoever is receiving. They can run \"drop recv\"");
+    eprintln!("  and enter it when asked, or skip the prompt with:");
     eprintln!();
     eprintln!("      drop recv {shareable}");
     eprintln!();
