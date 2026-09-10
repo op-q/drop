@@ -9,13 +9,18 @@ use std::fmt;
 
 use serde::Deserialize;
 
-/// The hosted relay's API origin.
+/// How to name a relay, for whichever sentence has just explained why one is
+/// needed.
 ///
-/// This is deliberately not `drop.lifbom.com`. The hosted instance is a split
-/// deployment: that host serves the browser client and `install.sh` as static
-/// files, while the relay itself answers on the API origin. Pointing the CLI at
-/// the site host makes `POST /api/session/create` return the static host's 404.
-pub const DEFAULT_SERVER: &str = "https://api.drop.lifbom.com";
+/// There is no compiled-in relay origin any more. The hosted one this file used
+/// to name is gone, and a default naming a dead host is worse than none: it
+/// turns "you have not configured a relay" into a connection failure against
+/// somebody else's DNS, and — because the value was compiled in — every binary
+/// already installed keeps trying it. See `docs/decisions.md` entry 16.
+///
+/// Shared rather than written out at each site so the two halves cannot drift
+/// into telling a person two different things to type.
+pub const NAME_A_RELAY: &str = "pass --server or set DROP_SERVER to a relay you run";
 
 #[derive(Debug)]
 pub enum ClientError {

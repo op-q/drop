@@ -1,8 +1,8 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[peer-to-peer transport](plans/peer-to-peer-transport-plan-2026-08-20.md)** — reachable and proved over a real network; Phase 5 (documentation) is what remains
-Last updated: **2026-08-29**
+Current work: **[network topology lab](plans/network-lab-plan-2026-08-31.md)** — item 5, giving the peer-to-peer plan's unreachable validation gates a network to run on. Peer-to-peer transport is reachable and proved over a real network; its Phase 5 (documentation) still remains
+Last updated: **2026-08-31**
 
 The tactical view of what is being built and what state it is in. The detailed
 reasoning, risks, and validation for each item live in its plan under
@@ -28,6 +28,11 @@ Reordered 2026-08-20 at the user's direction: encryption moved ahead of
 confirmation, and transport was added. The reasoning and the cost of the swap
 are in
 [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law).
+
+The network lab (item 5) was added 2026-08-31 and runs alongside rather than in
+that sequence. It builds nothing the other items depend on; it gives item 3's
+unchecked validation gates somewhere to run, so it follows transport and does
+not block confirmation.
 
 ## 1. Relay teardown reset
 
@@ -193,6 +198,183 @@ bytes move.
 Gate: declining leaves nothing on disk and is not counted as a failure; a
 filename carrying escape sequences renders inert; a non-TTY without `--yes`
 fails clearly.
+
+## 5. Network topology lab
+
+Plan: [`network-lab-plan-2026-08-31.md`](plans/network-lab-plan-2026-08-31.md)
+Status: **active**
+
+A `netlab/` directory that builds the real binaries and runs them inside Linux
+network namespaces against constructed topologies — NAT, latency, loss, blocked
+UDP — so the peer-to-peer plan's validation gates stop being unreachable by
+hand. No part of the Drop protocol is reimplemented there; the lab starts real
+binaries and inspects what comes out.
+
+- [x] Phase 0 — machine-readable carrier reporting in the CLI. Done
+      2026-08-31. 156 tests, up from 153. `--status` and `DROP_STATUS` add one
+      `drop-status: path=... fallback=...` line beside the prose, so a harness
+      matches on a stable string rather than on sentences written to be
+      reworded. Asserted against the real binary as a subprocess, because
+      in-process assertions would leave the flag parsing and the choice of
+      stream unchecked — which is precisely what a lab depends on.
+- [x] Phase 1 — namespaces, the first topologies, three passing tests. Done
+      2026-08-31. `netlab/` runs the real binaries across a router and two
+      segments in Linux network namespaces, as an ordinary user: an
+      unprivileged user namespace grants `CAP_NET_ADMIN` inside itself, so the
+      pytest session re-executes into `unshare -Urnm` and skips cleanly only
+      where a kernel refuses. **The phase's stated gate was unmeetable and was
+      replaced.** It asked that the UDP-blocked test fail when the `iptables`
+      rule is removed; in a lab with no route to the internet the direct path
+      cannot be set up either way, so nothing can attribute the fallback to the
+      block. The topology honestly shows the fallback firing, completing, and
+      being reported — and says so. Two negative controls that do discriminate
+      replace the gate: the router is shown to be carrying the transfer, and
+      the relay to be relaying it.
+- [x] Phase 2 — latency, and the `window / RTT` claim in
+      [`protocol.md`](protocol.md). Done 2026-09-01. Throughput is measured at
+      200, 400 and 800 ms acknowledgement loops, asserted never to exceed
+      `WINDOW_BYTES / RTT` and to halve as the round trip doubles. **Three
+      corrections were needed to make the lane measure anything.** The round
+      trip that binds the window is the receiver's acknowledgement loop —
+      four traversals, not the two the phase assumed — so a halved delay would
+      have doubled the ceiling and passed under it without checking anything.
+      `measure_rtt` was reading 15-20% high because `ping`'s first packet pays
+      for address resolution across the delayed link, and the lane divides by
+      that number. And a single transfer's wall clock is mostly handshake at
+      these round trips (2.8 s, 5.3 s, 9.6 s of setup), which scales with RTT
+      too — so dividing bytes by seconds would have reported the handshake as
+      throughput *and still looked inversely proportional*. Rates are now taken
+      as a slope across two payload sizes. The lab builds `--release`: debug
+      moves 6 MiB/s against 600 MiB/s optimised, below every ceiling under
+      test, so the window could never have been the binding constraint.
+- [x] Phase 3 — packet loss. Done 2026-09-01. 16 MiB across a router dropping
+      1% a hop arrives byte-identical and terminates, with a 5% run recorded
+      and not asserted. The deadline is the real assertion — a transfer that
+      never finishes and never errors is what a flow-control bug looks like
+      from outside — so a timeout became a `Transfer` outcome rather than the
+      `LabError` that means the lab itself broke, which is the same conflation
+      Phase 1 fixed for a different path. Loss is proved present by reading the
+      qdisc back rather than inferred from timing: at zero RTT, 1% loss
+      completes as fast as no loss at all.
+- [x] Phase 4 — the direct-path topologies. Done 2026-09-10, once **open
+      question 1 was answered** by making rendezvous configurable — a deployment
+      feature in its own right, item 6 below and
+      [`decisions.md`](decisions.md) entry 15. The lab runs an `iroh-relay`
+      server and a three-node `mainline` testnet in one namespace and points
+      `drop` at them. Three topologies: a plain LAN with no `api` process
+      anywhere, asserted by `pgrep` before and after; both peers behind a
+      port-preserving NAT; both behind `--random-fully`.
+      **Two of the plan's own assertions for this phase were wrong and were
+      replaced.** `drop --status` reports `path=p2p` whenever no Drop server was
+      involved, which is true whether iroh punched through the NAT or carried
+      the connection over its relay — so asserting it proved nothing about
+      traversal, and the symmetric row's expected `fallback=rendezvous` never
+      fires at all, because rendezvous succeeds and the Drop relay is never
+      consulted. A hole punch is measured on the wire instead, by counting bytes
+      on the rendezvous host's isolated link, and the NAT's mapping behaviour is
+      measured directly — one socket, two destinations, compare the source ports
+      the far end saw — rather than inferred from the `iptables` rule, because a
+      misbuilt symmetric NAT passes a test asserting the punch failed.
+      Separately: **the lab's skip path was broken on any Ubuntu 24.04 or
+      later**, where `kernel.apparmor_restrict_unprivileged_userns` refuses the
+      namespace while the two sysctls the probe actually read both say yes. A
+      wrong yes was unrecoverable because the caller `execvp`s, so the whole run
+      exited with one line of `unshare` error and no test report. The probe now
+      attempts a namespace instead of predicting one.
+- [ ] Phase 5 — dated report under [`validation/`](validation/) and a separate
+      CI workflow, nightly and label-triggered, never blocking pull requests
+
+Gate: every topology fails when its defining condition is removed, demonstrated
+once per topology and recorded. A lab that passes either way is measuring
+nothing, which is the failure the peer-to-peer plan's loopback tests already
+document about themselves. Outstanding for `udp_blocked` alone, which was
+recorded as unmeetable at Phase 1 and became possible at Phase 4: attributing a
+fallback to a cause needs the direct path to be able to succeed when the cause is
+absent, and now it can.
+
+## 6. Self-hosted rendezvous
+
+Plan: [`self-hosted-rendezvous-plan-2026-09-10.md`](plans/self-hosted-rendezvous-plan-2026-09-10.md)
+Status: **phase 1 done**
+
+`DROP_RENDEZVOUS_RELAY` and `DROP_RENDEZVOUS_BOOTSTRAP` point the direct path at
+an iroh relay and DHT nodes a deployment runs itself, instead of n0's relays and
+the public mainline routers compiled in. Unset, nothing changes.
+
+- [x] Phase 1 — the two values. Done 2026-09-10.
+      [`decisions.md`](decisions.md) entry 15 and a section in
+      [`security.md`](security.md) record what an operator takes on: a relay they
+      name sees connection metadata, a bootstrap node they name can refuse to
+      store a record, and neither can lead a receiver to the wrong peer because a
+      rendezvous record was never evidence of identity. **A malformed value is an
+      error rather than a silent return to the public default**, which is the
+      load-bearing decision here: an operator who meant to keep rendezvous inside
+      their network and quietly got the public DHT has lost exactly what they
+      configured, invisibly. That is also why the relay URL's scheme is checked —
+      `RelayUrl::from_str` is `Url::from_str`, so `relay.example:3340` parses
+      happily into a URL whose scheme is `relay.example`, binds without
+      complaint, and then spends `ONLINE_TIMEOUT` reaching no relay at all.
+- [x] Gate: two `drop` processes complete a direct transfer against a relay and
+      DHT on loopback with nothing public reachable, and the same transfer fails
+      when that infrastructure is stopped. The negative control is the half that
+      matters — this machine can reach the real DHT, so a passing transfer alone
+      would not show which one carried the rendezvous.
+
+Why this is a feature and not a knob added for a test is argued in the plan and
+in entry 15: a self-hoster can already run their own relay, but rendezvous was
+compiled in, so the direct path could not work at all inside an egress-filtered
+network. The network lab above is the first consumer rather than the reason.
+
+## 7. Interactive terminal UI
+
+Plan: [`interactive-terminal-ui-plan-2026-09-10.md`](plans/interactive-terminal-ui-plan-2026-09-10.md)
+Status: **phases 0 and 1 done, phase 2 partly**
+
+`drop send` and `drop recv`, typed bare on a terminal, open a small full-screen
+interface: a file browser, a checkbox options screen, a code field, a
+destination picker, progress, and a close on both sides when the transfer ends
+or is cancelled. The flags stay and become the program-facing surface.
+
+- [x] Phase 0 — activation rule. Done 2026-09-10. All three streams must be
+      terminals, stdout included, because the transfer code goes there so it
+      survives a pipe; `DROP_STATUS` counts even with a bare command line; and
+      **any** flag means the command, rather than a curated list of flags that
+      would be wrong the first time one was added. 180 tests pass against 171
+      before, the nine new ones being this rule. The `netlab` half of the gate
+      came back 7 passed, 1 failed — `test_a_full_cone_nat_is_punched_through`,
+      which belongs to item 5's phase 4 and reproduces three runs out of three
+      while the other two direct-path topologies pass. **No `HEAD` baseline
+      exists** for it: the lab is uncommitted and depends on uncommitted
+      `DROP_RENDEZVOUS_*` support, so the gate is satisfied for seven tests and
+      inconclusive for the eighth.
+- [x] Phase 1 — terminal lifecycle. Done 2026-09-10. A guard plus a free
+      `restore()` over an atomic, so the signal handler — which owns no guard
+      and does not unwind — can call it too. The terminal is given back
+      *before* the spool file is deleted, the opposite of what the plan first
+      said: both are a few syscalls and the unrecoverable one goes first.
+      `recv` has a termination handler for the first time. **Ctrl-C had to
+      become a key as well as a signal**, because raw mode stops the driver
+      turning it into SIGINT.
+- [~] Phase 2 — the screens. Chooser, file browser, options and code entry are
+      done and drive real transfers; the transfer screen itself is phase 3, so
+      the interface currently closes and the transfer prints what it always
+      has. The options screen offers *adding* a custom relay rather than
+      showing a URL field, warns when the relay carrier is chosen without one,
+      and shows a relay already in `DROP_SERVER` as in effect — nothing added
+      means no relay, per [`decisions.md`](decisions.md) entry 16.
+- [ ] Phase 3 — progress routed through the interface, and closing. The
+      receiver has no cancel path today: the sender sends `{"type":"cancel"}`
+      on a stream failure and acts on a `cancelled` status, but nothing in
+      `recv.rs` sends one, so "closes for both sides when cancelled" is
+      currently only true in one direction.
+- [ ] Phase 4 — [`decisions.md`](decisions.md) entry 13's approval prompt as a
+      screen, counter intact, unattended behaviour unchanged.
+- [ ] Phase 5 — help and docs.
+
+Two dependencies are added, ratatui and crossterm, into a manifest that
+justifies every entry it has. Both are pure Rust, which is the standing bar for
+the four prebuilt targets. Release binary went 26,988,848 → 27,482,144 bytes,
+**+493 KB (+1.8%)**, so the crossterm-only fallback is not needed.
 
 ## Not scheduled
 

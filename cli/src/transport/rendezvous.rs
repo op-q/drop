@@ -46,7 +46,7 @@
 
 use std::{
     future::Future,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4},
     str::FromStr,
 };
 
@@ -294,7 +294,17 @@ impl MainlineDirectory {
     /// One per process, kept alive. The first operation pays the DHT bootstrap
     /// cost — measured at three to five seconds — and later ones are under a
     /// second on the warm client.
-    pub fn new() -> Result<Self, TransportError> {
+    ///
+    /// `bootstrap` names the DHT nodes to enter the network through. **Empty
+    /// means pkarr's public routers**, which is emphatically not what pkarr
+    /// itself does with an empty list: `ClientBuilder::bootstrap(&[])` is
+    /// documented as starting a *separate* DHT network, where a sender
+    /// publishes successfully into a DHT of one and no receiver can ever
+    /// resolve it. That failure looks like the sender never having published,
+    /// which is the hardest kind to diagnose, so the empty case is spent on the
+    /// safe default and an isolated network has to be asked for by naming a
+    /// node.
+    pub fn new(bootstrap: &[SocketAddrV4]) -> Result<Self, TransportError> {
         let mut builder = pkarr::ClientBuilder::default();
 
         // Defeats pkarr's five-minute cache floor. Without it a receiver can be
@@ -302,6 +312,10 @@ impl MainlineDirectory {
         // which for a rendezvous measured in seconds is indistinguishable from
         // the sender not being there.
         builder.minimum_ttl(0);
+
+        if !bootstrap.is_empty() {
+            builder.bootstrap(bootstrap);
+        }
 
         let client = builder.build().map_err(|error| {
             TransportError::Connect(format!("could not start a DHT client: {error}"))

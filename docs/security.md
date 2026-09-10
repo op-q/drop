@@ -184,6 +184,38 @@ exists for one specific trusted-load-balancer arrangement and should not be
 enabled otherwise: trusting a forwarded address that any client can set turns
 the per-IP limits off.
 
+## Self-hosted rendezvous
+
+`DROP_RENDEZVOUS_RELAY` and `DROP_RENDEZVOUS_BOOTSTRAP` point the direct path at
+infrastructure an operator runs instead of the public defaults. Unset, nothing
+changes. [`decisions.md`](decisions.md) entry 15 records the decision; what an
+operator takes on by setting them is this.
+
+**A relay they name sees connection metadata** for every direct transfer that
+uses it: which endpoint ids talk to each other, when, and the addresses each was
+observed at. It sees no file bytes, no filename and no code — those are sealed by
+the envelope, and choosing a relay does not weaken it. This is the same exposure
+n0's relays have today, moved to a host the operator picked, and it is why a
+relay URL is worth treating as infrastructure rather than as a preference.
+
+**A bootstrap node they name can refuse to store a record, or serve a stale
+one.** The result is a rendezvous that fails and a transfer that falls back to
+the Drop relay. It cannot lead a receiver to the wrong peer: a rendezvous record
+is signed by a key derived from the public nameplate, so anyone who can guess the
+nameplate can produce a valid one, and the record was never evidence of identity.
+Authentication is the PAKE's, as above.
+
+**The sharp edge is a typo, not an attacker.** Setting these to keep rendezvous
+inside a network and silently getting the public DHT instead loses precisely what
+was being protected, and would look like nothing at all. So a malformed value is
+an error rather than a fallback to the default, and a relay URL's scheme is
+checked — `relay.example:3340` is a syntactically valid URL whose scheme is
+`relay.example`, and accepting it would produce exactly that silent downgrade.
+
+Neither variable relaxes the address filter. A record still carries only a
+globally routable address or a relay URL, so pointing at a private relay
+publishes the relay and still withholds every private address of the sender's.
+
 ## Known weaknesses
 
 Recorded honestly rather than fixed:

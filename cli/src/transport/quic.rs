@@ -4,9 +4,9 @@
 //! binds an endpoint, gets the two peers attached to one bidirectional stream,
 //! and hands that stream to `FramedTransport`.
 //!
-//! Nothing here is reachable from the CLI yet, deliberately. Selection and
-//! fallback are Phase 4, and the plan's unsolved one-guess question has to be
-//! settled before a user can reach this path at all.
+//! Reachable from the CLI since `--transport` landed: [`crate::direct`] is what
+//! selects this path and falls back from it, and [`crate::direct::Rendezvous`]
+//! decides which relay an endpoint binds against.
 
 use std::time::Duration;
 
@@ -69,8 +69,14 @@ pub struct QuicEndpoint {
 
 impl QuicEndpoint {
     /// Binds an endpoint that can reach peers behind NAT.
-    pub async fn bind() -> Result<Self, TransportError> {
-        Self::bind_with(RelayMode::Default).await
+    ///
+    /// The relay mode is the caller's rather than this module's, because which
+    /// relay introduces two peers is a deployment question — see
+    /// [`crate::direct::Rendezvous`] and
+    /// [`docs/plans/self-hosted-rendezvous-plan-2026-09-10.md`](../../../docs/plans/self-hosted-rendezvous-plan-2026-09-10.md).
+    /// Passing [`RelayMode::Default`] is what shipped before it was a choice.
+    pub async fn bind(relay_mode: RelayMode) -> Result<Self, TransportError> {
+        Self::bind_with(relay_mode).await
     }
 
     /// Binds an endpoint that will only ever talk to peers it can reach
@@ -503,7 +509,9 @@ mod tests {
                     &code,
                     &crate::recv::ReceiveOptions {
                         path: crate::direct::Path::Relay,
-                        origin: String::new(),
+                        status: false,
+                        rendezvous: crate::direct::Rendezvous::default(),
+                        origin: None,
                         out_dir: destination,
                         extract: true,
                         force: true,

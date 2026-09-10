@@ -65,10 +65,19 @@ impl fmt::Debug for Attempt {
 }
 
 pub struct SendOptions {
-    pub origin: String,
+    /// The relay to forward through, if one is configured. `None` is the
+    /// ordinary case: there is no hosted relay and no compiled-in default, so
+    /// a transfer that has not been given one stays on the direct path.
+    pub origin: Option<String>,
     pub compress: Option<u32>,
     /// Which carrier to use. See [`crate::direct::Path`].
     pub path: crate::direct::Path,
+    /// Print [`crate::direct::status_line`] beside the prose, for a caller
+    /// that is a program rather than a person.
+    pub status: bool,
+    /// Which rendezvous infrastructure the direct path uses. Default is n0's
+    /// relays and the public DHT; see [`crate::direct::Rendezvous`].
+    pub rendezvous: crate::direct::Rendezvous,
     /// Called once with the session code, as soon as the relay issues it.
     ///
     /// The code is what the other terminal needs, so it is handed to the caller
@@ -80,11 +89,19 @@ pub struct SendOptions {
 impl SendOptions {
     /// Options that print the code to stdout, one line, nothing else, so it
     /// survives being piped into another command.
-    pub fn printing(origin: String, compress: Option<u32>, path: crate::direct::Path) -> Self {
+    pub fn printing(
+        origin: Option<String>,
+        compress: Option<u32>,
+        path: crate::direct::Path,
+        status: bool,
+        rendezvous: crate::direct::Rendezvous,
+    ) -> Self {
         Self {
             origin,
             compress,
             path,
+            status,
+            rendezvous,
             on_code: Box::new(|code| println!("{code}")),
         }
     }
@@ -99,9 +116,26 @@ pub async fn run(
     // send would leave the user's bytes behind in the temporary directory.
     tokio::spawn(async {
         payload::wait_for_termination().await;
+
+        // The terminal first, and then the spool file. This exit does not
+        // unwind, so no destructor anywhere will give the terminal back, and a
+        // person left unable to see what they type cannot deal with whatever
+        // comes next either. Both are a handful of syscalls, so putting the
+        // one that cannot be recovered from first costs nothing.
+        crate::ui::terminal::restore();
         payload::remove_spool_files();
         std::process::exit(130);
     });
+
+    // Before the payload is read, compressed and spooled: being told the
+    // relay is missing is worth nothing after a wait to compress a directory.
+    if options.path == direct::Path::Relay && options.origin.is_none() {
+        return Err(format!(
+            "--transport relay forwards through a relay, and none is configured: {}.",
+            client::NAME_A_RELAY
+        )
+        .into());
+    }
 
     let payload = Payload::prepare(path, options.compress)?;
 
@@ -127,16 +161,26 @@ pub async fn run(
         match try_direct(&mut options, payload, sealed_size).await {
             Ok(outcome) => return outcome,
             Err(failed) => {
-                direct::may_fall_back(options.path, failed.error.as_ref())?;
+                direct::may_fall_back(
+                    options.path,
+                    options.origin.as_deref(),
+                    failed.error.as_ref(),
+                )?;
                 eprintln!("No peer-to-peer path: {}", failed.error);
                 eprintln!("Falling back to the relay.");
 
-                return send_over_relay(&mut options, *failed.payload, sealed_size).await;
+                return send_over_relay(
+                    &mut options,
+                    *failed.payload,
+                    sealed_size,
+                    direct::Fallback::Rendezvous,
+                )
+                .await;
             }
         }
     }
 
-    send_over_relay(&mut options, payload, sealed_size).await
+    send_over_relay(&mut options, payload, sealed_size, direct::Fallback::None).await
 }
 
 /// A direct path that could not be set up, carrying the payload back.
@@ -160,19 +204,23 @@ async fn try_direct(
 ) -> Result<Result<(), Box<dyn Error + Send + Sync>>, Box<SetupFailed>> {
     eprintln!("Looking for a peer-to-peer path...");
 
-    let directory = match direct::Directory::new() {
+    let directory = match options.rendezvous.directory() {
         Ok(directory) => directory,
         Err(error) => return Err(SetupFailed::new(error, payload)),
     };
 
-    let published = match direct::publish_sender(&directory).await {
+    let published = match direct::publish_sender(&directory, &options.rendezvous).await {
         Ok(published) => published,
         Err(error) => return Err(SetupFailed::new(error, payload)),
     };
 
     let code = published.code.clone();
     announce(options, &code);
-    direct::report("peer-to-peer (no Drop server)");
+    direct::report(
+        direct::Carrier::Direct,
+        direct::Fallback::None,
+        options.status,
+    );
     eprintln!("Waiting for the receiver to connect...");
 
     // Only from here does a failure stop being a fallback: the code is out, a
@@ -203,15 +251,29 @@ impl SetupFailed {
 }
 
 /// The path with a Drop server in it, unchanged.
+///
+/// `fallback` is why this is the relay rather than what the relay did, so it
+/// is passed in rather than decided here: this function cannot tell being
+/// asked for from being fallen back to.
 async fn send_over_relay(
     options: &mut SendOptions,
     payload: Payload,
     sealed_size: u64,
+    fallback: direct::Fallback,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     // Session creation is a blocking HTTP call, so it runs on the blocking
     // pool rather than stalling a runtime worker.
+    // Unreachable in practice — `run` refuses `--transport relay` without one
+    // and `may_fall_back` refuses to arrive here without one — but stated as an
+    // error rather than an unwrap, because the alternative to a sentence here
+    // is a panic in front of somebody sending a file.
+    let origin = options
+        .origin
+        .clone()
+        .ok_or_else(|| format!("this transfer needs a relay: {}", client::NAME_A_RELAY))?;
+
     let nameplate = {
-        let origin = options.origin.clone();
+        let origin = origin.clone();
 
         tokio::task::spawn_blocking(move || client::create_session(&origin, sealed_size)).await??
     };
@@ -220,10 +282,10 @@ async fn send_over_relay(
     // sent anywhere. Together they are what the receiver types.
     let code = crypto::TransferCode::generate_for(&nameplate)?;
     announce(options, &code);
-    direct::report("relay (encrypted; the relay cannot read it)");
+    direct::report(direct::Carrier::Relay, fallback, options.status);
     eprintln!("Waiting for the receiver to connect...");
 
-    let mut transport = relay::connect_sender(&options.origin, code.nameplate()).await?;
+    let mut transport = relay::connect_sender(&origin, code.nameplate()).await?;
 
     match send_transfer(&mut transport, &code, payload, sealed_size).await? {
         Attempt::Done => Ok(()),
@@ -241,9 +303,13 @@ async fn send_over_relay(
 fn announce(options: &mut SendOptions, code: &crypto::TransferCode) {
     let shareable = code.to_shareable();
 
+    // The bare code goes to stdout, alone on its line, so it survives a pipe.
+    // Everything below is stderr and is for the person watching.
     (options.on_code)(&shareable);
+
     eprintln!();
-    eprintln!("  Run this on the other computer:");
+    eprintln!("  Give that code to whoever is receiving. They can run \"drop recv\"");
+    eprintln!("  and enter it when asked, or skip the prompt with:");
     eprintln!();
     eprintln!("      drop recv {shareable}");
     eprintln!();

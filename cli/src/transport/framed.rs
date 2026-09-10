@@ -401,7 +401,9 @@ mod tests {
 
         let options = crate::recv::ReceiveOptions {
             path: crate::direct::Path::Relay,
-            origin: String::new(),
+            status: false,
+            rendezvous: crate::direct::Rendezvous::default(),
+            origin: None,
             out_dir: destination.clone(),
             extract: true,
             force: true,
@@ -470,7 +472,9 @@ mod tests {
 
         let options = crate::recv::ReceiveOptions {
             path: crate::direct::Path::Relay,
-            origin: String::new(),
+            status: false,
+            rendezvous: crate::direct::Rendezvous::default(),
+            origin: None,
             out_dir: destination.clone(),
             extract: true,
             force: true,

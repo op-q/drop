@@ -42,6 +42,27 @@ the plan contract unmissable and indexes what is here.
   connection has nobody to do that.
 
 ## Proposed
+
+- [`interactive-terminal-ui-plan-2026-09-10.md`](interactive-terminal-ui-plan-2026-09-10.md)
+  — make `drop send` and `drop recv` the only two things a person needs to
+  know: typed bare on a terminal each opens a small full-screen interface, and
+  every flag stays reachable for programs. Three findings shape the order —
+  the code-announce callback is already the right seam, `progress.rs` is not
+  and will draw over the screen, and the sender's signal handler exits without
+  unwinding, so a raw terminal is never restored on Ctrl-C. Terminal lifecycle
+  therefore lands before a single screen is drawn. Bare `drop` opens a chooser
+  on a terminal, and still prints usage and exits 1 anywhere else.
+
+
+- [`network-lab-plan-2026-08-31.md`](network-lab-plan-2026-08-31.md)
+  — a `netlab/` directory that runs the real binaries inside Linux network
+  namespaces against constructed topologies, so the peer-to-peer plan's
+  validation gates stop being unreachable by hand. Two findings shape it: the
+  lab needs no root, because an unprivileged user namespace grants
+  `CAP_NET_ADMIN` inside itself; and the direct path cannot run hermetically as
+  the code stands, because rendezvous needs the public DHT, n0's relays, and an
+  address that [`../decisions.md`](../decisions.md) entry 14 deliberately
+  refuses to publish. The relay-path topologies are unblocked and come first.
 - [`meta-ok-key-confirmation-plan-2026-08-31.md`](meta-ok-key-confirmation-plan-2026-08-31.md)
   — make the receiver prove it opened the sealed metadata instead of saying so.
   `meta_ok` carries a key-confirmation value derived from the agreed secret and

@@ -43,6 +43,16 @@ iroh-tickets = "1.0.0"
 # false` drops the relay client, which is the only thing pulling in reqwest.
 pkarr = { version = "8.0.0", default-features = false, features = ["dht"] }
 
+# The interface `drop send` and `drop recv` open when a person types them bare.
+# Both are pure Rust, which is the same bar `flate2` is held to above: the CLI
+# ships prebuilt for four targets and a C dependency would need a cross
+# toolchain for each. The interface collects choices and then gets out of the
+# way, so key events are read blocking; phase 3 puts progress on screen while a
+# transfer runs and will need crossterm's `event-stream` feature to select
+# against it. See docs/plans/interactive-terminal-ui-plan-2026-09-10.md.
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+
 [dev-dependencies]
 api = { path = ".." }
 futures-util = "0.3"
