@@ -2662,9 +2662,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pkarr"
-version = "8.0.0"
+version = "8.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3248274a604751c9a6749137cebfe0ddfc8b4b0e31c779515c4f984c937a4dac"
+checksum = "21c6fb505578fd0934d1ffe1cc8405634b10bd5c5340e7609f33d3089e34f57e"
 dependencies = [
  "async-compat",
  "base32",
