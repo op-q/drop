@@ -97,7 +97,7 @@ async fn transfer_forcing(
             send::run(
                 &source,
                 SendOptions {
-                    origin,
+                    origin: Some(origin),
                     compress,
                     // These drive a real relay in-process, so they pin the
                     // path rather than letting `auto` reach for a DHT.
@@ -132,7 +132,7 @@ async fn transfer_forcing(
                     path: drop_cli::direct::Path::Relay,
                     status: false,
                     rendezvous: drop_cli::direct::Rendezvous::default(),
-                    origin,
+                    origin: Some(origin),
                     out_dir: destination,
                     extract: true,
                     force,
@@ -269,7 +269,7 @@ async fn reports_a_clear_error_for_an_unknown_code() {
             path: drop_cli::direct::Path::Relay,
             status: false,
             rendezvous: drop_cli::direct::Rendezvous::default(),
-            origin: origin.clone(),
+            origin: Some(origin.clone()),
             out_dir: base.clone(),
             extract: true,
             force: true,
@@ -300,7 +300,7 @@ async fn a_malformed_code_fails_before_the_relay_is_contacted() {
             status: false,
             rendezvous: drop_cli::direct::Rendezvous::default(),
             // Nothing is listening here. Reaching it at all is the failure.
-            origin: "http://127.0.0.1:1".to_string(),
+            origin: Some("http://127.0.0.1:1".to_string()),
             out_dir: base.clone(),
             extract: true,
             force: true,
@@ -516,7 +516,7 @@ async fn a_wrong_code_is_refused_and_leaves_nothing_on_disk() {
             send::run(
                 &source,
                 SendOptions {
-                    origin,
+                    origin: Some(origin),
                     compress: None,
                     path: drop_cli::direct::Path::Relay,
                     status: false,
@@ -552,7 +552,7 @@ async fn a_wrong_code_is_refused_and_leaves_nothing_on_disk() {
             path: drop_cli::direct::Path::Relay,
             status: false,
             rendezvous: drop_cli::direct::Rendezvous::default(),
-            origin: origin.clone(),
+            origin: Some(origin.clone()),
             out_dir: destination.clone(),
             extract: true,
             force: true,
@@ -622,7 +622,7 @@ async fn a_receiver_that_connects_first_still_completes_the_transfer() {
             send::run(
                 &source,
                 SendOptions {
-                    origin,
+                    origin: Some(origin),
                     compress: None,
                     path: drop_cli::direct::Path::Relay,
                     status: false,
@@ -663,7 +663,7 @@ async fn a_receiver_that_connects_first_still_completes_the_transfer() {
                     path: drop_cli::direct::Path::Relay,
                     status: false,
                     rendezvous: drop_cli::direct::Rendezvous::default(),
-                    origin,
+                    origin: Some(origin),
                     out_dir: destination,
                     extract: true,
                     force: true,

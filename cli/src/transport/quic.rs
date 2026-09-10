@@ -511,7 +511,7 @@ mod tests {
                         path: crate::direct::Path::Relay,
                         status: false,
                         rendezvous: crate::direct::Rendezvous::default(),
-                        origin: String::new(),
+                        origin: None,
                         out_dir: destination,
                         extract: true,
                         force: true,

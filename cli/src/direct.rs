@@ -413,16 +413,29 @@ pub fn status_line(carrier: Carrier, fallback: Fallback) -> String {
 }
 
 /// Whether falling back to the relay is allowed, and what to say when it is not.
-pub fn may_fall_back(path: Path, failure: &dyn Error) -> Result<(), Box<dyn Error + Send + Sync>> {
-    match path {
-        Path::Auto => Ok(()),
-        Path::Direct => Err(format!(
+pub fn may_fall_back(
+    path: Path,
+    relay: Option<&str>,
+    failure: &dyn Error,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    match (path, relay) {
+        (Path::Auto, Some(_)) => Ok(()),
+        // The ordinary case now, and it is not the same failure as `p2p`
+        // refusing: nobody asked for the direct path only, so a person who
+        // hits this needs to be told a relay is missing rather than forbidden.
+        (Path::Auto, None) => Err(format!(
+            "no peer-to-peer path could be set up, and no relay is configured to fall back \
+             to: {failure}. To use one, {}.",
+            crate::client::NAME_A_RELAY
+        )
+        .into()),
+        (Path::Direct, _) => Err(format!(
             "no peer-to-peer path could be set up, and --transport p2p forbids \
              falling back to the relay: {failure}"
         )
         .into()),
         // Never reached: a relay transfer does not attempt a direct setup.
-        Path::Relay => Err(format!("the relay path failed: {failure}").into()),
+        (Path::Relay, _) => Err(format!("the relay path failed: {failure}").into()),
     }
 }
 
@@ -579,8 +592,22 @@ mod tests {
     fn forcing_the_direct_path_refuses_to_fall_back() {
         let failure: Box<dyn std::error::Error> = "the DHT did not answer".into();
 
-        assert!(super::may_fall_back(Path::Auto, failure.as_ref()).is_ok());
-        assert!(super::may_fall_back(Path::Direct, failure.as_ref()).is_err());
+        let relay = Some("https://relay.example");
+
+        assert!(super::may_fall_back(Path::Auto, relay, failure.as_ref()).is_ok());
+        assert!(super::may_fall_back(Path::Direct, relay, failure.as_ref()).is_err());
+
+        // Auto with nothing to fall back to is an error, and says which of the
+        // two reasons it is: missing, not forbidden.
+        let missing = super::may_fall_back(Path::Auto, None, failure.as_ref())
+            .expect_err("auto cannot fall back to a relay nobody named");
+        let missing = missing.to_string();
+
+        assert!(
+            missing.contains("no relay is configured"),
+            "unhelpful: {missing}"
+        );
+        assert!(!missing.contains("forbids"), "wrong reason: {missing}");
     }
 
     /// Every combination that can actually be printed, spelled out.

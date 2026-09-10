@@ -112,8 +112,10 @@ cargo run -p drop-cli -- recv <CODE> --server http://127.0.0.1:8080 --out /tmp/d
 `scripts/dev-transfer.sh --relay` starts just the relay and prints the two
 commands with the port filled in.
 
-`--server` and `DROP_SERVER` are equivalent; without either, the CLI talks to
-the public instance, which is not what you want while testing.
+`--server` and `DROP_SERVER` are equivalent, and there is no default: without
+either, the CLI has no relay and stays on the direct path. `--transport relay`
+without one is an error rather than a connection attempt. See
+[`decisions.md`](decisions.md) entry 16.
 
 **`--status` when something else is reading the output.** It adds one line
 naming the carrier that actually moved the bytes, beside the prose that says
