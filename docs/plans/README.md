@@ -43,6 +43,17 @@ the plan contract unmissable and indexes what is here.
 
 ## Proposed
 
+- [`interactive-terminal-ui-plan-2026-09-10.md`](interactive-terminal-ui-plan-2026-09-10.md)
+  — make `drop send` and `drop recv` the only two things a person needs to
+  know: typed bare on a terminal each opens a small full-screen interface, and
+  every flag stays reachable for programs. Three findings shape the order —
+  the code-announce callback is already the right seam, `progress.rs` is not
+  and will draw over the screen, and the sender's signal handler exits without
+  unwinding, so a raw terminal is never restored on Ctrl-C. Terminal lifecycle
+  therefore lands before a single screen is drawn. Bare `drop` opens a chooser
+  on a terminal, and still prints usage and exits 1 anywhere else.
+
+
 - [`network-lab-plan-2026-08-31.md`](network-lab-plan-2026-08-31.md)
   — a `netlab/` directory that runs the real binaries inside Linux network
   namespaces against constructed topologies, so the peer-to-peer plan's

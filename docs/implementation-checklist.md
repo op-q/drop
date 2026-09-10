@@ -281,13 +281,6 @@ binaries and inspects what comes out.
       wrong yes was unrecoverable because the caller `execvp`s, so the whole run
       exited with one line of `unshare` error and no test report. The probe now
       attempts a namespace instead of predicting one.
-- [ ] **Open: topology 2 fails.** First run 2026-09-10 was 7 passed, 1 failed —
-      `test_a_full_cone_nat_is_punched_through`, reproducing three runs of
-      three. Topologies 1 and 3 pass, the NAT measures as endpoint-independent,
-      and nothing fell back to a relay; the sender reports a QUIC
-      `authentication failed` and the receiver times out. Landed as a known
-      failure with the evidence in the plan. Next step is packet capture, not
-      another assertion.
 - [ ] Phase 5 — dated report under [`validation/`](validation/) and a separate
       CI workflow, nightly and label-triggered, never blocking pull requests
 
@@ -331,6 +324,57 @@ Why this is a feature and not a knob added for a test is argued in the plan and
 in entry 15: a self-hoster can already run their own relay, but rendezvous was
 compiled in, so the direct path could not work at all inside an egress-filtered
 network. The network lab above is the first consumer rather than the reason.
+
+## 7. Interactive terminal UI
+
+Plan: [`interactive-terminal-ui-plan-2026-09-10.md`](plans/interactive-terminal-ui-plan-2026-09-10.md)
+Status: **phases 0 and 1 done, phase 2 partly**
+
+`drop send` and `drop recv`, typed bare on a terminal, open a small full-screen
+interface: a file browser, a checkbox options screen, a code field, a
+destination picker, progress, and a close on both sides when the transfer ends
+or is cancelled. The flags stay and become the program-facing surface.
+
+- [x] Phase 0 — activation rule. Done 2026-09-10. All three streams must be
+      terminals, stdout included, because the transfer code goes there so it
+      survives a pipe; `DROP_STATUS` counts even with a bare command line; and
+      **any** flag means the command, rather than a curated list of flags that
+      would be wrong the first time one was added. 180 tests pass against 171
+      before, the nine new ones being this rule. The `netlab` half of the gate
+      came back 7 passed, 1 failed — `test_a_full_cone_nat_is_punched_through`,
+      which belongs to item 5's phase 4 and reproduces three runs out of three
+      while the other two direct-path topologies pass. **No `HEAD` baseline
+      exists** for it: the lab is uncommitted and depends on uncommitted
+      `DROP_RENDEZVOUS_*` support, so the gate is satisfied for seven tests and
+      inconclusive for the eighth.
+- [x] Phase 1 — terminal lifecycle. Done 2026-09-10. A guard plus a free
+      `restore()` over an atomic, so the signal handler — which owns no guard
+      and does not unwind — can call it too. The terminal is given back
+      *before* the spool file is deleted, the opposite of what the plan first
+      said: both are a few syscalls and the unrecoverable one goes first.
+      `recv` has a termination handler for the first time. **Ctrl-C had to
+      become a key as well as a signal**, because raw mode stops the driver
+      turning it into SIGINT.
+- [~] Phase 2 — the screens. Chooser, file browser, options and code entry are
+      done and drive real transfers; the transfer screen itself is phase 3, so
+      the interface currently closes and the transfer prints what it always
+      has. The options screen offers *adding* a custom relay rather than
+      showing a URL field, warns when the relay carrier is chosen without one,
+      and shows a relay already in `DROP_SERVER` as in effect — nothing added
+      means no relay, per [`decisions.md`](decisions.md) entry 16.
+- [ ] Phase 3 — progress routed through the interface, and closing. The
+      receiver has no cancel path today: the sender sends `{"type":"cancel"}`
+      on a stream failure and acts on a `cancelled` status, but nothing in
+      `recv.rs` sends one, so "closes for both sides when cancelled" is
+      currently only true in one direction.
+- [ ] Phase 4 — [`decisions.md`](decisions.md) entry 13's approval prompt as a
+      screen, counter intact, unattended behaviour unchanged.
+- [ ] Phase 5 — help and docs.
+
+Two dependencies are added, ratatui and crossterm, into a manifest that
+justifies every entry it has. Both are pure Rust, which is the standing bar for
+the four prebuilt targets. Release binary went 26,988,848 → 27,482,144 bytes,
+**+493 KB (+1.8%)**, so the crossterm-only fallback is not needed.
 
 ## Not scheduled
 

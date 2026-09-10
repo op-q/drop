@@ -15,4 +15,5 @@ pub mod recv;
 pub mod send;
 pub mod tar;
 pub mod transport;
+pub mod ui;
 pub mod untar;
