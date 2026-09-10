@@ -86,6 +86,7 @@ fn run(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + 
         }
         "send" => {
             let options = parse(&arguments[1..])?;
+
             let path = options
                 .positional
                 .clone()
@@ -103,11 +104,13 @@ fn run(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + 
                     compress,
                     options.path()?,
                     options.status(),
+                    options.rendezvous()?,
                 ),
             ))
         }
         "recv" | "receive" | "get" => {
             let options = parse(&arguments[1..])?;
+
             let code = options
                 .positional
                 .clone()
@@ -119,6 +122,7 @@ fn run(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + 
                     origin: options.origin(),
                     path: options.path()?,
                     status: options.status(),
+                    rendezvous: options.rendezvous()?,
                     out_dir: options
                         .out
                         .clone()
@@ -178,6 +182,18 @@ impl Options {
             .unwrap_or_else(|| "auto".to_string());
 
         direct::Path::parse(configured.trim()).map_err(Into::into)
+    }
+
+    /// Which rendezvous infrastructure to use, from the environment only.
+    ///
+    /// No flag, unlike `--server`. That one is per transfer — a user may
+    /// reasonably send one file through a different relay — while rendezvous
+    /// infrastructure is a property of the network the machine is on, set once
+    /// in a profile or a unit file and never changed between two transfers. A
+    /// flag for it would charge every reader of `--help` for something almost
+    /// nobody sets and nobody sets twice.
+    fn rendezvous(&self) -> Result<direct::Rendezvous, Box<dyn std::error::Error + Send + Sync>> {
+        direct::Rendezvous::from_env().map_err(Into::into)
     }
 
     /// Whether to add the machine-readable line.

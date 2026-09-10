@@ -1,0 +1,35 @@
+# Deliberately its own workspace rather than a member of the repository's.
+#
+# `cargo test --workspace --all-targets` is the command AGENTS.md tells every
+# agent to run, and nothing here belongs in it: this is lab infrastructure that
+# takes minutes to build, ships to nobody, and has no tests of its own. An empty
+# `[workspace]` table detaches it, so the parent workspace neither builds it nor
+# resolves its dependencies. It is built on purpose, by the lab, or not at all.
+[workspace]
+
+[package]
+name = "netlab-rendezvous"
+version = "0.1.0"
+edition = "2024"
+description = "Runs an iroh relay and a mainline DHT inside the network lab, so the direct path has somewhere hermetic to meet"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "netlab-rendezvous"
+path = "src/main.rs"
+
+[dependencies]
+# The relay half. `server` is what turns the client crate into one that can be
+# run; it is a large feature and that cost is paid once, outside the workspace.
+iroh-relay = { version = "1.0.3", features = ["server"] }
+# A self-signed certificate for the QUIC address-discovery port. Versions match
+# what `iroh-relay` already resolves, so nothing new enters the tree — these are
+# direct dependencies only because the certificate has to name the lab's own
+# address, which `iroh-relay`'s own test helper cannot do.
+rcgen = "0.14"
+rustls = { version = "0.23.33", default-features = false, features = ["ring", "std"] }
+# The DHT half. `Testnet` builds server-mode nodes that bootstrap off each
+# other, which is a real mainline network with none of the public one in it.
+mainline = "8.0.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }

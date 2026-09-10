@@ -72,6 +72,9 @@ pub struct SendOptions {
     /// Print [`crate::direct::status_line`] beside the prose, for a caller
     /// that is a program rather than a person.
     pub status: bool,
+    /// Which rendezvous infrastructure the direct path uses. Default is n0's
+    /// relays and the public DHT; see [`crate::direct::Rendezvous`].
+    pub rendezvous: crate::direct::Rendezvous,
     /// Called once with the session code, as soon as the relay issues it.
     ///
     /// The code is what the other terminal needs, so it is handed to the caller
@@ -88,12 +91,14 @@ impl SendOptions {
         compress: Option<u32>,
         path: crate::direct::Path,
         status: bool,
+        rendezvous: crate::direct::Rendezvous,
     ) -> Self {
         Self {
             origin,
             compress,
             path,
             status,
+            rendezvous,
             on_code: Box::new(|code| println!("{code}")),
         }
     }
@@ -108,6 +113,7 @@ pub async fn run(
     // send would leave the user's bytes behind in the temporary directory.
     tokio::spawn(async {
         payload::wait_for_termination().await;
+
         payload::remove_spool_files();
         std::process::exit(130);
     });
@@ -175,12 +181,12 @@ async fn try_direct(
 ) -> Result<Result<(), Box<dyn Error + Send + Sync>>, Box<SetupFailed>> {
     eprintln!("Looking for a peer-to-peer path...");
 
-    let directory = match direct::Directory::new() {
+    let directory = match options.rendezvous.directory() {
         Ok(directory) => directory,
         Err(error) => return Err(SetupFailed::new(error, payload)),
     };
 
-    let published = match direct::publish_sender(&directory).await {
+    let published = match direct::publish_sender(&directory, &options.rendezvous).await {
         Ok(published) => published,
         Err(error) => return Err(SetupFailed::new(error, payload)),
     };

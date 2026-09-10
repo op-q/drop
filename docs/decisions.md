@@ -473,3 +473,78 @@ through, so the filter needs a test that fails if a private range ever reaches a
 record. `security.md` states the residual disclosure — a public IP under a
 guessable key — as a known and accepted cost, and states the LAN case as
 deliberately given up rather than overlooked.
+
+## 15. Rendezvous infrastructure can be pointed somewhere else
+
+**Decision.** Two environment variables let a deployment use its own rendezvous
+infrastructure instead of the public defaults, and nothing else about the direct
+path changes:
+
+```text
+DROP_RENDEZVOUS_RELAY      http://relay.example.internal:3340
+DROP_RENDEZVOUS_BOOTSTRAP  10.0.0.9:6881,10.0.0.10:6881
+```
+
+Unset, `drop` uses n0's relays and the mainline DHT's public routers, as it
+always has. A malformed value is an error rather than a silent return to the
+default.
+
+**Why.** Entry 8 lets a self-hoster run their own relay; `--server` is how. But
+rendezvous was compiled in, so the direct path reached n0 and the public DHT or
+it did not happen. Inside an air-gapped or egress-filtered network — the exact
+kind of place that self-hosts — `--transport p2p` could only fail and `auto`
+could only fall back. That is a shipped feature with no way to work in a
+deployment it otherwise suits.
+
+The immediate prompt was a test: the network lab cannot reach the public
+internet, which is
+[open question 1](plans/network-lab-plan-2026-08-31.md#open-question-1--how-the-direct-path-becomes-testable)
+of its plan. That is recorded honestly rather than dressed up, because the lab's
+own constraints forbid adding configuration for a test's convenience. What makes
+this a feature and not that is the deployment gap above, which exists whether or
+not anybody ever writes the test — and which a test could not have been a
+sufficient reason to close.
+
+**What it costs.** An operator who names a hostile relay gives it connection
+metadata for every direct transfer that uses it: which endpoint ids talk, when,
+and their observed addresses. It sees no file bytes, no filenames and no code —
+those are sealed, and `--transport p2p` does not weaken the envelope. That is
+the exposure n0's relays already have, moved to a host somebody chose.
+
+A hostile bootstrap node can refuse to store a record or serve a stale one. The
+result is a failed rendezvous and a fallback to the relay. It cannot forge a
+record that leads a receiver to trust the wrong peer, because a record is not
+evidence of who published it — the key is derived from a public nameplate, and
+authentication is SPAKE2's job alone (entry 7).
+
+So the failure modes are degraded privacy and failed setup, never a transfer to
+the wrong party, and that is what makes an environment variable an acceptable
+interface. The sharper risk is a **typo**: an operator who meant to keep
+rendezvous inside their network and silently got the public DHT has lost exactly
+what they configured. Hence the refusal to default on a malformed value — and
+the scheme check, because `RelayUrl::from_str` is `Url::from_str` and accepts
+`relay.example:3340` as a URL whose scheme is `relay.example`.
+
+**Why not the alternatives.** Giving the lab real internet access was rejected
+outright: a record published from a developer's machine carries that machine's
+public address, which this repository forbids putting in a report, and a DHT
+probe already discloses it before any record exists. Shipping the lab without
+the direct-path topologies was the other option, and it was declined — it leaves
+the feature's central premise as unverified as it was, with the plan naming why
+and nobody fixing it.
+
+A pkarr HTTP relay would be a third way to move the record store, and is
+deliberately not added: pkarr's relay client is excluded by
+`default-features = false`, which `cli/Cargo.toml` notes is the only thing
+pulling in `reqwest`. Re-admitting it to a binary that ships prebuilt for four
+targets is a dependency decision of its own, and the DHT bootstrap list covers
+the same ground without it.
+
+**Consequences.** Nothing here relaxes entry 14. A self-hosted relay works
+*with* that filter rather than around it, because a relay URL is publishable
+unconditionally while every IP is still checked — so an endpoint whose every
+address is private still produces a usable record, and still publishes none of
+them. `security.md` states what an operator takes on. The network lab's
+`netlab/rendezvous/` is the first consumer, and
+[`plans/self-hosted-rendezvous-plan-2026-09-10.md`](plans/self-hosted-rendezvous-plan-2026-09-10.md)
+carries the detail.

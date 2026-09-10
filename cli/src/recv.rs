@@ -94,6 +94,9 @@ pub struct ReceiveOptions {
     /// Print [`crate::direct::status_line`] beside the prose, for a caller
     /// that is a program rather than a person.
     pub status: bool,
+    /// Which rendezvous infrastructure the direct path uses. Default is n0's
+    /// relays and the public DHT; see [`crate::direct::Rendezvous`].
+    pub rendezvous: crate::direct::Rendezvous,
     pub out_dir: PathBuf,
     pub extract: bool,
     pub force: bool,
@@ -165,9 +168,10 @@ async fn try_direct(
 ) -> Result<Option<Result<(), Box<dyn Error + Send + Sync>>>, Box<dyn Error + Send + Sync>> {
     eprintln!("Looking for the sender...");
 
-    let directory = direct::Directory::new()?;
+    let directory = options.rendezvous.directory()?;
 
-    let Some(mut dialled) = direct::dial_sender(&directory, code).await? else {
+    let Some(mut dialled) = direct::dial_sender(&directory, code, &options.rendezvous).await?
+    else {
         return Ok(None);
     };
 

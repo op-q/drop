@@ -75,11 +75,19 @@ netlab/
   runner.py        spawns the real binaries and reads what came out
   conftest.py      builds the binaries; gets a namespace or skips
   test_transfer.py the tests
+  rendezvous/      a cargo project: an iroh relay and a small DHT, for the
+                   direct-path topologies to meet through
 ```
+
+`rendezvous/` is deliberately **not** a member of the repository's cargo
+workspace. `cargo test --workspace --all-targets` is the command every
+contributor runs, and a lab dependency that takes minutes to build has no
+business being reachable by it. It is built by its own fixture, only when a test
+that needs it runs.
 
 ## The network
 
-Four namespaces. All addressing is inside `10.0.0.0/8`, which is both private
+Two shapes. All addressing is inside `10.0.0.0/8`, which is both private
 and — not coincidentally — a range `rendezvous::publishable` refuses to put in
 a published record, so nothing here can be mistaken for an address Drop would
 disclose.
@@ -100,6 +108,28 @@ The relay gets its own namespace rather than sharing the router's. A Drop
 server inside the router would sit *inside* the NAT boundary under test, and it
 would make "no relay in the path" impossible to state honestly.
 
+The direct-path topologies need a different shape, because hole punching is a
+property of what happens when *both* peers are translated:
+
+```text
+  ┌────────┐      ┌───────┐ 10.50     ┌──────┐ 10.40  ┌────────────┐
+  │ sender │──────│ nat-a │───────────│ core │────────│ rendezvous │
+  │10.10..2│ 10.10│       │           │      │        │  10.40.0.2 │
+  └────────┘      └───────┘           └──┬───┘        └────────────┘
+  ┌────────┐      ┌───────┐ 10.60         │
+  │receiver│──────│ nat-b │───────────────┘
+  │10.20..2│ 10.20│       │
+  └────────┘      └───────┘
+```
+
+Two NAT routers, a core that translates nothing, and **the rendezvous host on
+its own point-to-point link**. That last detail is load-bearing rather than
+tidy: a punched path runs `nat-a → core → nat-b` and never crosses the
+rendezvous link, so the byte counters on that link say whether the relay carried
+the payload or only introduced the peers. On a shared public segment the
+punched traffic would cross the same wire and the measurement would be
+meaningless. `rendezvous` runs `netlab-rendezvous`, never `api`.
+
 ## Topologies
 
 | Topology | State | What it shows |
@@ -108,13 +138,40 @@ would make "no relay in the path" impossible to state honestly.
 | `udp_blocked` | **runs** | the fallback fires, completes, and reports itself |
 | `high_latency` | **runs** | throughput is bounded by `window / RTT` and halves as the RTT doubles |
 | `lossy` | **runs** | 1% a hop arrives byte-identical and terminates |
-| Full-cone NAT | **blocked** | hole punching succeeds |
-| Symmetric NAT | **blocked** | hole punching fails and the fallback is clean |
-| Plain LAN, no relay | **blocked** | a transfer with no Drop process anywhere |
+| `plain_lan` | **runs** | a transfer completes with no Drop process running anywhere |
+| `full_cone_nat` | **runs** | a direct path is established through a port-preserving NAT |
+| `symmetric_nat` | **runs** | the punch fails, the connection survives the relay, the file arrives |
 
-The three blocked rows need the direct path, which cannot run in a hermetic lab
-as the code stands — see below. It is a decision about production surface, not
-missing effort, and it is open question 1 in the plan.
+The last three became possible when rendezvous became configurable —
+[`decisions.md`](../docs/decisions.md) entry 15 — so the lab can run its own
+iroh relay and DHT instead of reaching the public ones it has no route to.
+
+### How a hole punch is detected, and why not from `--status`
+
+`drop --status` cannot answer it. `path=p2p` means "no Drop server was
+involved", and that is true whether iroh punched through the NAT or carried the
+same QUIC connection over its own relay — `cli/src/direct.rs` states the rule
+outright: *a failed hole punch is not a failed connection*. Asserting
+`path=p2p` for the full-cone row would therefore have tested nothing about
+traversal, and the symmetric row's originally planned assertion
+(`fallback=rendezvous`) does not happen at all, because rendezvous succeeds and
+the Drop relay is never consulted.
+
+So the punch is measured on the wire, and the NAT's own behaviour is measured
+before the transfer:
+
+- **Mapping**, by `observed_source_ports`: one socket sends to two destinations
+  and the far end reports the source ports it saw. Equal means
+  endpoint-independent and punchable; different means symmetric. Inferring this
+  from the `iptables` rule instead would be unfalsifiable — a symmetric
+  topology that is secretly full-cone still passes a test asserting the punch
+  failed, because any failure satisfies it.
+- **The path**, by `interface_bytes` on the rendezvous link. Kilobytes mean
+  signalling; megabytes mean the relay was the path.
+
+The two NAT topologies differ by exactly one `iptables` flag and produce
+opposite readings on the same counter, which is a comparison rather than two
+unrelated green ticks.
 
 ## Privilege
 
@@ -127,11 +184,27 @@ So there are three cases and the lab distinguishes them:
 
 1. the capability is already held — used directly;
 2. a user namespace can be obtained — the pytest session re-executes itself
-   inside `unshare -Urnm` and carries on, which is the ordinary case;
-3. neither — every test is **skipped**, with a message saying which was tried.
+   inside `unshare -U -r -n -m` and carries on, which is the ordinary case;
+3. neither — every test is **skipped**, with a message saying what was tried,
+   what it said, and which kernel knob is refusing.
 
-Case 3 is real: some kernels set `kernel.unprivileged_userns_clone=0`, and some
-container runtimes block the syscall.
+Case 3 is common rather than exotic, and telling 2 from 3 is done by *attempting*
+a namespace rather than by reading the sysctls that are supposed to predict one.
+That matters because the re-execution is an `execvp`: a wrong "yes" replaces the
+pytest process, and the run ends with `unshare`'s one-line complaint instead of a
+test report.
+
+**On Ubuntu 24.04 and later the lab skips by default.**
+`kernel.apparmor_restrict_unprivileged_userns` is 1 out of the box and refuses
+the `uid_map` write, while `unprivileged_userns_clone` and
+`max_user_namespaces` both read permissive. To run the lab there, either:
+
+```bash
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0   # revert with =1
+sudo -E python -m pytest                                        # or just be root
+```
+
+Neither is persistent, and neither is required — skipping is a correct outcome.
 
 ## What this lab does not prove
 
@@ -139,23 +212,40 @@ Read this before quoting a result from it. In the spirit of the same section in
 the peer-to-peer plan, and for the same reason: a richer environment makes it
 easier, not harder, to believe a test proved something it did not.
 
-- **The UDP block is not what causes the fallback.** This is the sharpest one,
-  and it is not a defect that can be fixed by trying harder. The lab has no
-  route to the internet, so the direct path cannot be set up whether or not the
-  router forwards UDP — removing the `iptables` rule leaves
-  `udp_blocked` passing. What that topology actually shows is that the fallback
-  fires, the transfer completes across a routed network, and the carrier is
-  reported. The rule is there so the network matches the shape being described,
-  not because any assertion can attribute anything to it. A test that could
-  attribute it needs the direct path to be able to succeed, which is the same
-  blocker as the three rows above.
+- **The UDP block is not what causes the fallback.** The `udp_blocked` topology
+  runs no rendezvous host, so the direct path cannot be set up whether or not
+  the router forwards UDP — removing the `iptables` rule leaves that test
+  passing. What it shows is that the fallback fires, the transfer completes
+  across a routed network, and the carrier is reported. The rule is there so the
+  network matches the shape being described, not because any assertion can
+  attribute anything to it.
+
+  This was once believed unfixable, and is no longer: a rendezvous host makes
+  the direct path able to *succeed*, which is what attributing a failure to a
+  cause requires. Giving `udp_blocked` one would turn it into a real
+  attribution test. Not done yet — it is listed under the plan's Phase 5, where
+  negative controls get recorded.
 - **A netns NAT is not carrier-grade NAT.** `iptables` MASQUERADE over
   `nf_conntrack` models a home router. It has neither the mapping timeouts, the
   port exhaustion, nor the behaviour of a real appliance, and no result here
   transfers to one.
-- **This is not the mainline DHT.** Nothing in this lab touches it. Rendezvous
-  timing, churn, and hostile participants are all absent.
-- **This is not n0's relay infrastructure**, its regions, or its capacity.
+- **This is not the mainline DHT.** The direct-path topologies run a three-node
+  `mainline` testnet that knows only itself. It answers the same queries over the
+  same wire protocol and has none of the real network's size, churn, latency or
+  hostile participants. A rendezvous timing measured here says nothing about
+  rendezvous timing in the field.
+- **This is not n0's relay infrastructure**, its regions, or its capacity. The
+  lab's relay is the real `iroh-relay` server, serving plain HTTP on one host.
+- **The lab's address discovery runs on a self-signed certificate.** QUIC
+  address discovery needs TLS and there is no CA that will certify a namespace
+  address, so the helper issues its own naming the bind address. That works
+  because iroh does not verify relays against a public root — it authenticates
+  peers by endpoint id — but it is not the certificate path a production relay
+  uses, and nothing here exercises that path.
+- **A punch measured here is a punch against this model.** Full-cone means
+  "port-preserving `MASQUERADE` over `nf_conntrack`", and symmetric means
+  "`--random-fully`". Both are measured rather than assumed, and neither is an
+  appliance.
 - **`netem` is not a real network.** It produces uniform delay and independent
   uniform loss. Real links produce bursts, reordering, bufferbloat and
   asymmetry; surviving 1% independent loss is not surviving 1% bursty loss.

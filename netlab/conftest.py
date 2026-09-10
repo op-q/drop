@@ -20,6 +20,13 @@ reported rather than collapsed into one skip:
    container runtimes block the syscall. Skip, saying which of the two was
    tried and what it said.
 
+Telling case 2 from case 3 is done by *attempting* a namespace, not by reading
+the sysctls that are supposed to predict one — see
+`netns.user_namespaces_available`. The re-execution below is an `execvp`, so a
+wrong answer here cannot be recovered from: there is no process left to skip
+with, and the whole run exits with `unshare`'s one-line complaint instead of a
+test report.
+
 The re-execution happens in `pytest_configure`, before collection, and guards
 itself with an environment variable so a failure to gain the capability cannot
 become a fork bomb. It has to suspend pytest's global capture first: by that
@@ -72,7 +79,7 @@ def _prepare(config: pytest.Config) -> str | None:
         return f"no CAP_NET_ADMIN and no unprivileged user namespaces ({why})"
 
     os.environ[REENTRY] = "1"
-    argv = ["unshare", "-Urnm", sys.executable, "-m", "pytest", *sys.argv[1:]]
+    argv = ["unshare", *netns.USERNS_FLAGS, sys.executable, "-m", "pytest", *sys.argv[1:]]
 
     # Hand the real terminal back before the process is replaced. Without this
     # the re-executed session writes into pytest's capture buffers, which die
@@ -130,6 +137,18 @@ def binaries() -> runner.Binaries:
     which binary saw it.
     """
     return runner.build("release")
+
+
+@pytest.fixture(scope="session")
+def rendezvous_binary():
+    """The lab's own iroh relay and DHT, built only if something asks for it.
+
+    A separate fixture from `binaries` rather than part of it, because it is a
+    large build — `iroh-relay`'s `server` feature brings hyper, rustls and an
+    ACME client — and the relay lanes have no use for it. Requesting it from the
+    direct-path tests means a run of the latency lane alone never pays.
+    """
+    return runner.build_rendezvous()
 
 
 @pytest.fixture

@@ -1,8 +1,8 @@
 # Network lab plan
 
-Status: **in progress** — phases 0 to 3 done, 4 blocked, 5 outstanding
+Status: **in progress** — phases 0 to 4 done, 5 outstanding
 Created: **2026-08-31**
-Last updated: **2026-09-01**
+Last updated: **2026-09-10**
 
 ## Goal
 
@@ -167,6 +167,13 @@ inside a test directory. It is written up under
 three candidate answers and a recommendation, and Phase 4 does not start until
 it is answered.
 
+**Answered 2026-09-10 as option B**, so the second half of this finding no
+longer holds: the CLI can be pointed at rendezvous infrastructure other than
+the public default, and the lab runs its own. The finding is left as written
+because the *reason* is unchanged — an isolated namespace still has no public
+DHT and no n0 relay, and entry 14's filter still withholds every address a lab
+is entitled to use. What changed is that there is now somewhere else to point.
+
 **The consequence for sequencing:** the relay topologies come first. They are
 worth having on their own, they exercise the whole namespace and measurement
 apparatus, and they prove the plumbing before the plumbing is asked to carry
@@ -234,14 +241,18 @@ relay namespace is created only for topologies that use it, so the "no relay
 process running" row is literally true rather than a relay that was merely
 unused.
 
-| # | Topology | Path exercised | Proves | Blocked on |
+| # | Topology | Path exercised | Proves | State |
 | --- | --- | --- | --- | --- |
-| 1 | Plain LAN, no relay namespace at all | direct | a transfer completes with no Drop process anywhere | open question 1 |
-| 2 | Full-cone NAT both ends | direct | hole punching succeeds | open question 1 |
-| 3 | Symmetric NAT both ends | direct → relay | hole punching fails and the fallback is clean | open question 1 |
-| 4 | UDP dropped at the router | relay | falls back, completes, and *says* it fell back | nothing |
-| 5 | RTT injected, several values | relay | throughput tracks `window / RTT` | nothing |
-| 6 | 1% loss, both directions | relay | no corruption, no indefinite hang | nothing |
+| 1 | Plain LAN, no `api` process anywhere | direct | a transfer completes with no Drop process running | done, and see finding D |
+| 2 | Full-cone NAT both ends | direct | hole punching succeeds, measured on the wire | done, and see finding C |
+| 3 | Symmetric NAT both ends | direct, over the iroh relay | the punch fails, the connection survives, the file arrives | done, and see finding C |
+| 4 | UDP dropped at the router | relay | falls back, completes, and *says* it fell back | done |
+| 5 | RTT injected, several values | relay | throughput tracks `window / RTT` | done |
+| 6 | 1% loss, both directions | relay | no corruption, no indefinite hang | done |
+
+Rows 1 to 3 share a shape of their own — two NAT routers, a non-translating
+core, and the rendezvous host on an isolated link. See finding E under Phase 4;
+the diagram above is the relay topologies'.
 
 Rows 4, 5 and 6 correspond to lanes 5, 4 and 6 of
 [`../validation/transfer-shakeout-template.md`](../validation/transfer-shakeout-template.md)
@@ -576,23 +587,169 @@ clearest evidence available that the impairment is real and load-bearing.
 
 ### Phase 4 — The direct path
 
-**Does not start until [open question 1](#open-question-1--how-the-direct-path-becomes-testable)
-is answered.** Written here so the shape is visible, with checkboxes that stay
-unticked and honest.
+Unblocked by [open question 1](#open-question-1--how-the-direct-path-becomes-testable)
+being answered B. **Two of the four items below are not what this plan
+originally asked for**, and the findings say why in detail rather than quietly
+restating the goal.
 
-- [ ] Whatever hermetic rendezvous the answer requires.
-- [ ] Topology 1 — plain LAN, no relay namespace, no `api` process anywhere.
-      The strongest demonstration the peer-to-peer plan asks for, and the one
-      its Validation section lists first.
-- [ ] Topology 2 — full-cone NAT at both ends: `MASQUERADE` with the
-      conntrack behaviour that lets an unrelated source reach an existing
-      mapping. Assert `path=p2p`.
-- [ ] Topology 3 — symmetric NAT at both ends: per-destination port mapping, so
-      the mapping the peer learned is not the mapping it can use. Assert the
-      fallback fires, that it is `fallback=rendezvous` or `no-record` rather
-      than a crash, and that the file still arrives.
-- [ ] Assert that topology 1 runs with **no listening Drop process**, checked
-      directly rather than assumed — the run fails if an `api` process exists.
+- [x] Hermetic rendezvous: `netlab/rendezvous/`, an `iroh-relay` server and a
+      three-node `mainline` testnet in one process, pointed at by the two
+      environment variables from the rendezvous plan.
+- [x] Topology 1 — plain LAN, **no `api` process anywhere**, asserted with
+      `pgrep` before and after the transfer. An iroh relay does run; see
+      finding D for why there is no version of this row without one, and why
+      that leaves the claim being tested intact.
+- [x] Topology 2 — full-cone NAT at both ends: port-preserving `MASQUERADE`.
+      The mapping is **measured** before the transfer rather than inferred from
+      the rule, and the punch is measured on the wire rather than read off
+      `--status`. See finding C.
+- [x] Topology 3 — symmetric NAT at both ends: `MASQUERADE --random-fully`, so
+      the external port depends on the destination. Asserts `path=p2p
+      fallback=none` with the payload crossing the rendezvous link — **not**
+      the `fallback=rendezvous` this plan first asked for, which does not
+      happen and would have failed. See finding C.
+- [x] Six namespaces rather than four, and one variable between the three
+      topologies. See finding E.
+
+#### First run, 2026-09-10 — **7 passed, 1 failed**
+
+Written and, until this date, never executed: the lab could not obtain a user
+namespace. It can now, and the first run says topology 2 does not pass.
+
+```
+FAILED netlab/test_transfer.py::test_a_full_cone_nat_is_punched_through
+  sender:   error: a peer failed to complete the handshake: ... authentication failed
+  receiver: error: no peer-to-peer path could be set up, and --transport p2p
+            forbids falling back to the relay: could not reach the sender: timed out
+```
+
+**Open, and deliberately not fixed here.** What is known:
+
+- It is not a flake. Three runs of three, in isolation and in the full suite.
+- It is not the direct path in general. Topology 1 completes with no `api`
+  process anywhere, and topology 3 completes over the rendezvous relay — so
+  binding, publishing, resolving, dialling and the envelope all work.
+- The NAT is shaped as intended: the mapping probe recorded the same source
+  port to two destinations, `37848` and `37848`, which is the endpoint-
+  independent behaviour topology 2 exists to arrange.
+- The rendezvous link carried 0.05 MiB against a 16 MiB payload, so nothing
+  fell back to a relay either. The transfer simply did not happen.
+
+`authentication failed` is a QUIC/TLS peer-authentication failure, which is a
+different thing from a punch that never opened a hole — so the two candidates
+are a punch defeated by `nf_conntrack` in a way the probe does not describe,
+and something about dialling an endpoint whose record was published from
+behind this NAT. The next step is packet capture on both sides of the NAT
+namespace, not another assertion.
+
+Topology 2's checkbox stays `[x]` because the topology and its measurements are
+written and running. What is unproven is the claim it was built to test.
+
+#### Findings
+
+**Finding C — the original assertions for rows 2 and 3 were both wrong, in
+opposite directions, and the lab can measure what they meant instead.**
+
+`cli/src/direct.rs` states the rule this plan's Phase 4 overlooked: "a failed
+hole punch is not a failed connection — iroh carries the same QUIC connection
+over n0's relay when it cannot punch". `send.rs:190` and `recv.rs:174` report
+`Carrier::Direct` the moment rendezvous and connect succeed, and nothing
+consults whether a hole was actually punched. So:
+
+| Row | Asked for | What happens |
+| --- | --- | --- |
+| 2 | assert `path=p2p` | Reported **whether or not** a punch succeeded. Tests nothing about traversal. |
+| 3 | assert `fallback=rendezvous` or `no-record` | Never fires. Rendezvous succeeds, the connection succeeds over the iroh relay, and no Drop relay is consulted — nor is one running. |
+
+This is the plan's own "passes while proving less than it looks like", now for
+the third phase running, after Phase 1's unmeetable gate and Phase 2's
+handshake-as-throughput. Three for three suggests it is the default outcome of
+writing a network test rather than a hazard to watch for.
+
+The fix needs no production surface and is the one thing a namespace lab can do
+that nothing else can: **count bytes on the rendezvous host's link.** A punched
+path leaves it carrying DISCO traffic and DHT queries; a relayed one leaves it
+carrying the payload. Rows 2 and 3 then differ by one `iptables` flag and
+produce opposite readings on the same counter, which is a comparison rather
+than two independent green ticks.
+
+The same discipline is applied one level down. **The NAT's mapping behaviour is
+measured, not assumed**, exactly as the risk list demands: one socket sends to
+two destinations and the far end reports the source ports it saw. Equal means
+endpoint-independent and punchable; different means symmetric. Without this,
+row 3 asserts that a punch failed — which any unrelated failure also produces —
+and a misbuilt NAT passes it.
+
+**Finding D — topology 1 as written is impossible, and the reason is a
+decision working correctly.**
+
+"No relay namespace at all" cannot be built. With no relay, a sender's only
+addresses are the lab's, `publishable` strips every one of them as private
+([`../decisions.md`](../decisions.md) entry 14), and `record_for` fails with
+"no address worth publishing". There is no record to publish and nothing for a
+receiver to resolve.
+
+The three ways past it were each rejected:
+
+- **Relax the filter.** That is the disclosure entry 14 exists to prevent, and
+  a test is the worst possible reason to weaken it.
+- **Address the lab from a range the filter accepts.** Every such range is
+  somebody's real address space. The only unassigned gap in `is_routable_v4` is
+  the deprecated 6to4 block `192.88.99.0/24`, and building the lab on an
+  omission from a security filter means the lab breaks the day the filter is
+  correctly tightened.
+- **Pass the address out of band.** A `--peer <ticket>` option is more
+  user-facing surface than a deployment variable, and it would remove
+  rendezvous from the thing being tested.
+
+So the row runs with an iroh relay in its own namespace, which is what
+production's direct path does with n0's relay — the lab is faithful to the
+shipped shape rather than weaker than it. The claim under test is unchanged and
+is now checked rather than implied: **no Drop-operated server exists**, by
+`pgrep` before and after the transfer. The file's wording says "no Drop
+process", not "no server", because the second was never true of this path in
+production either.
+
+**Finding E — six namespaces, and the shape is load-bearing.**
+
+```text
+  sender ─[10.10]─ nat-a ─[10.50]─┐
+                                  ├─ core ─[10.40]─ rendezvous
+receiver ─[10.20]─ nat-b ─[10.60]─┘
+```
+
+Two NAT routers rather than one, because hole punching is about what happens
+when *both* peers are translated, and a single box masquerading both ways gives
+each end a mapping on one interface that it must reach through another — a
+network nobody deploys. A core router that translates nothing, so a punched
+path is `nat-a → core → nat-b`. And the rendezvous host on **its own
+point-to-point link**, which is what makes finding C's measurement possible: a
+shared public segment would carry punched traffic across the same wire being
+counted, and the counter would be measuring both paths at once.
+
+The three topologies differ by one argument — `nat=None`, `"full-cone"`,
+`"symmetric"` — so their three results are comparable.
+
+**Finding F — the skip path was broken, and on the most ordinary Linux there
+is.**
+
+Not a Phase 4 finding, but found while picking the phase up, and it made every
+earlier phase unrunnable on this machine. `netns.user_namespaces_available`
+read two sysctls and inferred an answer. Both read permissive on Ubuntu 24.04
+and later, where the refusal comes from a third knob neither mentions:
+`kernel.apparmor_restrict_unprivileged_userns`, which is the distribution
+default.
+
+A wrong yes does not degrade to a skip, because `conftest` acts on it with
+`os.execvp`. The pytest process is replaced, the whole run prints
+`unshare: write failed /proc/self/uid_map: Operation not permitted` and exits
+1, and no test report or skip reason survives — the Validation item below
+promising a clean skip was not met by the code that claimed it.
+
+The probe now *attempts* a namespace with the same flags the re-execution will
+use and reports what that said, naming the refusing knob as a hint. Predicting
+a capability you are about to depend on irrecoverably is the bug; the fix is to
+try it while there is still a process left to report.
 
 ### Phase 5 — Reporting and CI
 
@@ -610,6 +767,16 @@ unticked and honest.
       nightly is deleted rather than left failing.
 - [ ] Mirror status into [`../implementation-checklist.md`](../implementation-checklist.md)
       as a new item, in the same change as the behaviour.
+- [ ] **Give `udp_blocked` a rendezvous host, and make Phase 1's gate
+      meetable.** Phase 1 recorded that its stated gate — the test must fail if
+      the `iptables` rule is removed — could not be met, because with no route
+      to the internet the direct path failed either way and nothing could
+      attribute the fallback to the block. Phase 4 removed that blocker: a
+      rendezvous host makes the direct path *able to succeed*, which is exactly
+      what attributing a failure to a cause requires. With UDP forwarded the
+      transfer should report `path=p2p`; with the rule in place it should fall
+      back. That is the last unattributed topology in the lab and it belongs
+      with the negative controls this phase is recording.
 
 ## Risks
 
@@ -677,14 +844,20 @@ twice, in the same spirit as the peer-to-peer plan's own section.
 ## Validation
 
 - [ ] Every topology fails when its defining condition is removed, demonstrated
-      once per topology and recorded in the report.
-- [ ] `cargo test --workspace --all-targets` unaffected by anything in this
-      work, and the Phase 0 commit adds passing Rust tests to it.
-- [ ] `cargo fmt --all -- --check` and
+      once per topology and recorded in the report. **Outstanding for
+      `udp_blocked` only**, which is now possible and is a Phase 5 item; the
+      direct-path rows carry theirs as the mapping probe and the byte counter,
+      and the relay rows carry theirs in
+      `test_the_topology_is_load_bearing`.
+- [x] `cargo test --workspace --all-targets` unaffected by anything in this
+      work, and the Phase 0 commit adds passing Rust tests to it. 171 tests at
+      Phase 4, up from 156 at Phase 0.
+- [x] `cargo fmt --all -- --check` and
       `cargo clippy --workspace --all-targets --all-features -- -D warnings`
       clean after Phase 0.
-- [ ] The lab skips cleanly, with a message naming what it tried, on a machine
-      where no namespace can be obtained.
+- [x] The lab skips cleanly, with a message naming what it tried, on a machine
+      where no namespace can be obtained. **This was not true until Phase 4** —
+      see finding F, which is why it is ticked here rather than at Phase 1.
 - [ ] `scripts/check-secrets.sh` clean.
 - [ ] A full matrix run produces a report under `docs/validation/` containing
       no address outside the documented `10.0.0.0/8` plan and no real path.
@@ -694,10 +867,41 @@ twice, in the same spirit as the peer-to-peer plan's own section.
 
 ## Open questions
 
-### Open question 1 — how the direct path becomes testable
+### Open question 1 — how the direct path becomes testable — **answered 2026-09-10: B**
 
-Finding 2 is the blocker for half the matrix, and the answer is a decision
-about production surface rather than about test code. Three candidates:
+**Answered: option B, and C was declined.** The owner chose to close the
+deployment gap rather than ship around it, so rendezvous became configurable in
+its own right:
+[`self-hosted-rendezvous-plan-2026-09-10.md`](self-hosted-rendezvous-plan-2026-09-10.md)
+carries that work, with `DROP_RENDEZVOUS_RELAY` and
+`DROP_RENDEZVOUS_BOOTSTRAP` as the whole of its interface, and
+[`../decisions.md`](../decisions.md) entry 15 records why it is a deployment
+feature rather than a knob for a test.
+
+The lab runs both halves itself, in one process, in one namespace:
+`netlab/rendezvous/` is a small cargo project — deliberately **not** a
+workspace member — that starts an `iroh-relay` server and a three-node
+`mainline` testnet bound to a lab address and reports where they are listening.
+
+Three things about that answer are worth recording here, because each of them
+contradicts something this section originally said:
+
+1. **Option A's objection is now measured rather than argued.** A DHT probe
+   from the development machine comes back carrying this host's own public
+   address, which is the field the mainline protocol uses to tell a node what
+   it looks like from outside. So "the record would carry the host's real
+   public IP" is not a prediction about what a test run might do; it is what
+   the first packet already discloses.
+2. **Option B needed less production surface than feared and more lab
+   infrastructure.** The CLI side is two values and about forty lines:
+   `RelayMode::custom` and `pkarr::ClientBuilder::bootstrap` were both one call
+   away. The lab side needed a whole new cargo project, because neither piece
+   of infrastructure has a runnable binary — `iroh-relay`'s is behind a
+   `server` feature and `mainline`'s testnet is library-only.
+3. **Topology 1 as this plan described it is impossible**, and the phase below
+   is rewritten rather than ticked as written. See finding D.
+
+The three candidates as they were weighed:
 
 **A. Give the lab real internet.** The router namespace forwards to the host's
 uplink, so the public DHT and n0's relays work as they do in the field.

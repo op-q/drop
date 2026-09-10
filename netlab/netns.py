@@ -25,10 +25,13 @@ while reading `ip addr` output during a failure.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 from dataclasses import dataclass, field
 
 #: Bit position of `CAP_NET_ADMIN` in a capability mask. From
@@ -43,6 +46,22 @@ NETNS_DIR = "/run/netns"
 #: Everything the lab shells out to. Checked once, up front, because a missing
 #: `tc` should be one clear message and not a failure three topologies in.
 REQUIRED_TOOLS = ("ip", "iptables", "tc", "unshare")
+
+#: User, network and mount namespaces, with this user mapped to root inside.
+#: Named once and shared, because `user_namespaces_available` probes with these
+#: and `conftest` re-executes with them — and a probe of flags other than the
+#: ones about to be used is the bug that probe exists to prevent.
+USERNS_FLAGS = ("-U", "-r", "-n", "-m")
+
+#: Knobs that refuse a user namespace, and the value that means refused. Read
+#: only to name a likely cause *after* an attempt has failed. The third is the
+#: one that matters in practice: it is the Ubuntu 24.04 default, and the two
+#: above it both read as permissive on exactly the machines it blocks.
+USERNS_KNOBS = (
+    ("/proc/sys/user/max_user_namespaces", 0),
+    ("/proc/sys/kernel/unprivileged_userns_clone", 0),
+    ("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", 1),
+)
 
 
 class LabError(RuntimeError):
@@ -116,27 +135,59 @@ def missing_tools() -> list[str]:
 
 
 def user_namespaces_available() -> tuple[bool, str]:
-    """Whether this kernel will hand an unprivileged process a user namespace.
+    """Whether this process can get a user namespace — asked by getting one.
 
-    Two knobs disable it and they disagree about which distribution uses which,
-    so both are read and either one is decisive. A kernel with neither file is
-    assumed willing, because the absence of the knob is the older default of
-    allowing it — and the caller finds out for certain when `unshare` runs.
+    By doing rather than by predicting, and the difference is not academic.
+    This used to read two sysctls and infer the answer. On any Ubuntu 24.04 or
+    later machine both of them say yes and the answer is no: AppArmor refuses
+    the `uid_map` write through a third knob that neither sysctl mentions, and
+    that restriction is the distribution default rather than a hardened
+    exception.
+
+    A wrong yes does not degrade to a skip. The caller acts on this by
+    `execvp`-ing `unshare`, so there is no surviving process to report
+    anything: the pytest session is replaced by one that prints
+    `write failed /proc/self/uid_map: Operation not permitted` and exits 1, and
+    a whole run disappears with no test report and no reason. That is the
+    opposite of the clean skip this probe exists to produce.
+
+    So the probe runs the same flags the re-execution will use, on a command
+    that does nothing, and reports what it said. Proxies are read afterwards
+    only to name a likely cause.
     """
-    for path, refuses in (
-        ("/proc/sys/user/max_user_namespaces", lambda value: value == 0),
-        ("/proc/sys/kernel/unprivileged_userns_clone", lambda value: value == 0),
-    ):
+    attempt = run(["unshare", *USERNS_FLAGS, "true"], check=False, timeout=15.0)
+    if attempt.ok:
+        return True, f"`unshare {' '.join(USERNS_FLAGS)}` works"
+
+    # `unshare` prefixes its own complaints with its name, which the quoted
+    # command has already supplied.
+    said = attempt.stderr.strip().removeprefix("unshare: ")
+    return False, (
+        f"`unshare {' '.join(USERNS_FLAGS)}` "
+        f"{said or f'exited {attempt.returncode} silently'}"
+        f"{_refusing_knob()}"
+    )
+
+
+def _refusing_knob() -> str:
+    """Names a knob that is set to refuse, if one is, for the skip message.
+
+    Worth the few lines because `Operation not permitted` alone sends a reader
+    hunting for a container runtime or a seccomp filter, when on a current
+    Ubuntu the cause is one sysctl and so is the remedy. A hint, not a
+    decision: the attempt above has already settled the answer.
+    """
+    for path, refusing in USERNS_KNOBS:
         try:
             with open(path, encoding="ascii") as knob:
                 value = int(knob.read().strip())
         except (OSError, ValueError):
             continue
 
-        if refuses(value):
-            return False, f"{path} is {value}"
+        if value == refusing:
+            return f"; {path} is {value}"
 
-    return True, "the kernel appears willing"
+    return ""
 
 
 def mount_namespace_directory() -> None:
@@ -263,25 +314,60 @@ class Lab:
     def route_default(self, namespace: str, via: str) -> None:
         run(["ip", "route", "add", "default", "via", via], netns=namespace)
 
+    def route(self, namespace: str, subnet: str, via: str, prefix: int = 24) -> None:
+        """Teaches one namespace how to reach a network behind another.
+
+        Used to make a segment reachable *without* translation, which is the
+        difference between a routed LAN and a NAT. Adding one of these to a
+        topology that is meant to be translated would be a hole straight through
+        the NAT under test: a peer advertising its private address would become
+        reachable at it, the punch would succeed by bypassing the translation
+        entirely, and the topology would pass while testing a plain LAN.
+        """
+        run(
+            ["ip", "route", "add", f"{subnet}/{prefix}", "via", via],
+            netns=namespace,
+        )
+
     def forward(self, namespace: str) -> None:
         """Makes a namespace a router."""
         run(["sysctl", "-w", "net.ipv4.ip_forward=1"], netns=namespace)
 
     # -- impairments -----------------------------------------------------
 
-    def masquerade(self, namespace: str, interface: str) -> None:
+    def masquerade(self, namespace: str, interface: str, *, symmetric: bool = False) -> None:
         """Source-NATs everything leaving `interface`.
 
         This is `iptables` plus `nf_conntrack`, which models a home router and
         is not a carrier-grade NAT. See `README.md`.
+
+        `symmetric` is the difference between a NAT a hole can be punched
+        through and one it cannot, and it is one flag:
+
+        - **Without it**, netfilter tries to preserve the source port, so every
+          destination sees the same external port for a given internal socket.
+          That is an endpoint-independent mapping, and it is what makes hole
+          punching possible at all: the mapping a peer learned through the relay
+          is the mapping it can then send to.
+        - **With `--random-fully`**, a fresh external port is drawn for each
+          conntrack entry, and a different destination is a different entry. The
+          mapping the relay observed is therefore not the mapping the peer can
+          use, which is the defining property of a symmetric NAT.
+
+        Neither claim is taken on trust. `observed_source_ports` measures which
+        behaviour a built topology actually has, because the plan's risk list is
+        right that getting this wrong produces a full-cone test wearing a
+        symmetric label — and it would pass, since the fallback fires whenever
+        the direct path fails for any reason at all.
         """
-        run(
-            [
-                "iptables", "-t", "nat", "-A", "POSTROUTING",
-                "-o", interface, "-j", "MASQUERADE",
-            ],
-            netns=namespace,
-        )
+        rule = [
+            "iptables", "-t", "nat", "-A", "POSTROUTING",
+            "-o", interface, "-j", "MASQUERADE",
+        ]
+        if symmetric:
+            rule.append("--random-fully")
+
+        run(rule, netns=namespace)
 
     def drop_udp(self, namespace: str) -> None:
         """Drops forwarded UDP, which is what a UDP-hostile network looks like.
@@ -397,6 +483,158 @@ class Lab:
             check=False,
             timeout=30.0,
         ).ok
+
+    def interface_bytes(self, namespace: str, interface: str) -> int:
+        """Bytes an interface has carried, both directions summed.
+
+        This is how the lab tells a hole punch from a relayed connection, and it
+        is the only way available to it: `drop --status` reports `path=p2p`
+        whenever no *Drop* server was involved, which is true whether iroh
+        punched through the NAT or quietly carried the same QUIC connection over
+        its relay. `cli/src/direct.rs` says so in as many words — "a failed hole
+        punch is not a failed connection".
+
+        So the question "was a hole punched" is not one the transfer can be
+        asked; it is one the *network* answers. A relay link that carried
+        kilobytes saw signalling, and one that carried the whole payload was the
+        path. Counting bytes needs no cooperation from either peer and cannot be
+        satisfied by a status string that means something adjacent.
+
+        Both directions are summed because which one carries the payload depends
+        on which end is which, and the question here is only whether the
+        payload went past at all.
+        """
+        ran = run(["ip", "-s", "-j", "link", "show", "dev", interface], netns=namespace)
+
+        try:
+            stats = json.loads(ran.stdout)[0]["stats64"]
+        except (json.JSONDecodeError, KeyError, IndexError) as error:
+            raise LabError(
+                f"could not read counters for {interface} in {namespace}: {error}\n{ran.stdout}"
+            ) from error
+
+        return int(stats["rx"]["bytes"]) + int(stats["tx"]["bytes"])
+
+    def observed_source_ports(
+        self,
+        sender: str,
+        observer: str,
+        target: str,
+        ports: tuple[int, int],
+    ) -> tuple[int, int]:
+        """What two destinations saw as the source port of one socket.
+
+        The direct measurement of NAT mapping behaviour, and the plan's risk
+        list asks for exactly this before either NAT topology is trusted. The
+        distinction that decides whether hole punching can work is whether a
+        NAT's external port depends on **where the packet is going**:
+
+        ```text
+            same port to both destinations   endpoint-independent — punchable
+            different port to each           endpoint-dependent — symmetric
+        ```
+
+        One socket, one source port, two destinations, and the observer reports
+        what arrived. Nothing here infers the behaviour from the `iptables`
+        rules that were installed, which is the mistake the plan warns about:
+        get the rules wrong and a symmetric topology is a full-cone test that
+        passes, because the fallback fires whenever the direct path fails *for
+        any reason*.
+
+        Both probes leave from the same bound socket, so any difference is the
+        NAT's and not the sender's.
+        """
+        observer_process = subprocess.Popen(
+            ["ip", "netns", "exec", observer, sys.executable, "-c", _OBSERVER, ",".join(
+                str(port) for port in ports
+            )],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+
+        try:
+            if (observer_process.stdout.readline().strip() or None) != "ready":
+                _, stderr = observer_process.communicate(timeout=10)
+                raise LabError(f"the port observer never bound its sockets:\n{stderr}")
+
+            run(
+                [
+                    sys.executable, "-c", _PROBE, target,
+                    ",".join(str(port) for port in ports),
+                ],
+                netns=sender,
+                timeout=30.0,
+            )
+
+            stdout, stderr = observer_process.communicate(timeout=30)
+        finally:
+            if observer_process.poll() is None:
+                os.killpg(os.getpgid(observer_process.pid), signal.SIGKILL)
+                observer_process.wait(timeout=10)
+
+        seen = stdout.strip().splitlines()[-1] if stdout.strip() else ""
+        try:
+            observed = json.loads(seen)
+        except json.JSONDecodeError as error:
+            raise LabError(
+                f"the port observer reported nothing usable: {error}\n"
+                f"stdout: {stdout}\nstderr: {stderr}"
+            ) from error
+
+        missing = [port for port in ports if str(port) not in observed]
+        if missing:
+            raise LabError(
+                f"no probe reached {missing} — the sender could not traverse to {target}, "
+                f"so nothing can be said about the mapping. Observed: {observed}"
+            )
+
+        return tuple(int(observed[str(port)]) for port in ports)
+
+
+#: Binds one UDP socket per port, says `ready`, then reports the source port
+#: each one saw as JSON. Inline rather than a file in the repository because it
+#: is four lines of socket handling with no Drop in it, and a separate script
+#: would be a file nobody finds when reading the method that runs it.
+_OBSERVER = """
+import json, select, socket, sys
+ports = [int(p) for p in sys.argv[1].split(',')]
+socks = {}
+for port in ports:
+    handle = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    handle.bind(('0.0.0.0', port))
+    socks[handle] = port
+print('ready', flush=True)
+seen = {}
+# Selected rather than read in order: the probes are independent datagrams and
+# may arrive in either order, and a blocking read on the wrong one would wait
+# out the deadline with the answer already sitting in the other socket.
+deadline = 15.0
+while len(seen) < len(ports) and deadline > 0:
+    ready, _, _ = select.select(list(socks), [], [], 1.0)
+    if not ready:
+        deadline -= 1.0
+        continue
+    for handle in ready:
+        _, peer = handle.recvfrom(64)
+        seen[socks[handle]] = peer[1]
+print(json.dumps(seen), flush=True)
+"""
+
+#: Sends one datagram to each port from a single socket, so the source port is
+#: identical on both and any difference the observer sees belongs to the NAT.
+_PROBE = """
+import socket, sys, time
+target = sys.argv[1]
+handle = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+handle.bind(('0.0.0.0', 0))
+for port in (int(p) for p in sys.argv[2].split(',')):
+    handle.sendto(b'probe', (target, port))
+    # A beat between them, so the second is a new conntrack entry rather than a
+    # retransmission the kernel might coalesce onto the first.
+    time.sleep(0.2)
+"""
 
 
 def _interface_name(peer: str) -> str:

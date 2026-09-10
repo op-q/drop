@@ -1,5 +1,11 @@
 # Rust and web build state
 /target/
+# The network lab's rendezvous helper is its own cargo project, so its build
+# directory is not under the root one the line above covers. Its `Cargo.lock`
+# *is* committed: it builds a binary rather than a library, and a lab whose
+# dependency versions drift between runs would produce findings about the
+# drift.
+/netlab/rendezvous/target/
 # Built from `crypto-wasm/` by `npm --prefix web run build:wasm`.
 /web/src/wasm/
 /node_modules/

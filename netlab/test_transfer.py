@@ -377,3 +377,241 @@ def test_a_lossy_network_delivers_the_file_intact_and_terminates(
         outcome += ", intact" if intact else ", CORRUPTED"
 
     record_measurement(f"{HARSH_LOSS_PERCENT:g}% loss a hop", f"{outcome} — recorded, not asserted")
+
+
+# ---------------------------------------------------------------------------
+# The direct path.
+#
+# These three are the topologies that were blocked on open question 1 of the
+# plan. What unblocked them is `DROP_RENDEZVOUS_RELAY` and
+# `DROP_RENDEZVOUS_BOOTSTRAP`, which point the direct path at infrastructure a
+# deployment runs itself — see
+# `docs/plans/self-hosted-rendezvous-plan-2026-09-10.md` for why that is a
+# deployment feature rather than a knob added for these tests.
+#
+# All three run `--transport p2p`, which forbids falling back. That is what
+# makes them falsifiable: with `auto`, a rendezvous that quietly failed would
+# still produce a completed transfer, and the assertion would be satisfied by
+# the thing it was written to rule out. With `p2p` a failure is a failure.
+# ---------------------------------------------------------------------------
+
+#: Thresholds as fractions of the payload, not absolute byte counts, and the
+#: gap between them is deliberate.
+#:
+#: A relayed transfer crosses the rendezvous link **twice** — in on one
+#: direction, out on the other — so the summed counter reads about 2x the
+#: payload. A punched one carries DISCO traffic, DHT queries, and whatever went
+#: over the relay in the moments before a direct path was validated. That last
+#: term is why an absolute ceiling in kilobytes would be wrong: on a veth link
+#: a few hundred milliseconds of relaying is megabytes.
+#:
+#: So: below half the payload is a punch, above the whole payload is a relay,
+#: and the factor of two between them is the room this measurement has. A run
+#: landing between them is not a marginal pass to be tuned away — it means the
+#: connection migrated late, and the numbers are recorded so that is visible.
+PUNCHED_CEILING = 0.5
+RELAYED_FLOOR = 1.0
+
+#: Large enough that a payload crossing the rendezvous link is unmistakable
+#: against the signalling that always crosses it.
+DIRECT_PAYLOAD_BYTES = 16 * 1024 * 1024
+
+
+def _link_report(carried: int) -> str:
+    """What the rendezvous link carried, as MiB and as a share of the payload.
+
+    Both, because the ratio is what the assertions use and the absolute figure
+    is what a reader needs to sanity-check it against a topology.
+    """
+    return (
+        f"{carried / 1024 / 1024:.2f} MiB, "
+        f"{carried / DIRECT_PAYLOAD_BYTES:.2f}x the "
+        f"{DIRECT_PAYLOAD_BYTES / 1024 / 1024:.0f} MiB payload"
+    )
+
+
+def _direct_transfer(binaries, rendezvous_binary, net, workspace, size=DIRECT_PAYLOAD_BYTES):
+    """Runs one direct transfer and reports what the rendezvous link carried.
+
+    The byte count is taken across the transfer rather than absolutely, because
+    the link has already carried the helper's own startup chatter by the time a
+    transfer begins.
+    """
+    source = workspace / "payload.bin"
+    destination = workspace / "received"
+    runner.synthetic_payload(source, size)
+
+    with runner.Rendezvous(rendezvous_binary, net) as where:
+        before = net.lab.interface_bytes(net.router, net.rendezvous_interface)
+        result = runner.transfer(
+            binaries, net, source, destination, transport="p2p", rendezvous=where
+        )
+        carried = net.lab.interface_bytes(net.router, net.rendezvous_interface) - before
+
+    return result, carried, source, destination
+
+
+def test_a_plain_lan_transfers_with_no_drop_process_anywhere(
+    lab, binaries, rendezvous_binary, workspace, record_measurement
+):
+    """The peer-to-peer plan's first validation gate, finally runnable.
+
+    Two hosts, a router that translates nothing, and **no Drop server in
+    existence** — checked with `pgrep` rather than inferred from this test not
+    having started one, because "no Drop server was involved" is the strongest
+    claim the lab makes and it should rest on a measurement.
+
+    An iroh relay does run, in its own namespace, and that is not a hedge: the
+    sender has nothing publishable without one. `publishable` strips every
+    private address from a record (`docs/decisions.md` entry 14) and every
+    address here is private, so a record naming the relay is the only record
+    that can exist. Production's direct path uses n0's relay for exactly this,
+    so what runs here is the shipped shape with the third party moved inside the
+    lab. The claim being tested — no *Drop-operated* server — is untouched by it.
+    """
+    net = topologies.plain_lan(lab)
+
+    assert not runner.relay_is_running(), (
+        "an `api` process is running, so this topology cannot claim what it exists to claim"
+    )
+
+    result, carried, source, destination = _direct_transfer(
+        binaries, rendezvous_binary, net, workspace
+    )
+
+    record_measurement(
+        "plain LAN, rendezvous link carried",
+        _link_report(carried),
+    )
+
+    assert result.ok, result.why_it_failed()
+    assert result.sender.carrier == "p2p"
+    assert result.receiver.carrier == "p2p"
+    assert result.sender.fallback == "none"
+    assert result.receiver.fallback == "none"
+
+    arrived = destination / "payload.bin"
+    assert arrived.is_file(), f"nothing arrived: {sorted(destination.iterdir())}"
+    assert runner.sha256(arrived) == runner.sha256(source)
+
+    # Still true after the transfer, not only before it. A relay started
+    # mid-run would be as fatal to the claim as one started early.
+    assert not runner.relay_is_running(), "an `api` process appeared during the transfer"
+
+    assert carried < PUNCHED_CEILING * DIRECT_PAYLOAD_BYTES, (
+        f"the rendezvous link carried {_link_report(carried)}, which is the payload rather "
+        "than signalling — the peers met through the relay instead of over the LAN"
+    )
+
+
+def test_a_full_cone_nat_is_punched_through(
+    lab, binaries, rendezvous_binary, workspace, record_measurement
+):
+    """Both peers behind a port-preserving NAT still reach each other directly.
+
+    **The mapping is measured before the transfer, not assumed from the
+    `iptables` rule.** The plan's risk list is explicit that getting this wrong
+    produces a test that passes for the wrong reason, and the reason it would
+    pass is that every one of these assertions is also satisfied by a NAT that
+    behaves differently than intended. So the first thing this test does is send
+    one socket's datagrams to two destinations and compare the source ports the
+    far end saw.
+
+    **The punch itself is measured on the wire**, because `drop --status` cannot
+    report it: `path=p2p` means "no Drop server", and iroh carries the same QUIC
+    connection over its own relay when a punch fails. `cli/src/direct.rs` says
+    so directly. Only the byte counters distinguish the two.
+    """
+    net = topologies.full_cone_nat(lab)
+
+    first, second = topologies.measure_nat_mapping(net)
+    record_measurement(
+        "full-cone NAT, source port seen by two destinations", f"{first} and {second}"
+    )
+    assert first == second, (
+        f"two destinations saw ports {first} and {second}, so this NAT's mapping depends on "
+        "the destination. That is a symmetric NAT, and this topology claims to be full cone"
+    )
+
+    result, carried, source, destination = _direct_transfer(
+        binaries, rendezvous_binary, net, workspace
+    )
+
+    record_measurement(
+        "full-cone NAT, rendezvous link carried",
+        _link_report(carried),
+    )
+
+    assert result.ok, result.why_it_failed()
+    assert result.sender.carrier == "p2p"
+    assert result.receiver.carrier == "p2p"
+
+    arrived = destination / "payload.bin"
+    assert arrived.is_file(), f"nothing arrived: {sorted(destination.iterdir())}"
+    assert runner.sha256(arrived) == runner.sha256(source)
+
+    assert carried < PUNCHED_CEILING * DIRECT_PAYLOAD_BYTES, (
+        f"the rendezvous link carried {_link_report(carried)}, so the connection stayed on "
+        "the relay. The NAT was measured punchable, so this is iroh not punching it"
+    )
+
+
+def test_a_symmetric_nat_defeats_the_punch_and_the_transfer_survives(
+    lab, binaries, rendezvous_binary, workspace, record_measurement
+):
+    """A punch that cannot succeed, and a transfer that completes anyway.
+
+    **The plan asked for the wrong assertion here**, and it is worth stating
+    because the wrong one fails and would invite somebody to weaken something.
+    It said to expect `fallback=rendezvous` or `no-record` — the Drop relay
+    taking over. That is not what happens. Rendezvous succeeds: the DHT is
+    reachable and the record names a relay. The QUIC connection succeeds too,
+    carried over the iroh relay. The Drop relay is never consulted, and there is
+    no `api` process here for it to be consulted at all.
+
+    So what is asserted is the shape that actually occurs: `path=p2p
+    fallback=none`, the file intact, and the **payload visibly crossing the
+    rendezvous link** — which is the evidence that the punch failed, and the
+    exact inverse of the full-cone row. Two topologies differing in one
+    `iptables` flag produce opposite measurements on the same counter.
+    """
+    net = topologies.symmetric_nat(lab)
+
+    first, second = topologies.measure_nat_mapping(net)
+    record_measurement(
+        "symmetric NAT, source port seen by two destinations", f"{first} and {second}"
+    )
+    assert first != second, (
+        f"both destinations saw port {first}, so this NAT's mapping is endpoint-independent "
+        "and a punch through it can succeed. This topology is a full-cone one wearing a "
+        "symmetric label, and every assertion below would pass for the wrong reason"
+    )
+
+    result, carried, source, destination = _direct_transfer(
+        binaries, rendezvous_binary, net, workspace
+    )
+
+    record_measurement(
+        "symmetric NAT, rendezvous link carried",
+        _link_report(carried),
+    )
+
+    assert result.ok, result.why_it_failed()
+
+    # No Drop relay was consulted, because a failed punch is not a failed
+    # connection and there is no `api` process in this topology at all.
+    assert result.sender.carrier == "p2p"
+    assert result.receiver.carrier == "p2p"
+    assert result.sender.fallback == "none"
+    assert result.receiver.fallback == "none"
+    assert not runner.relay_is_running()
+
+    arrived = destination / "payload.bin"
+    assert arrived.is_file(), f"nothing arrived: {sorted(destination.iterdir())}"
+    assert runner.sha256(arrived) == runner.sha256(source)
+
+    assert carried > RELAYED_FLOOR * DIRECT_PAYLOAD_BYTES, (
+        f"the rendezvous link carried only {_link_report(carried)}, so the payload went "
+        "directly. A punch through a measured-symmetric NAT should not have succeeded, and "
+        "if it did then the mapping probe and the transfer disagree about this network"
+    )

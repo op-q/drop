@@ -46,6 +46,22 @@ RELAY_SUBNET = "10.30.0.0"
 RELAY_ADDRESS = "10.30.0.2"
 RELAY_PORT = 8080
 
+#: The rendezvous host's own link, and the two NAT routers' public links. All
+#: three hang off a core router that does no translation, which is what keeps
+#: the rendezvous link carrying rendezvous traffic and nothing else — see
+#: `Net.rendezvous_interface`.
+RENDEZVOUS_SUBNET = "10.40.0.0"
+SENDER_PUBLIC_SUBNET = "10.50.0.0"
+RECEIVER_PUBLIC_SUBNET = "10.60.0.0"
+
+RENDEZVOUS_ADDRESS = "10.40.0.2"
+
+#: Ports the NAT-mapping probe aims at. Two ports on one host is enough to tell
+#: an endpoint-independent mapping from an endpoint-dependent one, because a
+#: symmetric NAT keys on the destination *endpoint* and not only its address.
+#: High and unregistered, so nothing in the lab can already be listening there.
+PROBE_PORTS = (41801, 41802)
+
 
 @dataclass
 class Net:
@@ -57,6 +73,10 @@ class Net:
     router: str
     #: `None` when the topology deliberately runs no Drop server at all.
     relay: str | None
+    #: Where `netlab-rendezvous` runs — an iroh relay and a small DHT — for the
+    #: topologies that exercise the direct path. `None` for the relay
+    #: topologies, which need no rendezvous because they never attempt one.
+    rendezvous: str | None
     name: str
     #: What this topology is meant to demonstrate, carried into the report so a
     #: reader does not have to infer it from the name.
@@ -66,6 +86,11 @@ class Net:
     #: to a host, so a topology that shapes the network has to name one, and
     #: deriving the name at the call site would duplicate `netns`'s convention.
     router_interfaces: dict[str, str] = field(default_factory=dict)
+
+    #: The core router's interface facing the rendezvous host, whose byte
+    #: counters say whether the rendezvous relay carried the payload or only
+    #: introduced the peers. `None` when there is no rendezvous host.
+    rendezvous_interface: str | None = None
 
     @property
     def relay_url(self) -> str | None:
@@ -105,6 +130,7 @@ def _base(lab: Lab, *, with_relay: bool) -> Net:
         receiver=receiver,
         router=router,
         relay=relay,
+        rendezvous=None,
         name="base",
         proves="nothing on its own",
         router_interfaces=interfaces,
@@ -194,6 +220,185 @@ def measure_ack_loop(net: Net) -> float:
 
     return net.lab.measure_rtt(net.sender, RELAY_ADDRESS) + net.lab.measure_rtt(
         net.receiver, RELAY_ADDRESS
+    )
+
+
+def _direct_base(lab: Lab, *, nat: str | None) -> Net:
+    """The shape every direct-path topology shares.
+
+    ```text
+      sender ─[10.10]─ nat-a ─[10.50]─┐
+                                      ├─ core ─[10.40]─ rendezvous
+    receiver ─[10.20]─ nat-b ─[10.60]─┘
+    ```
+
+    Six namespaces, and each one is there for a reason the other shapes in this
+    file did not need.
+
+    **Two NAT routers, not one.** Hole punching is a property of what happens
+    when *both* peers are behind a translation, and a single middle box
+    masquerading in both directions does not model it: each end would learn a
+    mapping on one of the router's interfaces and have to reach it through
+    another, which is a network nobody deploys.
+
+    **A core router that translates nothing.** It joins the two public segments
+    and the rendezvous host, so a punched path runs
+    `nat-a → core → nat-b` and never touches the rendezvous link.
+
+    **The rendezvous host on its own point-to-point link.** This is the
+    load-bearing detail, and it is why the rendezvous host is not simply sat on
+    a shared public segment. Its link carries rendezvous traffic *only*, so the
+    byte counters on it answer "did the relay carry the payload?" directly. Put
+    it on a segment the two NATs share and punched traffic would cross the same
+    wire, and the measurement that distinguishes topology 2 from topology 3
+    would be measuring both at once.
+
+    `nat` is `None`, `"full-cone"` or `"symmetric"`, and it is the **only**
+    difference between the three topologies below. That is deliberate: three
+    results are comparable because one variable moved.
+    """
+    sender = lab.add("sender")
+    receiver = lab.add("receiver")
+    nat_a = lab.add("nat-a")
+    nat_b = lab.add("nat-b")
+    core = lab.add("core")
+    rendezvous = lab.add("rendezvous")
+
+    to_sender = lab.connect(nat_a, sender, SENDER_SUBNET)
+    to_receiver = lab.connect(nat_b, receiver, RECEIVER_SUBNET)
+    sender_public = lab.connect(core, nat_a, SENDER_PUBLIC_SUBNET)
+    receiver_public = lab.connect(core, nat_b, RECEIVER_PUBLIC_SUBNET)
+    to_rendezvous = lab.connect(core, rendezvous, RENDEZVOUS_SUBNET)
+
+    lab.route_default(sender, to_sender.left_address)
+    lab.route_default(receiver, to_receiver.left_address)
+    lab.route_default(nat_a, sender_public.left_address)
+    lab.route_default(nat_b, receiver_public.left_address)
+    lab.route_default(rendezvous, to_rendezvous.left_address)
+
+    for router in (nat_a, nat_b, core):
+        lab.forward(router)
+
+    if nat is None:
+        # A plain LAN is one where the two hosts can actually reach each other,
+        # and without these they cannot: the core has no route into either inner
+        # segment, so every packet between the ends dies at it.
+        #
+        # These belong *only* to the untranslated case. Adding them to a NAT
+        # topology would leave each peer reachable at the private address it
+        # advertises, so the punch would succeed by going around the NAT — and
+        # both NAT rows would pass while measuring a routed LAN.
+        lab.route(core, SENDER_SUBNET, via=sender_public.right_address)
+        lab.route(core, RECEIVER_SUBNET, via=receiver_public.right_address)
+    else:
+        symmetric = nat == "symmetric"
+        lab.masquerade(nat_a, sender_public.right_interface, symmetric=symmetric)
+        lab.masquerade(nat_b, receiver_public.right_interface, symmetric=symmetric)
+
+    return Net(
+        lab=lab,
+        sender=sender,
+        receiver=receiver,
+        # The core is the router an impairment would be applied to, and the one
+        # every path crosses.
+        router=core,
+        # No Drop relay namespace at all, which is the point of these three and
+        # is asserted directly rather than left implicit.
+        relay=None,
+        rendezvous=rendezvous,
+        name="direct-base",
+        proves="nothing on its own",
+        router_interfaces={
+            nat_a: sender_public.left_interface,
+            nat_b: receiver_public.left_interface,
+            rendezvous: to_rendezvous.left_interface,
+        },
+        rendezvous_interface=to_rendezvous.left_interface,
+    )
+
+
+def plain_lan(lab: Lab) -> Net:
+    """Two routed hosts, no translation anywhere, and no Drop server.
+
+    The topology the peer-to-peer plan's validation lists first, and the
+    strongest claim this lab can make: a file crosses with **no Drop process in
+    existence**, which `runner.relay_is_running` checks rather than assumes.
+
+    *Not* "no server at all", and the difference is worth stating plainly. An
+    iroh relay runs in the `rendezvous` namespace, because without one the
+    sender has nothing publishable: `rendezvous::publishable` strips every
+    private address from a record — `docs/decisions.md` entry 14 — and a lab
+    address is private by construction, so a record naming the relay URL is the
+    only record that can be built. Production's direct path uses n0's relay for
+    exactly this, so the lab is faithful to it rather than weaker than it. What
+    "peer-to-peer" claims, and what is checked here, is that no *Drop-operated*
+    server is involved.
+    """
+    net = _direct_base(lab, nat=None)
+    net.name = "plain-lan"
+    net.proves = "a transfer completes with no Drop process running anywhere"
+    return net
+
+
+def full_cone_nat(lab: Lab) -> Net:
+    """Both peers behind a port-preserving NAT, which a hole can be punched in.
+
+    `MASQUERADE` without randomisation, so a given internal socket is seen at
+    the same external port by every destination. The mapping a peer learns
+    through the relay is therefore the mapping it can send to, which is the
+    whole mechanism hole punching rests on.
+
+    Whether a punch *happened* is not asked of `drop --status`, which reports
+    `path=p2p` for any connection with no Drop server in it — relayed or not.
+    It is measured on the rendezvous link instead.
+    """
+    net = _direct_base(lab, nat="full-cone")
+    net.name = "full-cone-nat"
+    net.proves = "a direct path is established through a port-preserving NAT"
+    return net
+
+
+def symmetric_nat(lab: Lab) -> Net:
+    """Both peers behind a NAT whose port depends on where the packet is going.
+
+    `--random-fully`, so each conntrack entry draws a fresh external port and
+    the mapping the relay observed is not one the peer can use. Hole punching
+    must fail here.
+
+    **What fails is the punch, and not the transfer**, which is where the
+    original plan for this row was wrong. `cli/src/direct.rs` is explicit that
+    "a failed hole punch is not a failed connection": iroh carries the same QUIC
+    connection over its relay, rendezvous succeeded, and the Drop relay is never
+    consulted. So the expected outcome is `path=p2p fallback=none` with the
+    payload visibly crossing the rendezvous link — not the `fallback=rendezvous`
+    the plan first asked for, which would have failed the test and invited
+    somebody to weaken it.
+    """
+    net = _direct_base(lab, nat="symmetric")
+    net.name = "symmetric-nat"
+    net.proves = "a punch fails, the connection survives over the relay, and the file arrives"
+    return net
+
+
+def measure_nat_mapping(net: Net) -> tuple[int, int]:
+    """What two destinations saw as one socket's source port.
+
+    Equal means endpoint-independent and punchable; different means symmetric.
+    Measured from the sender through whatever NAT the topology installed, with
+    the rendezvous host as the observer because it is the one host both ends can
+    reach in every one of these topologies.
+
+    The plan's risk list asks for this before either NAT row is believed, and
+    the reason is that believing the `iptables` rule instead is unfalsifiable:
+    a symmetric topology that is secretly full-cone still passes, because the
+    thing it asserts — that the punch failed — would be produced just as well by
+    any other failure.
+    """
+    if net.rendezvous is None:
+        raise LabError("a mapping is measured against a host, and this topology has none")
+
+    return net.lab.observed_source_ports(
+        net.sender, net.rendezvous, RENDEZVOUS_ADDRESS, PROBE_PORTS
     )
 
 

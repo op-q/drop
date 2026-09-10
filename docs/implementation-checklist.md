@@ -256,23 +256,81 @@ binaries and inspects what comes out.
       Phase 1 fixed for a different path. Loss is proved present by reading the
       qdisc back rather than inferred from timing: at zero RTT, 1% loss
       completes as fast as no loss at all.
-- [ ] Phase 4 — the direct-path topologies. **Blocked**, and not on effort:
-      the direct path reaches the public internet in three independent places,
-      and one of them cannot be routed around. `rendezvous::publishable`
-      refuses every address a lab may use — RFC 1918, carrier-grade NAT, the
-      benchmarking range, and the documentation ranges — because
-      [`decisions.md`](decisions.md) entry 14 strips private addresses from a
-      published record on purpose. Entry 14 states the consequence itself: two
-      peers on one LAN can no longer find each other through the DHT, and a
-      netns lab is a LAN. The plan's open question 1 has the three candidate
-      answers; it is a decision about production surface, not about test code.
+- [x] Phase 4 — the direct-path topologies. Done 2026-09-10, once **open
+      question 1 was answered** by making rendezvous configurable — a deployment
+      feature in its own right, item 6 below and
+      [`decisions.md`](decisions.md) entry 15. The lab runs an `iroh-relay`
+      server and a three-node `mainline` testnet in one namespace and points
+      `drop` at them. Three topologies: a plain LAN with no `api` process
+      anywhere, asserted by `pgrep` before and after; both peers behind a
+      port-preserving NAT; both behind `--random-fully`.
+      **Two of the plan's own assertions for this phase were wrong and were
+      replaced.** `drop --status` reports `path=p2p` whenever no Drop server was
+      involved, which is true whether iroh punched through the NAT or carried
+      the connection over its relay — so asserting it proved nothing about
+      traversal, and the symmetric row's expected `fallback=rendezvous` never
+      fires at all, because rendezvous succeeds and the Drop relay is never
+      consulted. A hole punch is measured on the wire instead, by counting bytes
+      on the rendezvous host's isolated link, and the NAT's mapping behaviour is
+      measured directly — one socket, two destinations, compare the source ports
+      the far end saw — rather than inferred from the `iptables` rule, because a
+      misbuilt symmetric NAT passes a test asserting the punch failed.
+      Separately: **the lab's skip path was broken on any Ubuntu 24.04 or
+      later**, where `kernel.apparmor_restrict_unprivileged_userns` refuses the
+      namespace while the two sysctls the probe actually read both say yes. A
+      wrong yes was unrecoverable because the caller `execvp`s, so the whole run
+      exited with one line of `unshare` error and no test report. The probe now
+      attempts a namespace instead of predicting one.
+- [ ] **Open: topology 2 fails.** First run 2026-09-10 was 7 passed, 1 failed —
+      `test_a_full_cone_nat_is_punched_through`, reproducing three runs of
+      three. Topologies 1 and 3 pass, the NAT measures as endpoint-independent,
+      and nothing fell back to a relay; the sender reports a QUIC
+      `authentication failed` and the receiver times out. Landed as a known
+      failure with the evidence in the plan. Next step is packet capture, not
+      another assertion.
 - [ ] Phase 5 — dated report under [`validation/`](validation/) and a separate
       CI workflow, nightly and label-triggered, never blocking pull requests
 
 Gate: every topology fails when its defining condition is removed, demonstrated
 once per topology and recorded. A lab that passes either way is measuring
 nothing, which is the failure the peer-to-peer plan's loopback tests already
-document about themselves.
+document about themselves. Outstanding for `udp_blocked` alone, which was
+recorded as unmeetable at Phase 1 and became possible at Phase 4: attributing a
+fallback to a cause needs the direct path to be able to succeed when the cause is
+absent, and now it can.
+
+## 6. Self-hosted rendezvous
+
+Plan: [`self-hosted-rendezvous-plan-2026-09-10.md`](plans/self-hosted-rendezvous-plan-2026-09-10.md)
+Status: **phase 1 done**
+
+`DROP_RENDEZVOUS_RELAY` and `DROP_RENDEZVOUS_BOOTSTRAP` point the direct path at
+an iroh relay and DHT nodes a deployment runs itself, instead of n0's relays and
+the public mainline routers compiled in. Unset, nothing changes.
+
+- [x] Phase 1 — the two values. Done 2026-09-10.
+      [`decisions.md`](decisions.md) entry 15 and a section in
+      [`security.md`](security.md) record what an operator takes on: a relay they
+      name sees connection metadata, a bootstrap node they name can refuse to
+      store a record, and neither can lead a receiver to the wrong peer because a
+      rendezvous record was never evidence of identity. **A malformed value is an
+      error rather than a silent return to the public default**, which is the
+      load-bearing decision here: an operator who meant to keep rendezvous inside
+      their network and quietly got the public DHT has lost exactly what they
+      configured, invisibly. That is also why the relay URL's scheme is checked —
+      `RelayUrl::from_str` is `Url::from_str`, so `relay.example:3340` parses
+      happily into a URL whose scheme is `relay.example`, binds without
+      complaint, and then spends `ONLINE_TIMEOUT` reaching no relay at all.
+- [x] Gate: two `drop` processes complete a direct transfer against a relay and
+      DHT on loopback with nothing public reachable, and the same transfer fails
+      when that infrastructure is stopped. The negative control is the half that
+      matters — this machine can reach the real DHT, so a passing transfer alone
+      would not show which one carried the rendezvous.
+
+Why this is a feature and not a knob added for a test is argued in the plan and
+in entry 15: a self-hoster can already run their own relay, but rendezvous was
+compiled in, so the direct path could not work at all inside an egress-filtered
+network. The network lab above is the first consumer rather than the reason.
 
 ## Not scheduled
 

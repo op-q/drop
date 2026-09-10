@@ -37,6 +37,9 @@ workflows.
 | `RUST_LOG` | application default | tracing filter |
 | `VITE_BACKEND_ORIGIN` | current page origin | backend URL for a separately hosted frontend |
 | `DROP_SERVER` | `https://api.drop.lifbom.com` | relay used by the `drop` CLI |
+| `DROP_TRANSPORT` | `auto` | carrier the `drop` CLI uses: `p2p`, `relay`, or `auto` |
+| `DROP_RENDEZVOUS_RELAY` | n0's public relays | iroh relay the direct path becomes reachable through, as `http://host:port` |
+| `DROP_RENDEZVOUS_BOOTSTRAP` | the public mainline routers | comma-separated `host:port` DHT nodes the direct path publishes to |
 | `DROP_INSTALL_DIR` | `~/.local/bin` | where `install.sh` puts the CLI |
 | `DROP_VERSION` | `latest` | release tag `install.sh` installs |
 | `DROP_RELEASE_BASE` | GitHub releases | base URL `install.sh` downloads from |
@@ -46,6 +49,26 @@ workflows.
 Copy [`../.env.example`](../.env.example) when configuring Docker Compose. The
 Rust application does not automatically load `.env` files; export its
 variables in your shell or deployment environment.
+
+### Self-hosting rendezvous
+
+The two `DROP_RENDEZVOUS_*` variables are for a deployment whose machines cannot
+reach the public internet. `DROP_SERVER` already lets a network run its own Drop
+relay, but the *direct* path reached n0's relays and the mainline DHT or it did
+not happen — so inside an egress-filtered network `--transport p2p` could only
+fail and `auto` could only fall back. Pointing both variables at infrastructure
+you run closes that.
+
+A malformed value is an error rather than a quiet return to the public default,
+which is deliberate: the point of setting them is keeping rendezvous inside your
+network, and a typo that published to the public DHT instead would lose exactly
+that, silently. Give the relay URL its scheme — `relay.example:3340` is a valid
+URL whose *scheme* is `relay.example`, and it is refused for that reason.
+
+What an operator takes on is in [`security.md`](security.md#self-hosted-rendezvous);
+the decision is [`decisions.md`](decisions.md) entry 15. Neither variable relaxes
+the address filter: a record still names a routable address or a relay, never a
+private address of the sender's.
 
 ## Docker deployment
 

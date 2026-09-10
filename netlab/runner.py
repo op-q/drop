@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from netns import LabError, run
-from topologies import RELAY_ADDRESS, RELAY_PORT, Net
+from topologies import RELAY_ADDRESS, RELAY_PORT, RENDEZVOUS_ADDRESS, Net
 
 #: The line `drop --status` prints. Anchored at both ends: a partial match
 #: would accept a longer line that meant something else.
@@ -40,6 +40,24 @@ REPOSITORY = Path(__file__).resolve().parent.parent
 class Binaries:
     drop: Path
     api: Path
+
+
+#: The lab's rendezvous helper, which is its own cargo project rather than a
+#: workspace member. See its `Cargo.toml` for why: it must not be reachable by
+#: `cargo test --workspace --all-targets`.
+RENDEZVOUS_CRATE = Path(__file__).resolve().parent / "rendezvous"
+
+
+@dataclass(frozen=True)
+class RendezvousInfo:
+    """Where the lab's own rendezvous infrastructure is listening.
+
+    Both values are read from the helper's output rather than computed from the
+    addressing plan, because every port involved can be ephemeral.
+    """
+
+    relay: str
+    bootstrap: str
 
 
 def build(profile: str = "debug") -> Binaries:
@@ -73,6 +91,107 @@ def build(profile: str = "debug") -> Binaries:
             raise LabError(f"cargo build reported success but {path} is missing")
 
     return binaries
+
+
+def build_rendezvous(profile: str = "release") -> Path:
+    """Builds the lab's iroh relay and DHT host.
+
+    Separate from `build` and requested by a separate fixture, so a run that
+    only exercises the relay lanes does not pay for it. It is a large dependency
+    tree — `iroh-relay`'s `server` feature pulls in hyper, rustls and the ACME
+    client — and none of it is needed to drop UDP at a router.
+    """
+    completed = subprocess.run(
+        ["cargo", "build", "--release"] if profile == "release" else ["cargo", "build"],
+        cwd=RENDEZVOUS_CRATE,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=1800,
+    )
+    if completed.returncode != 0:
+        raise LabError(f"building the rendezvous helper failed:\n{completed.stderr}")
+
+    binary = RENDEZVOUS_CRATE / "target" / profile / "netlab-rendezvous"
+    if not binary.is_file():
+        raise LabError(f"cargo reported success but {binary} is missing")
+
+    return binary
+
+
+class Rendezvous:
+    """`netlab-rendezvous` in the namespace a direct topology gave it.
+
+    A context manager yielding where it listens. The addresses come from the
+    helper's stdout and are waited for: a `drop` that publishes before the DHT
+    is answering gets a rendezvous failure indistinguishable from a network that
+    was never built, and the lab must not be able to report one as the other.
+    """
+
+    def __init__(self, binary: Path, net: Net) -> None:
+        if net.rendezvous is None:
+            raise LabError("this topology has no rendezvous namespace to run one in")
+
+        self._binary = binary
+        self._net = net
+        self._process: subprocess.Popen[str] | None = None
+
+    def __enter__(self) -> RendezvousInfo:
+        self._process = subprocess.Popen(
+            [
+                "ip", "netns", "exec", self._net.rendezvous, str(self._binary),
+                "--bind", RENDEZVOUS_ADDRESS,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        return self._await_ready()
+
+    def __exit__(self, *_exception: object) -> None:
+        if self._process is None:
+            return
+
+        # The group, for the same reason the relay kills its group: `ip netns
+        # exec` is the child and the helper is its child.
+        try:
+            os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+        try:
+            self._process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(self._process.pid), signal.SIGKILL)
+            self._process.wait(timeout=15)
+
+    def _await_ready(self, seconds: float = 60.0) -> RendezvousInfo:
+        assert self._process is not None and self._process.stdout is not None
+
+        relay = bootstrap = None
+        deadline = time.monotonic() + seconds
+
+        while time.monotonic() < deadline:
+            line = self._process.stdout.readline()
+            if not line:
+                _, stderr = self._process.communicate(timeout=10)
+                raise LabError(f"the rendezvous helper exited before reporting:\n{stderr}")
+
+            line = line.strip()
+            if line.startswith("netlab-rendezvous: relay="):
+                relay = line.split("=", 1)[1]
+            elif line.startswith("netlab-rendezvous: bootstrap="):
+                bootstrap = line.split("=", 1)[1]
+            elif line.endswith("ready"):
+                if relay is None or bootstrap is None:
+                    raise LabError(
+                        f"the helper said ready without saying where: "
+                        f"relay={relay!r} bootstrap={bootstrap!r}"
+                    )
+                return RendezvousInfo(relay=relay, bootstrap=bootstrap)
+
+        raise LabError(f"the rendezvous helper did not report ready within {seconds:.0f}s")
 
 
 class Relay:
@@ -226,6 +345,7 @@ def transfer(
     *,
     transport: str = "auto",
     timeout: float = 240.0,
+    rendezvous: RendezvousInfo | None = None,
 ) -> Transfer:
     """Sends `source` from the sender namespace to the receiver namespace.
 
@@ -239,6 +359,14 @@ def transfer(
     payload_size = source.stat().st_size
 
     environment = {**os.environ, "DROP_STATUS": "1"}
+    if rendezvous is not None:
+        # Environment rather than flags, because that is the interface these
+        # have — see `docs/plans/self-hosted-rendezvous-plan-2026-09-10.md`.
+        # Without them a `drop` inside a namespace reaches for n0's relays and
+        # the public DHT, finds neither, and spends `ONLINE_TIMEOUT` failing.
+        environment["DROP_RENDEZVOUS_RELAY"] = rendezvous.relay
+        environment["DROP_RENDEZVOUS_BOOTSTRAP"] = rendezvous.bootstrap
+
     common = ["--transport", transport]
     if net.relay_url is not None:
         common += ["--server", net.relay_url]
