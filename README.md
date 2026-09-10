@@ -22,12 +22,27 @@ curl -fsSL https://github.com/op-q/drop/releases/latest/download/install.sh | sh
 
 ## Use
 
+Typed on their own in a terminal, `drop`, `drop send` and `drop recv` open an
+interface that asks for what they need — a file browser for `send`, a code
+field and a destination picker for `recv`, and a few checkboxes either way.
+
+```bash
+$ drop
+$ drop send
+$ drop recv
+```
+
+Given a path or a code, or run anywhere the output is not a terminal, they
+behave exactly as they always have:
+
 ```bash
 $ drop send ./project
 Sending ./project (128 files, archived as project.tar)
 Looking for a peer-to-peer path...
+7F2A91-crossover-clockwork-ridge
 
-  Run this on the other computer:
+  Give that code to whoever is receiving. They can run "drop recv"
+  and enter it when asked, or skip the prompt with:
 
       drop recv 7F2A91-crossover-clockwork-ridge
 
