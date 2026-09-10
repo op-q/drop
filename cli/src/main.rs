@@ -15,46 +15,61 @@ COMMANDS
     send <PATH>     Share a file or folder and print a one-time code.
                     A folder is streamed as a tar archive.
     recv <CODE>     Receive using the code shown by the sender.
+    help            Show this help. Also -h, --help.
+    version         Show the version. Also -V, --version.
 
-OPTIONS
-    -s, --server <URL>   Relay to use [env: DROP_SERVER]
-                         [default: https://api.drop.lifbom.com]
+    Everything below is an option to send or recv and belongs after one of
+    them: `drop send notes.pdf --compress`, never `drop --compress`.
+
+OPTIONS (send and recv)
+    -s, --server <URL>   Relay to forward through [env: DROP_SERVER]
+                         No default: there is no hosted Drop relay. Name one
+                         you run, or leave it unset and stay on the direct
+                         path, which needs no Drop server at all.
     -t, --transport <T>  p2p, relay, or auto [default: auto]
                          p2p connects the two terminals directly and involves
-                         no Drop server at all; relay forwards through one.
-                         auto tries p2p and falls back; p2p fails rather than
-                         falling back.
+                         no Drop server at all. relay forwards through the one
+                         --server names, and fails without it. auto tries p2p
+                         and falls back only if a relay is configured; with
+                         none it is p2p, and says so rather than falling back
+                         to nowhere.
 
-                         Use relay when the other end is a browser. A browser
-                         cannot speak QUIC to a peer, so it can only meet you
-                         at the relay — and a sender on auto that reaches a
-                         peer-to-peer path will wait there instead.
-    -c, --compress       (send) Compress before sending. Useful for source
-                         trees and documents; skip it for media that is already
-                         compressed.
-        --level <N>      (send) Compression level, 1-9 [default: 6]
-    -o, --out <DIR>      (recv) Where to write [default: current directory]
-        --no-extract     (recv) Write the archive as a file instead of
-                         unpacking it
-    -f, --force          (recv) Overwrite an existing file
+                         A browser on the other end can only meet you at a
+                         relay, because it cannot speak QUIC to a peer. That
+                         transfer needs --server naming a relay you run.
         --status         Print one machine-readable line naming the carrier
                          that moved the bytes [env: DROP_STATUS]
 
-                             drop-status: path=relay fallback=rendezvous
+                             drop-status: path=p2p fallback=none
 
                          For scripts and test harnesses. The ordinary output
                          above it says the same thing in words, and that is
                          what it is there for.
-    -h, --help           Show this help
-    -V, --version        Show the version
+
+OPTIONS (send)
+    -c, --compress       Compress before sending. Useful for source trees and
+                         documents; skip it for media that is already
+                         compressed.
+        --level <N>      Compression level, 1-9 [default: 6]
+
+OPTIONS (recv)
+    -o, --out <DIR>      Where to write [default: current directory]
+        --no-extract     Write the archive as a file instead of unpacking it
+    -f, --force          Overwrite an existing file
 
 NOTES
     Both peers must be online at the same time: Drop never stores the file.
     A code is single use and expires after five idle minutes.
 
     Every transfer is encrypted end to end with a key derived from the code,
-    on either transport. What the transport changes is who carries the bytes,
-    not who can read them.
+    on either carrier. What the carrier changes is who moves the bytes, not
+    who can read them.
+
+    The direct path involves no Drop server, which is not the same as no
+    infrastructure. It finds the other terminal through the public DHT and a
+    relay operated by n0, and when two peers cannot hole-punch, that relay
+    carries the encrypted connection. DROP_RENDEZVOUS_RELAY and
+    DROP_RENDEZVOUS_BOOTSTRAP point both at infrastructure you run instead.
 ";
 
 fn main() -> ExitCode {
@@ -160,14 +175,21 @@ struct Options {
 }
 
 impl Options {
-    fn origin(&self) -> String {
-        let configured = self
-            .server
+    /// The relay to use, if anybody named one.
+    ///
+    /// `None` is the ordinary answer now. There is no hosted relay and no
+    /// compiled-in default, so an unconfigured `drop` takes the direct path
+    /// rather than opening a connection to a host that no longer exists.
+    ///
+    /// An empty value means unset, the same way the rendezvous variables treat
+    /// one: `DROP_SERVER=` in a script is somebody clearing it, and reading
+    /// that as an origin would produce `https://` and a baffling failure.
+    fn origin(&self) -> Option<String> {
+        self.server
             .clone()
             .or_else(|| std::env::var("DROP_SERVER").ok())
-            .unwrap_or_else(|| client::DEFAULT_SERVER.to_string());
-
-        client::normalize_origin(&configured)
+            .filter(|configured| !configured.trim().is_empty())
+            .map(|configured| client::normalize_origin(&configured))
     }
 
     /// Which carrier to use, from the flag or the environment.

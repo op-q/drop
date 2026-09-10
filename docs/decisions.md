@@ -167,6 +167,11 @@ wording that blurs them.
 
 ## 8. The hosted instance is a split deployment
 
+> **Superseded by entry 16.** The hosted relay is gone and the CLI no
+> longer compiles in a default origin. The split described here is kept
+> as the record of why the API host was named separately, and stays the
+> shape to follow for anyone hosting both halves themselves.
+
 **Decision.** `drop.lifbom.com` serves the browser client and `install.sh` as
 static files; the relay answers on `api.drop.lifbom.com`. Both the frontend
 build and the CLI's compiled default point at the API origin.
@@ -548,3 +553,40 @@ them. `security.md` states what an operator takes on. The network lab's
 `netlab/rendezvous/` is the first consumer, and
 [`plans/self-hosted-rendezvous-plan-2026-09-10.md`](plans/self-hosted-rendezvous-plan-2026-09-10.md)
 carries the detail.
+
+## 16. There is no hosted relay, and no compiled-in default for one
+
+**Decision.** The hosted relay is closed. `DEFAULT_SERVER` is deleted rather
+than repointed: `--server` and `DROP_SERVER` have no default, and a `drop` that
+has been given neither takes the direct path. `--transport relay` without one is
+an error, and `auto` without one is peer-to-peer that reports when it cannot get
+there instead of falling back to nowhere.
+
+**Why.** A default naming a host that no longer answers is worse than no default
+at all. It turns "you have not configured a relay" into a TLS failure against
+somebody else's DNS, at a hostname the project no longer controls — and entry 8
+is the reason it cannot simply be corrected in place: the value is compiled in,
+so every binary already installed keeps reaching for it until its owner installs
+a new one. What entry 8 wanted from a stable API hostname, it can no longer
+have; the honest response is to stop shipping a guess.
+
+Removing it costs the one thing the relay was still for. A browser peer cannot
+speak QUIC and can only meet a CLI at a relay, so browser transfers now require
+an operator to run one. That is a real loss, and it is stated in the help rather
+than discovered.
+
+**Consequences.** The direct path is the only one that works out of the box, and
+entry 10's "relay kept as an untrusted fallback" now reads as a fallback that
+has to be configured before it exists. `Fallback::Rendezvous` still describes a
+direct setup that failed, but with no relay configured that failure is terminal
+and says so.
+
+None of this makes Drop serverless. Entry 15's rendezvous infrastructure is
+still there: the direct path finds a peer through the public DHT and an n0 relay,
+and that relay carries the encrypted QUIC connection whenever two peers cannot
+hole-punch. "No Drop server" was always the precise claim and it remains the
+precise claim — `DROP_RENDEZVOUS_RELAY` and `DROP_RENDEZVOUS_BOOTSTRAP` are what
+move those pieces in-house.
+
+The `k8s/overlays/gke` manifests still carry the placeholder `drop.example.com`.
+They describe how to host a relay, not one that is running.

@@ -4,10 +4,10 @@
 [![CodeQL](https://github.com/op-q/drop/actions/workflows/codeql.yml/badge.svg)](https://github.com/op-q/drop/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-No server in the middle when Drop can manage it, and nothing readable in the
-middle even when there is one. `drop send` and `drop recv` connect two
-computers directly over QUIC by default, falling back to a small encrypted
-relay for browsers and uncooperative NATs.
+No Drop server in the middle, and nothing readable in the middle when one is
+involved. `drop send` and `drop recv` connect two computers directly over
+QUIC. There is no hosted relay: a relay is something you run, and without one
+the direct path is the only path.
 
 > [!IMPORTANT]
 > Drop is pre-release software. The protocol and deployment defaults may
@@ -42,10 +42,17 @@ Receiving  100.0%  412.7 MiB / 412.7 MiB  86.4 MiB/s  ETA --
 Extracted 128 files into .
 ```
 
-That's the default, `auto` — direct when the two computers can reach each
-other, the relay when they can't. Every transfer is encrypted end to end
-either way. Run `drop --help` for the full flag list, including
+That's the default, `auto`: direct, falling back to a relay only if you have
+configured one with `--server` or `DROP_SERVER`. Every transfer is encrypted
+end to end either way — what the carrier changes is who moves the bytes, not
+who can read them. Run `drop --help` for the full flag list, including
 `--transport`, `--compress`, and `--force`.
+
+"No Drop server" is the precise claim and not a larger one. The direct path
+still finds the other computer through the public DHT and a relay operated by
+n0, and that relay carries the encrypted connection when two peers cannot hole
+punch. `DROP_RENDEZVOUS_RELAY` and `DROP_RENDEZVOUS_BOOTSTRAP` point both at
+infrastructure you run instead.
 
 ## Docs
 

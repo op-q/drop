@@ -10,7 +10,7 @@ use std::{
 use serde_json::json;
 
 use crate::{
-    crypto, direct,
+    client, crypto, direct,
     payload::{GZIP_MIME, TAR_GZIP_MIME, TAR_MIME},
     progress::Progress,
     transport::{Frame, Transport, relay},
@@ -88,7 +88,9 @@ impl ExpansionGuard {
 }
 
 pub struct ReceiveOptions {
-    pub origin: String,
+    /// The relay to receive through, if one is configured. `None` is the
+    /// ordinary case: see [`crate::send::SendOptions::origin`].
+    pub origin: Option<String>,
     /// Which carrier to use. See [`crate::direct::Path`].
     pub path: crate::direct::Path,
     /// Print [`crate::direct::status_line`] beside the prose, for a caller
@@ -116,6 +118,14 @@ enum Target {
 }
 
 pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if options.path == direct::Path::Relay && options.origin.is_none() {
+        return Err(format!(
+            "--transport relay receives through a relay, and none is configured: {}.",
+            client::NAME_A_RELAY
+        )
+        .into());
+    }
+
     let code = crypto::TransferCode::parse(code)?;
 
     // Why a transfer ends up on the relay, recorded as it is decided. The
@@ -131,12 +141,12 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
         match try_direct(&code, &options).await {
             Ok(Some(outcome)) => return outcome,
             Ok(None) => {
-                direct::may_fall_back(options.path, &*missing_record())?;
+                direct::may_fall_back(options.path, options.origin.as_deref(), &*missing_record())?;
                 eprintln!("No sender published for this code; trying the relay.");
                 fallback = direct::Fallback::NoRecord;
             }
             Err(error) => {
-                direct::may_fall_back(options.path, error.as_ref())?;
+                direct::may_fall_back(options.path, options.origin.as_deref(), error.as_ref())?;
                 eprintln!("No peer-to-peer path: {error}");
                 eprintln!("Falling back to the relay.");
                 fallback = direct::Fallback::Rendezvous;
@@ -144,10 +154,17 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
         }
     }
 
-    eprintln!("Connecting to {}...", options.origin);
+    // See the matching note in `send::send_over_relay`: the two gates above
+    // mean this cannot be `None`, and a sentence still beats a panic.
+    let origin = options
+        .origin
+        .clone()
+        .ok_or_else(|| format!("this transfer needs a relay: {}", client::NAME_A_RELAY))?;
+
+    eprintln!("Connecting to {origin}...");
     direct::report(direct::Carrier::Relay, fallback, options.status);
 
-    let mut transport = relay::connect_receiver(&options.origin, code.nameplate()).await?;
+    let mut transport = relay::connect_receiver(&origin, code.nameplate()).await?;
 
     receive_transfer(&mut transport, &code, &options).await
 }

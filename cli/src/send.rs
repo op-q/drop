@@ -65,7 +65,10 @@ impl fmt::Debug for Attempt {
 }
 
 pub struct SendOptions {
-    pub origin: String,
+    /// The relay to forward through, if one is configured. `None` is the
+    /// ordinary case: there is no hosted relay and no compiled-in default, so
+    /// a transfer that has not been given one stays on the direct path.
+    pub origin: Option<String>,
     pub compress: Option<u32>,
     /// Which carrier to use. See [`crate::direct::Path`].
     pub path: crate::direct::Path,
@@ -87,7 +90,7 @@ impl SendOptions {
     /// Options that print the code to stdout, one line, nothing else, so it
     /// survives being piped into another command.
     pub fn printing(
-        origin: String,
+        origin: Option<String>,
         compress: Option<u32>,
         path: crate::direct::Path,
         status: bool,
@@ -118,6 +121,16 @@ pub async fn run(
         std::process::exit(130);
     });
 
+    // Before the payload is read, compressed and spooled: being told the
+    // relay is missing is worth nothing after a wait to compress a directory.
+    if options.path == direct::Path::Relay && options.origin.is_none() {
+        return Err(format!(
+            "--transport relay forwards through a relay, and none is configured: {}.",
+            client::NAME_A_RELAY
+        )
+        .into());
+    }
+
     let payload = Payload::prepare(path, options.compress)?;
 
     for warning in &payload.warnings {
@@ -142,7 +155,11 @@ pub async fn run(
         match try_direct(&mut options, payload, sealed_size).await {
             Ok(outcome) => return outcome,
             Err(failed) => {
-                direct::may_fall_back(options.path, failed.error.as_ref())?;
+                direct::may_fall_back(
+                    options.path,
+                    options.origin.as_deref(),
+                    failed.error.as_ref(),
+                )?;
                 eprintln!("No peer-to-peer path: {}", failed.error);
                 eprintln!("Falling back to the relay.");
 
@@ -240,8 +257,17 @@ async fn send_over_relay(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     // Session creation is a blocking HTTP call, so it runs on the blocking
     // pool rather than stalling a runtime worker.
+    // Unreachable in practice — `run` refuses `--transport relay` without one
+    // and `may_fall_back` refuses to arrive here without one — but stated as an
+    // error rather than an unwrap, because the alternative to a sentence here
+    // is a panic in front of somebody sending a file.
+    let origin = options
+        .origin
+        .clone()
+        .ok_or_else(|| format!("this transfer needs a relay: {}", client::NAME_A_RELAY))?;
+
     let nameplate = {
-        let origin = options.origin.clone();
+        let origin = origin.clone();
 
         tokio::task::spawn_blocking(move || client::create_session(&origin, sealed_size)).await??
     };
@@ -253,7 +279,7 @@ async fn send_over_relay(
     direct::report(direct::Carrier::Relay, fallback, options.status);
     eprintln!("Waiting for the receiver to connect...");
 
-    let mut transport = relay::connect_sender(&options.origin, code.nameplate()).await?;
+    let mut transport = relay::connect_sender(&origin, code.nameplate()).await?;
 
     match send_transfer(&mut transport, &code, payload, sealed_size).await? {
         Attempt::Done => Ok(()),

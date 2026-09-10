@@ -36,7 +36,7 @@ workflows.
 | `DROP_SHUTDOWN_MAX_TRANSFER_WAIT_SECS` | `3500` | after the drain delay, how long to keep running for in-flight transfers |
 | `RUST_LOG` | application default | tracing filter |
 | `VITE_BACKEND_ORIGIN` | current page origin | backend URL for a separately hosted frontend |
-| `DROP_SERVER` | `https://api.drop.lifbom.com` | relay used by the `drop` CLI |
+| `DROP_SERVER` | none | relay the `drop` CLI forwards through; unset means the direct path only |
 | `DROP_TRANSPORT` | `auto` | carrier the `drop` CLI uses: `p2p`, `relay`, or `auto` |
 | `DROP_RENDEZVOUS_RELAY` | n0's public relays | iroh relay the direct path becomes reachable through, as `http://host:port` |
 | `DROP_RENDEZVOUS_BOOTSTRAP` | the public mainline routers | comma-separated `host:port` DHT nodes the direct path publishes to |
