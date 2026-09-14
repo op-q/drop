@@ -383,6 +383,31 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                 )
                                 .await;
                             }
+                            ReceiverMessage::MetaOk { confirmation } => {
+                                // Opaque, so bounded rather than inspected, the
+                                // same as a key exchange. A genuine one is 64
+                                // hex characters.
+                                if confirmation.len() > MAX_OPAQUE_FIELD_BYTES {
+                                    TransferService::fail_session(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        Some("key confirmation is too large"),
+                                        Some("key confirmation is too large"),
+                                        "receiver key confirmation exceeded the opaque field limit",
+                                    )
+                                    .await;
+                                    break;
+                                }
+
+                                SessionService::touch_session(&state_for_recv, &code_for_recv)
+                                    .await;
+                                TransferService::send_sender(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    SenderEvent::MetaOk(confirmation),
+                                )
+                                .await;
+                            }
                             ReceiverMessage::ChunkAck { bytes_received } => {
                                 if !SessionService::acknowledge_receiver_bytes(
                                     &state_for_recv,

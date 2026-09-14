@@ -646,3 +646,43 @@ copied the CLI's manifest but not `crypto/`, the CLI's path dependency, so
 cargo could not load the workspace. That had been true of both images since the
 envelope became its own crate. It now copies `crypto/` and builds with
 `--locked`.
+
+## 18. The receiver proves it opened the metadata, on both paths, as protocol version 2
+
+**Decision.** `meta_ok` carries `confirmation`, the hex of a fourth HKDF output
+(`drop/v1/confirm`, 32 bytes), and the sender streams nothing until it matches
+its own copy under a constant-time comparison. Both carriers run the
+checkpoint: the relay forwards `meta_ok` verbatim instead of refusing it. A
+missing, malformed or wrong confirmation is one failed attempt, exactly like an
+`error`, a timeout or a disconnect. `ENVELOPE_VERSION` and `DROP_ALPN` both
+become 2, so a 0.3.0 peer or relay is refused by name rather than meeting a
+0.4.0 one and failing in a way that looks like a wrong code.
+
+**Why.** Entry 13 made the sender count guesses and ask a human, so that being
+probed is visible. It rested on a frame the probed-for party could forge: a
+guesser who could not open the metadata could still say `meta_ok`, the counter
+never climbed, and the human was never asked. The rate limit held and the
+noticing did not. The confirmation makes the answer a proof. Derived rather than
+a second sealing, because every extra use of a key is another nonce to manage,
+and one HKDF output costs nothing and reveals nothing.
+
+Both paths rather than the direct path only, because the relay path gets
+something real from it: a sender can say "the code was right" before a byte
+moves, which the receiver consent work in
+[`plans/receiver-consent-and-status-plan-2026-09-14.md`](plans/receiver-consent-and-status-plan-2026-09-14.md)
+builds on. Over the relay a failed checkpoint ends the transfer; the relay has
+already refused a second claim, so there is nothing to offer another attempt to.
+
+**The version now versions the conversation**, not only the sealing. Entry 7
+and `protocol.md` described `ENVELOPE_VERSION` as the envelope's version. It was
+already checked at both ends and at the relay and already fatal on mismatch, so
+it is the right gate for a change in what the peers say, and a separate
+"conversation version" would be a second number to keep in step. The ALPN
+carries the same number, and a test fails if they drift.
+
+**Consequences.** This is a wire break, and it arrived later than it should
+have. The plan said to land it before the direct path shipped, and the direct
+path shipped in v0.2.0. A 0.4.0 build does not interoperate with 0.3.0 or
+earlier on either path, or with a 0.3.0 relay; each refuses with a message
+naming versions. The receiver consent work changes the conversation again under
+the same unreleased version 2, so users take one break, not two.

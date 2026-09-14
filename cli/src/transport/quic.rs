@@ -20,10 +20,11 @@ use super::{Frame, Transport, TransportError, framed::FramedTransport};
 
 /// Names this protocol and its framing on the wire.
 ///
-/// Bump the integer whenever the framing changes. A peer speaking a different
-/// version is refused by iroh before either side allocates anything, which is
-/// cheaper and clearer than discovering the mismatch in a frame header.
-pub const DROP_ALPN: &[u8] = b"drop/transfer/1";
+/// Bumped with [`crate::crypto::ENVELOPE_VERSION`], and whenever the framing
+/// changes. A peer speaking a different version is refused by iroh before
+/// either side allocates anything, which is cheaper and clearer than
+/// discovering the mismatch in a frame header.
+pub const DROP_ALPN: &[u8] = b"drop/transfer/2";
 
 /// How long to wait for a home relay before giving up on being reachable.
 ///
@@ -421,14 +422,17 @@ mod tests {
         sender.shutdown().await;
     }
 
-    /// The ALPN is the version gate. Two builds whose framing disagrees must
-    /// fail to connect rather than meet and misparse each other.
+    /// The ALPN is the version gate on the direct path. Two builds whose
+    /// protocol disagrees must fail to connect rather than meet and misparse
+    /// each other, so it carries the same number the envelope does, and a bump
+    /// to one without the other fails here.
     #[test]
-    fn the_alpn_names_a_version() {
-        assert!(
-            DROP_ALPN.ends_with(b"/1"),
-            "the ALPN must carry a version to bump: {}",
-            String::from_utf8_lossy(DROP_ALPN)
+    fn the_alpn_carries_the_protocol_version() {
+        let expected = format!("drop/transfer/{}", crate::crypto::ENVELOPE_VERSION);
+        assert_eq!(
+            String::from_utf8_lossy(DROP_ALPN),
+            expected,
+            "the ALPN and the envelope version must move together"
         );
     }
 

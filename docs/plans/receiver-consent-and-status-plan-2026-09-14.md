@@ -156,7 +156,11 @@ until a timeout that says nothing useful. So:
   **Record that in `decisions.md`**, because entry 12 and the envelope section
   of `protocol.md` both describe it as the envelope's version.
 - `meta_ok` key confirmation lands under the same bump. Both are unreleased until
-  0.4.0, so one bump covers both, whichever lands first makes it.
+  0.4.0, so one bump covers both, whichever lands first makes it. **Landed
+  first, 2026-09-14:** version 2, the ALPN, `meta_ok` on both carriers with the
+  relay forwarding it, and the relay's mismatch error naming both versions are
+  all in (decisions entry 18). This plan's phase 2 adds the rest of the
+  vocabulary under the same number.
 
 ### The receiver
 

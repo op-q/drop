@@ -21,7 +21,7 @@ pub use envelope::{
     CHUNK_PLAINTEXT_BYTES, ENVELOPE_VERSION, Metadata, Opener, Sealer, TAG_BYTES, ciphertext_len,
     open_metadata, seal_metadata, total_chunks,
 };
-pub use handshake::{Handshake, SessionKeys};
+pub use handshake::{CONFIRMATION_BYTES, Handshake, SessionKeys};
 pub use rendezvous::{RENDEZVOUS_SECRET_BYTES, rendezvous_secret};
 
 /// The largest payload a transfer may carry, matching the relay's

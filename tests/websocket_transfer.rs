@@ -630,3 +630,91 @@ async fn a_sender_key_exchange_before_the_receiver_is_refused() {
     wait_for_session_removal(&state, code).await;
     assert_eq!(state.metrics.snapshot().total_transfer_failures, 1);
 }
+
+/// The receiver's key confirmation reaches the sender exactly as it was sent.
+///
+/// Since protocol version 2 the receiver proves it opened the metadata on
+/// both paths. The relay cannot check that proof and must not alter it: before
+/// this, the relay's closed set of receiver frames refused `meta_ok` outright
+/// and failed the session.
+#[tokio::test]
+async fn a_key_confirmation_is_forwarded_to_the_sender_verbatim() {
+    let code = "CONFIRMS";
+    let state = build_state();
+    insert_session(&state, code, 64).await;
+
+    let server = spawn_network_test_server_with_state(state.clone()).await;
+
+    let (mut receiver_ws, _) = connect_async(server.ws_url(&format!("/ws/download/{code}")))
+        .await
+        .expect("expected receiver websocket connection");
+    next_json_message_matching(&mut receiver_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "waiting_for_sender"
+    })
+    .await;
+
+    let (mut sender_ws, _) = connect_async(server.ws_url(&format!("/ws/upload/{code}")))
+        .await
+        .expect("expected sender websocket connection");
+    next_json_message_matching(&mut sender_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "receiver_connected"
+    })
+    .await;
+
+    let confirmation = "ab".repeat(32);
+    receiver_ws
+        .send(Message::text(
+            json!({ "type": "meta_ok", "confirmation": confirmation }).to_string(),
+        ))
+        .await
+        .expect("expected the confirmation to be sent");
+
+    let forwarded =
+        next_json_message_matching(&mut sender_ws, |payload| payload["type"] == "meta_ok").await;
+    assert_eq!(forwarded["confirmation"], confirmation);
+    assert!(
+        state.sessions.get(code).await.is_some(),
+        "forwarding a confirmation must not end the session"
+    );
+}
+
+/// Opaque, so bounded rather than inspected, like every other field the relay
+/// cannot read.
+#[tokio::test]
+async fn an_oversized_key_confirmation_fails_the_session() {
+    let code = "BIGCONF";
+    let state = build_state();
+    insert_session(&state, code, 64).await;
+
+    let server = spawn_network_test_server_with_state(state.clone()).await;
+
+    let (mut receiver_ws, _) = connect_async(server.ws_url(&format!("/ws/download/{code}")))
+        .await
+        .expect("expected receiver websocket connection");
+    next_json_message_matching(&mut receiver_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "waiting_for_sender"
+    })
+    .await;
+
+    let (mut sender_ws, _) = connect_async(server.ws_url(&format!("/ws/upload/{code}")))
+        .await
+        .expect("expected sender websocket connection");
+    next_json_message_matching(&mut sender_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "receiver_connected"
+    })
+    .await;
+
+    let oversized = "a".repeat(api::config::MAX_OPAQUE_FIELD_BYTES + 1);
+    receiver_ws
+        .send(Message::text(
+            json!({ "type": "meta_ok", "confirmation": oversized }).to_string(),
+        ))
+        .await
+        .expect("expected the confirmation to be sent");
+
+    let error =
+        next_json_message_matching(&mut sender_ws, |payload| payload["type"] == "error").await;
+    assert_eq!(error["message"], "key confirmation is too large");
+
+    wait_for_session_removal(&state, code).await;
+}

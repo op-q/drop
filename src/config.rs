@@ -67,7 +67,7 @@ pub const PROGRESS_INTERVAL_MS: u64 = 200;
 /// `crypto::envelope`, because the relay cannot depend on the client crate;
 /// `envelope_version_matches_the_client` in `cli/tests/protocol.rs` fails if
 /// the two ever drift apart.
-pub const ENVELOPE_VERSION: u8 = 1;
+pub const ENVELOPE_VERSION: u8 = 2;
 
 /// Ceiling on an opaque client-supplied field the relay forwards without
 /// understanding — the sealed metadata blob and the key-exchange messages.

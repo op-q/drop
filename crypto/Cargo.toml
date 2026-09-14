@@ -26,5 +26,9 @@ sha2 = "0.11"
 spake2 = "0.4"
 rand = "0.10"
 zeroize = { version = "1", features = ["zeroize_derive"] }
+# Constant-time comparison of the key confirmation. An early-returning `==`
+# would tell a guesser how many leading bytes matched. Already in the tree
+# through aes-gcm.
+subtle = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
