@@ -1,6 +1,6 @@
 # Cross-platform plan: Windows, macOS and Linux, and transfers between them
 
-Status: **proposed**
+Status: **active** — phase 0 done 2026-09-14
 Created: **2026-09-14**
 Last updated: **2026-09-14**
 
@@ -181,20 +181,50 @@ where this plan spends its effort.
 Nothing below can be verified until this exists, so it comes first and its
 failures are the input to the rest.
 
-- [ ] `ci.yml`: turn the `rust` job into a matrix over `ubuntu-24.04`,
-      `macos-14` (arm64) and `windows-2025`. Formatting stays on Linux only,
-      because it cannot vary by platform. Clippy runs on all three, since
-      `cfg(windows)` code is otherwise never linted.
-- [ ] Record what fails on the first run in this plan, dated, before fixing
-      any of it.
-- [ ] Make the suite pass on all three without skipping anything that is not
-      genuinely inapplicable. Every new `cfg` on a test gets a comment saying
-      why the test cannot run there.
-- [ ] Mark `.github/workflows/ci.yml` checkouts `autocrlf`-safe:
-      `.gitattributes` already sets `eol=lf`, so fixture bytes should match
-      across platforms. Confirm on the Windows runner rather than assume.
+- [x] `ci.yml`: a `rust-platforms` job running Clippy and the tests on
+      `macos-14` and `windows-2025`. It is a separate job, not a matrix on
+      `rust`, because branch protection requires a check named exactly "Rust"
+      and a matrix would rename it. Formatting stays on Linux only. The test
+      step runs even when Clippy fails, so one run reports both.
+- [x] Record what fails on the first run in this plan, dated, before fixing
+      any of it. See below.
+- [x] Make the suite pass on all three without skipping anything that is not
+      genuinely inapplicable. Each new `cfg` has a comment saying why.
+- [x] Line endings: no fixture failed on Windows, so `.gitattributes`' `eol=lf`
+      holds for what the tests read. Confirmed by the Windows run, not assumed.
+- [ ] Add `Rust (macos-14)` and `Rust (windows-2025)` to branch protection's
+      required checks. A repository setting, for the owner.
 
-**Gate:** `cargo test --workspace --all-targets` green on all three runners.
+#### What the runners found, 2026-09-14
+
+**Run 1.** macOS: Clippy and all tests green on the first attempt. Windows:
+Clippy failed on two items, and nothing else. `cli/tests/archive.rs` imported
+`traverses_only_real_dirs`, and `cli/tests/transfer.rs` defined `archive_of`.
+Both are used only by `#[cfg(unix)]` symlink tests. **Every `cfg(not(unix))`
+branch in the CLI compiled and passed Clippy**, the first time any of it had
+been compiled. Fixed by gating the two items. The test step had not run,
+because it followed Clippy.
+
+**Run 2.** Windows: Clippy and **the whole suite green**, about 6 minutes on a
+cold runner. macOS: one failure,
+`upload_socket_rejects_chunks_over_the_message_cap`, with
+`expected oversized chunk to be written: Io(... BrokenPipe ...)`. It passed on
+run 1, so it is a race. The relay refuses an oversized frame from its header
+and closes the socket, possibly while the test is still writing the frame body.
+Linux's socket buffer usually absorbs the write, and macOS's usually does not.
+The relay's behaviour was correct both times; the test demanded that its own
+doomed write succeed. The test now accepts a broken pipe, reset or closed
+connection on that write and still asserts what matters: the receiver gets an
+error and never a byte of the chunk.
+
+**What green does not mean.** Windows passing the suite says the suite has
+nothing Windows-specific in it. It does not say Windows works. Findings 1–5
+above have no tests at all: the seven symlink tests are Unix-only, and nothing
+exercises reserved names, alternate data streams, trailing dots, or a symlink
+arriving at a Windows receiver. Phase 1 writes those tests, and they are
+expected to fail before its fixes.
+
+**Gate:** met, pending the final run with the race fixed.
 
 ### Phase 1 — a Windows receiver writes what it can and reports the rest
 
