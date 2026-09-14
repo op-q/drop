@@ -32,6 +32,10 @@ pub struct Payload {
     pub filename: String,
     pub mime_type: String,
     pub size: u64,
+    /// Files in a folder, for the receiver's preview.
+    pub entry_count: Option<u64>,
+    /// Bytes before archiving or compression, for the receiver's preview.
+    pub unpacked_size: Option<u64>,
     pub source: Source,
     /// Present only for a compressed payload: the spool file is deleted when
     /// the payload is dropped, whether the transfer succeeded or not.
@@ -197,6 +201,14 @@ impl Payload {
                 filename: format!("{base_name}.tar"),
                 mime_type: TAR_MIME.to_string(),
                 size: plan.total_bytes(),
+                entry_count: Some(plan.file_count() as u64),
+                unpacked_size: Some(
+                    plan.entries()
+                        .iter()
+                        .filter(|entry| entry.kind == crate::tar::EntryKind::File)
+                        .map(|entry| entry.size)
+                        .sum(),
+                ),
                 summary: format!(
                     "{} ({} files, archived as {}.tar)",
                     path.display(),
@@ -212,6 +224,8 @@ impl Payload {
                 filename: base_name.clone(),
                 mime_type: guess_mime(&base_name).to_string(),
                 size: metadata.len(),
+                entry_count: None,
+                unpacked_size: None,
                 summary: path.display().to_string(),
                 source: Source::File(path.to_path_buf()),
                 spool: None,
@@ -260,6 +274,9 @@ impl Payload {
         } else {
             GZIP_MIME.to_string()
         };
+        // What the receiver will end up with is what went into the
+        // compressor, so a single compressed file reports that too.
+        self.unpacked_size.get_or_insert(self.size);
         self.size = compressed_size;
         self.source = Source::File(spool.path.clone());
         self.spool = Some(spool);

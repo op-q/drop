@@ -1,7 +1,7 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **receiver consent, cancel and live status** (item 11, phases 2–4) under protocol version 2, which `meta_ok` key confirmation opened on 2026-09-14. Browser removal (item 8) is done; Windows and macOS CI are green and the Windows receiver is fixed (item 10, phases 0–1). Priorities set 2026-09-14; the order is in [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law)
+Current work: **cancel and live status** (item 11, phase 4). Receiver consent landed 2026-09-14 under protocol version 2 with `meta_ok` key confirmation. Browser removal (item 8) is done; CI is green on Windows and macOS, and the Windows receiver is fixed (item 10, phases 0–1). Priorities set 2026-09-14; the order is in [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law)
 Last updated: **2026-09-14**
 
 The tactical view of what is being built and what state it is in. The detailed
@@ -514,14 +514,14 @@ manual checklist recorded.
 ## 11. Receiver consent, cancel, and live status
 
 Plan: [`receiver-consent-and-status-plan-2026-09-14.md`](plans/receiver-consent-and-status-plan-2026-09-14.md)
-Status: **active** — phase 1 done
+Status: **active** — phases 0–3 done 2026-09-14 (decisions entry 19); phase 4, a person cancelling and the sender's state lines, next
 
 The receiver sees name, type, size and where it will be saved, and accepts
 before a byte is written. Either side can cancel and the other is told in words.
 The sender sees the receiver connect, pass the code, review, accept or decline,
 receive, finish.
 
-- [ ] Phase 0 — decisions entry; consent before bytes, `--yes` required without
+- [x] Phase 0 — decisions entry; consent before bytes, `--yes` required without
       a terminal (user decision 2026-09-14), reasons as enumerations, version 2,
       exit codes.
 - [x] Phase 1 — display sanitisation, alone. **Live bug**, fixed 2026-09-14: a
@@ -529,11 +529,11 @@ receive, finish.
       in it could redraw the terminal. Also covered: error messages from a peer
       or the relay, archive warnings, and the file browser. Pinned end to end
       through the binary, with a negative control.
-- [ ] Phase 2 — protocol and relay: `meta_ok` on both carriers, `accept`,
+- [x] Phase 2 — protocol and relay: `meta_ok` on both carriers, `accept`,
       `decline`, receiver `cancel`, `finishing`; the relay refuses chunks
       before `accept` and stops counting declines and cancels as failures;
       `ENVELOPE_VERSION` and `DROP_ALPN` to 2.
-- [ ] Phase 3 — receiver consent in the CLI: destination planned but not
+- [x] Phase 3 — receiver consent in the CLI: destination planned but not
       created, preview with a receiver-derived type and a program warning,
       120 s deadline, refusal without a terminal before connecting.
 - [ ] Phase 4 — cancel through both transfer paths, two-stage Ctrl-C, sender

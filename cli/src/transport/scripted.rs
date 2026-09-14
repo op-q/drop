@@ -21,6 +21,8 @@ pub struct ScriptedTransport {
     sent: Vec<Frame>,
     peers_enforce_one_guess: bool,
     responder: Option<Responder>,
+    /// Whether an exhausted script waits instead of hanging up.
+    held_open: bool,
 }
 
 impl ScriptedTransport {
@@ -34,7 +36,15 @@ impl ScriptedTransport {
             // checkpoint asks for it by name.
             peers_enforce_one_guess: false,
             responder: None,
+            held_open: false,
         }
+    }
+
+    /// Once the script runs out, stay connected and silent instead of hanging
+    /// up. For testing what waits on a peer that says nothing more.
+    pub fn held_open(mut self) -> Self {
+        self.held_open = true;
+        self
     }
 
     /// A peer that answers what it is sent, rather than only replaying.
@@ -119,7 +129,10 @@ impl Transport for ScriptedTransport {
     }
 
     async fn receive(&mut self) -> Result<Option<Frame>, TransportError> {
-        Ok(self.inbound.pop_front())
+        match self.inbound.pop_front() {
+            None if self.held_open => std::future::pending().await,
+            next => Ok(next),
+        }
     }
 
     async fn close(&mut self) {}

@@ -404,7 +404,10 @@ def transfer(
         receiver = subprocess.Popen(
             [
                 "ip", "netns", "exec", net.receiver, str(binaries.drop),
-                "recv", code, *common, "--out", str(destination),
+                # `--yes`: nobody is at this terminal to be asked, and since
+                # protocol version 2 a receiver without a terminal refuses
+                # to start rather than accept silently.
+                "recv", code, *common, "--yes", "--out", str(destination),
             ],
             env=environment,
             stdout=subprocess.PIPE,

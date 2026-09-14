@@ -686,3 +686,45 @@ path shipped in v0.2.0. A 0.4.0 build does not interoperate with 0.3.0 or
 earlier on either path, or with a 0.3.0 relay; each refuses with a message
 naming versions. The receiver consent work changes the conversation again under
 the same unreleased version 2, so users take one break, not two.
+
+## 19. The receiver consents before a byte is written, and unattended consent is explicit
+
+**Decision.** After the key confirmation, the receiver is shown the transfer
+(name, a type label from the real extension, size, where it will land, and a
+folder's counts) and answers before anything is created. `accept` lets the
+sender stream, and the relay carries no chunk before it. `decline` ends the
+transfer as a normal outcome. An unanswered question is declined after 120
+seconds. Without a terminal on stdin, `drop recv` refuses to start unless given
+`--yes`. `decline` and `cancel` carry reasons from a fixed set. `/metrics`
+counts declines and cancels apart from failures. Everything rides on protocol
+version 2 (entry 18).
+
+**Why.** A receiver learned what it was getting only as it arrived, and the
+file was created before any question could have been asked. The user asked for
+this first on 2026-09-14. The design choices each close a way of getting it
+wrong:
+
+- *Planned, not created.* The destination's name, including collision
+  numbering and Windows rewriting, is computed by looking, so a decline leaves
+  no empty file and no used-up numbered name.
+- *The receiver's type label, not the sender's MIME type.* Both come from the
+  sender, but the extension of the file that lands is what decides what
+  opening it does.
+- *`--yes` required without a terminal* (the user's choice over auto-accepting).
+  Auto-accepting keeps old scripts working, and removes consent in exactly the
+  case where nobody is watching. The refusal happens before contacting anyone,
+  so it never spends a code.
+- *Reasons as enumerations.* Free text would be a second route for a peer's
+  words onto the other terminal, after the one `cli/src/display.rs` closed.
+- *The relay gates chunks on `accept`.* The receiver checks too; the relay's
+  check keeps its shared memory budget from being spent on unaccepted bytes.
+- *Keep reading while asking.* A relay socket nobody reads stops answering
+  pings and is dropped. So every carrier's `receive` must be cancel-safe, and
+  the QUIC framing now keeps partial frames in the transport.
+
+**Consequences.** Scripts that pipe `drop recv` must add `--yes`. A 0.3.0 relay
+cannot carry a 0.4.0 transfer. Three clocks bound an unanswered question, in
+this order: the receiver's 120 seconds, the sender's 150, the relay's five-minute
+session. A test fails if they are reordered. A person cancelling mid-transfer
+from a key or Ctrl-C is not part of this entry; the frames exist, and wiring a
+person to them is the consent plan's phase 4.

@@ -128,6 +128,12 @@ pub trait Transport {
     /// Waits for the peer's next frame, or `None` once it has finished
     /// speaking.
     ///
+    /// **Must be cancel-safe**: a call dropped before it returns must not lose
+    /// any part of a frame. The receiver keeps reading while a person decides
+    /// whether to accept a transfer, because a relay stops hearing from a
+    /// socket nobody reads and drops it, and it abandons that read the moment
+    /// they answer.
+    ///
     /// A closed connection is not an error here. Every caller treats a peer
     /// that stopped early as a failure of the transfer rather than of the
     /// transport, and each has a more useful sentence to say about it than

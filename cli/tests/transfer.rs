@@ -136,6 +136,7 @@ async fn transfer_forcing(
                     out_dir: destination,
                     extract: true,
                     force,
+                    acceptance: drop_cli::consent::Acceptance::Yes,
                 },
             )
             .await
@@ -273,6 +274,7 @@ async fn reports_a_clear_error_for_an_unknown_code() {
             out_dir: base.clone(),
             extract: true,
             force: true,
+            acceptance: drop_cli::consent::Acceptance::Yes,
         },
     )
     .await
@@ -304,6 +306,7 @@ async fn a_malformed_code_fails_before_the_relay_is_contacted() {
             out_dir: base.clone(),
             extract: true,
             force: true,
+            acceptance: drop_cli::consent::Acceptance::Yes,
         },
     )
     .await
@@ -560,6 +563,7 @@ async fn a_wrong_code_is_refused_and_leaves_nothing_on_disk() {
             out_dir: destination.clone(),
             extract: true,
             force: true,
+            acceptance: drop_cli::consent::Acceptance::Yes,
         },
     )
     .await
@@ -671,6 +675,7 @@ async fn a_receiver_that_connects_first_still_completes_the_transfer() {
                     out_dir: destination,
                     extract: true,
                     force: true,
+                    acceptance: drop_cli::consent::Acceptance::Yes,
                 },
             )
             .await
@@ -775,6 +780,7 @@ async fn the_carrier_line_reaches_a_program_that_spawned_the_binary() {
         .args([
             "recv",
             &code,
+            "--yes",
             "--server",
             &origin,
             "--transport",
@@ -867,6 +873,7 @@ async fn the_carrier_line_stays_out_of_an_ordinary_transfer() {
         .args([
             "recv",
             &code,
+            "--yes",
             "--server",
             &origin,
             "--transport",
@@ -957,7 +964,15 @@ async fn a_hostile_file_name_cannot_write_escape_sequences_to_the_receiver() {
         .expect("the sender announced a code at all");
 
     let receiver = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
-        .args(["recv", &code, "--server", &origin, "--transport", "relay"])
+        .args([
+            "recv",
+            &code,
+            "--yes",
+            "--server",
+            &origin,
+            "--transport",
+            "relay",
+        ])
         .arg("--out")
         .arg(&destination)
         .stdout(Stdio::piped())
@@ -1006,5 +1021,192 @@ async fn a_hostile_file_name_cannot_write_escape_sequences_to_the_receiver() {
     assert_eq!(
         fs::read(destination.join(hostile_name)).expect("the received file"),
         b"not what the name says"
+    );
+}
+
+/// Says no to whatever it is shown, and remembers what that was.
+struct Declines {
+    shown: std::sync::Arc<std::sync::Mutex<Option<drop_cli::consent::Preview>>>,
+}
+
+impl drop_cli::consent::ConsentPrompt for Declines {
+    async fn decide(&mut self, preview: &drop_cli::consent::Preview) -> drop_cli::consent::Consent {
+        *self.shown.lock().expect("not poisoned") = Some(preview.clone());
+        drop_cli::consent::Consent::Decline
+    }
+}
+
+/// The whole point of consent, over a real relay: the receiver is shown what
+/// is coming, says no, and nothing about its directory changes. The sender
+/// hears a decline, not a broken connection, and the relay does not count it
+/// as a failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn declining_writes_nothing_and_tells_the_sender() {
+    let (origin, relay) = spawn_relay_with_state().await;
+    let base = scratch("decline");
+    let source = base.join("quarterly-report.pdf");
+    let destination = base.join("received");
+    write_file(&source, &vec![5_u8; 70_000]);
+    // Already there, so a careless decline path that numbered or truncated a
+    // file would show up.
+    write_file(
+        &destination.join("quarterly-report.pdf"),
+        b"the receiver's own",
+    );
+
+    let before: Vec<_> = fs::read_dir(&destination)
+        .expect("list")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+
+    let (code_tx, code_rx) = oneshot::channel();
+    let mut code_tx = Some(code_tx);
+    let sender = tokio::spawn({
+        let origin = origin.clone();
+        let source = source.clone();
+        async move {
+            send::run(
+                &source,
+                SendOptions {
+                    origin: Some(origin),
+                    compress: None,
+                    path: drop_cli::direct::Path::Relay,
+                    status: false,
+                    rendezvous: drop_cli::direct::Rendezvous::default(),
+                    on_code: Box::new(move |code| {
+                        if let Some(sender) = code_tx.take() {
+                            let _ = sender.send(code.to_string());
+                        }
+                    }),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+    });
+
+    let code = tokio::time::timeout(Duration::from_secs(10), code_rx)
+        .await
+        .expect("a code in time")
+        .expect("a code at all");
+
+    let shown = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut prompt = Declines {
+        shown: shown.clone(),
+    };
+    let received = recv::run_deciding(
+        &code,
+        &ReceiveOptions {
+            path: drop_cli::direct::Path::Relay,
+            status: false,
+            rendezvous: drop_cli::direct::Rendezvous::default(),
+            origin: Some(origin),
+            out_dir: destination.clone(),
+            extract: true,
+            force: false,
+            // Not consulted: `run_deciding` puts the question to the prompt
+            // passed below instead.
+            acceptance: drop_cli::consent::Acceptance::Ask,
+        },
+        &mut prompt,
+    )
+    .await;
+
+    assert!(received.is_ok(), "declining is not a failure: {received:?}");
+
+    let sent = tokio::time::timeout(Duration::from_secs(30), sender)
+        .await
+        .expect("the sender finished")
+        .expect("the sender task ran");
+    let error = sent.expect_err("a declined transfer did not happen");
+    assert!(
+        error.contains("declined"),
+        "the sender should say so: {error}"
+    );
+
+    let preview = shown
+        .lock()
+        .expect("not poisoned")
+        .clone()
+        .expect("a preview was shown");
+    assert_eq!(preview.name, "quarterly-report.pdf");
+    assert_eq!(preview.size, 70_000);
+    let drop_cli::consent::Landing::File {
+        path, instead_of, ..
+    } = preview.landing
+    else {
+        panic!("a single file should land as a file");
+    };
+    assert!(
+        path.ends_with("quarterly-report-1.pdf"),
+        "the preview should show the numbered name it would have used: {path}"
+    );
+    assert_eq!(instead_of.as_deref(), Some("quarterly-report.pdf"));
+
+    let after: Vec<_> = fs::read_dir(&destination)
+        .expect("list")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    assert_eq!(
+        before, after,
+        "declining must leave the destination as it was"
+    );
+    assert_eq!(
+        fs::read(destination.join("quarterly-report.pdf")).expect("read"),
+        b"the receiver's own"
+    );
+
+    for _ in 0..100 {
+        if relay.metrics.snapshot().total_transfers_declined == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let metrics = relay.metrics.snapshot();
+    assert_eq!(metrics.total_transfers_declined, 1);
+    assert_eq!(metrics.total_transfer_failures, 0);
+}
+
+/// With nobody at a terminal to ask and no `--yes`, the receiver refuses
+/// before contacting anything, so the sender's code is not spent on a question
+/// nobody could answer.
+#[tokio::test]
+async fn a_receiver_with_no_terminal_and_no_yes_refuses_before_connecting() {
+    // A listener standing in for a relay, so a connection attempt would be
+    // seen rather than inferred from an error message.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let origin = format!("http://{}", listener.local_addr().expect("address"));
+
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .args([
+            "recv",
+            "A1B2C3-abandon-ability-able",
+            "--server",
+            &origin,
+            "--transport",
+            "relay",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    let output = tokio::time::timeout(Duration::from_secs(30), output)
+        .await
+        .expect("the receiver finished in time")
+        .expect("the receiver ran");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "it should refuse:\n{stderr}");
+    assert!(
+        stderr.contains("--yes"),
+        "it should name the way out:\n{stderr}"
+    );
+
+    let contacted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+    assert!(
+        contacted.is_err(),
+        "the receiver contacted the relay before refusing"
     );
 }

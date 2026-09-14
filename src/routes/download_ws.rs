@@ -21,14 +21,14 @@ use crate::{
         client_ip_from_request,
     },
     domain::{
-        messages::ReceiverMessage,
+        messages::{ReceiverMessage, cancel_reason, decline_reason},
         session::{DownloadEvent, SenderEvent},
     },
     errors::AppError,
     services::{
         cleanup_service::remove_expired_sessions,
         session_service::{ReceiverClaimResult, SessionService},
-        transfer_service::TransferService,
+        transfer_service::{Ending, TransferService},
     },
     telemetry::tracing::transfer_span,
     ws::protocol,
@@ -271,6 +271,20 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                     }
                                 }
                             }
+                            DownloadEvent::Cancelled(reason) => {
+                                let _ = ws_sender
+                                    .send(Message::Text(
+                                        serde_json::json!({
+                                            "type": "cancel",
+                                            "reason": reason
+                                        })
+                                        .to_string()
+                                        .into(),
+                                    ))
+                                    .await;
+                                let _ = ws_sender.send(Message::Close(None)).await;
+                                break;
+                            }
                             DownloadEvent::Error(message) => {
                                 let _ = ws_sender
                                     .send(Message::Text(
@@ -466,6 +480,66 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                 )
                                 .await;
                                 break;
+                            }
+                            ReceiverMessage::Accept => {
+                                if !SessionService::accept(&state_for_recv, &code_for_recv).await {
+                                    TransferService::fail_session(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        Some("the receiver accepted before the transfer was described"),
+                                        Some("accept arrived before the transfer was described"),
+                                        "receiver accepted before meta",
+                                    )
+                                    .await;
+                                    break;
+                                }
+
+                                TransferService::send_sender(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    SenderEvent::Accepted,
+                                )
+                                .await;
+                            }
+                            ReceiverMessage::Decline { reason } => {
+                                TransferService::send_sender(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    SenderEvent::Declined(decline_reason(reason.as_deref())),
+                                )
+                                .await;
+                                TransferService::end_session(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    Ending::Declined,
+                                )
+                                .await;
+                                break;
+                            }
+                            ReceiverMessage::Cancel { reason } => {
+                                TransferService::send_sender(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    SenderEvent::Cancelled(cancel_reason(reason.as_deref())),
+                                )
+                                .await;
+                                TransferService::end_session(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    Ending::Cancelled,
+                                )
+                                .await;
+                                break;
+                            }
+                            ReceiverMessage::Finishing => {
+                                SessionService::touch_session(&state_for_recv, &code_for_recv)
+                                    .await;
+                                TransferService::send_sender(
+                                    &state_for_recv,
+                                    &code_for_recv,
+                                    SenderEvent::Finishing,
+                                )
+                                .await;
                             }
                             ReceiverMessage::Error => {
                                 TransferService::fail_session(

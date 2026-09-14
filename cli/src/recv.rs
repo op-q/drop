@@ -10,7 +10,9 @@ use std::{
 use serde_json::json;
 
 use crate::{
-    client, crypto, direct, display, names,
+    client,
+    consent::{self, ConsentPrompt, Outcome},
+    crypto, direct, display, names,
     payload::{GZIP_MIME, TAR_GZIP_MIME, TAR_MIME},
     progress::Progress,
     transport::{Frame, Transport, relay},
@@ -102,6 +104,38 @@ pub struct ReceiveOptions {
     pub out_dir: PathBuf,
     pub extract: bool,
     pub force: bool,
+    /// Whether to ask before accepting, or accept without asking (`--yes`).
+    pub acceptance: consent::Acceptance,
+}
+
+/// Where a transfer would land, worked out before anything exists on disk.
+///
+/// The receiver is shown this and then asked, so nothing here may create,
+/// truncate, or reserve a name. [`create_target`] does that, after a yes.
+enum PlannedTarget {
+    File {
+        directory: PathBuf,
+        /// The name the file is expected to get: rewritten for this platform
+        /// and numbered past anything already there.
+        path: PathBuf,
+        /// The name before numbering, which `create_new_file` starts from.
+        name: String,
+        /// What the sender asked for, when the expected name differs from it.
+        instead_of: Option<String>,
+        replacing: bool,
+    },
+    Archive {
+        root: PathBuf,
+    },
+}
+
+impl ConsentPrompt for consent::Acceptance {
+    async fn decide(&mut self, preview: &consent::Preview) -> consent::Consent {
+        match self {
+            Self::Ask => consent::AskTheReceiver.decide(preview).await,
+            Self::Yes => consent::AcceptWithoutAsking.decide(preview).await,
+        }
+    }
 }
 
 /// Where received bytes are written: either straight to a file, or through the
@@ -118,6 +152,22 @@ enum Target {
 }
 
 pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // Before anything is contacted: finding out after the key exchange would
+    // burn the sender's code for a question nobody can answer.
+    options.acceptance.check_answerable()?;
+
+    let mut acceptance = options.acceptance;
+    run_deciding(code, &options, &mut acceptance).await
+}
+
+/// [`run`], with the consent question put to `prompt` instead of to the
+/// terminal, so `options.acceptance` is not consulted. For programs and tests
+/// that decide for themselves.
+pub async fn run_deciding<P: ConsentPrompt + Send>(
+    code: &str,
+    options: &ReceiveOptions,
+    prompt: &mut P,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     if options.path == direct::Path::Relay && options.origin.is_none() {
         return Err(format!(
             "--transport relay receives through a relay, and none is configured: {}.",
@@ -148,7 +198,7 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
     // the sender fell back. A missing record is not a wrong code — a wrong code
     // is not detectable here at all, and surfaces at the sealed metadata.
     if options.path != direct::Path::Relay {
-        match try_direct(&code, &options).await {
+        match try_direct(&code, options, prompt).await {
             Ok(Some(outcome)) => return outcome,
             Ok(None) => {
                 direct::may_fall_back(options.path, options.origin.as_deref(), &*missing_record())?;
@@ -176,7 +226,7 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
 
     let mut transport = relay::connect_receiver(&origin, code.nameplate()).await?;
 
-    receive_transfer(&mut transport, &code, &options).await
+    receive_transfer(&mut transport, &code, options, prompt).await
 }
 
 /// The message in an `error` frame, made safe to print.
@@ -197,9 +247,10 @@ fn missing_record() -> Box<dyn Error + Send + Sync> {
 /// broken", because only the first is an ordinary outcome worth falling back
 /// from quietly.
 #[allow(clippy::type_complexity)]
-async fn try_direct(
+async fn try_direct<P: ConsentPrompt + Send>(
     code: &crypto::TransferCode,
     options: &ReceiveOptions,
+    prompt: &mut P,
 ) -> Result<Option<Result<(), Box<dyn Error + Send + Sync>>>, Box<dyn Error + Send + Sync>> {
     eprintln!("Looking for the sender...");
 
@@ -220,7 +271,7 @@ async fn try_direct(
     // driver, so dropping it early kills a transfer that had just started —
     // which is exactly what happened the first time this ran over a real
     // network, and what the loopback tests could not see.
-    let outcome = receive_transfer(&mut dialled.transport, code, options).await;
+    let outcome = receive_transfer(&mut dialled.transport, code, options, prompt).await;
 
     dialled.endpoint.shutdown().await;
 
@@ -231,10 +282,11 @@ async fn try_direct(
 ///
 /// Written against the conversation rather than against a socket, so a second
 /// carrier is a different `T` and not a second copy of this function.
-pub(crate) async fn receive_transfer<T: Transport>(
+pub(crate) async fn receive_transfer<T: Transport, P: ConsentPrompt>(
     transport: &mut T,
     code: &crypto::TransferCode,
     options: &ReceiveOptions,
+    prompt: &mut P,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let keys = exchange_keys(transport, code).await?;
     let (version, ciphertext_size, sealed_metadata) = wait_for_meta(transport).await?;
@@ -288,6 +340,58 @@ pub(crate) async fn receive_transfer<T: Transport>(
     let filename = meta.filename;
     let mime_type = meta.mime_type;
 
+    let decompress = options.extract
+        && (mime_type == GZIP_MIME || mime_type == TAR_GZIP_MIME || filename.ends_with(".gz"));
+    let is_archive = options.extract
+        && (mime_type == TAR_MIME
+            || mime_type == TAR_GZIP_MIME
+            || strip_gz(&filename).ends_with(".tar"));
+
+    // Consent before bytes. Everything the question needs is known now, and
+    // nothing has been created: `plan_target` only looks.
+    let planned = plan_target(options, &filename, is_archive, decompress);
+    let preview = consent::Preview {
+        name: filename.clone(),
+        size,
+        landing: planned.landing(),
+        entry_count: meta.entry_count,
+        unpacked_size: meta.unpacked_size,
+    };
+
+    match consent::ask(transport, prompt, &preview, consent::ACCEPT_DEADLINE).await? {
+        Outcome::Accepted => {
+            transport.send_control(json!({ "type": "accept" })).await?;
+        }
+        declined => {
+            let reason = if declined == Outcome::TimedOut {
+                eprintln!("No answer within two minutes, so the transfer was declined.");
+                "timed_out"
+            } else {
+                eprintln!("Declined.");
+                "declined"
+            };
+
+            let _ = transport
+                .send_control(json!({ "type": "decline", "reason": reason }))
+                .await;
+            transport.close().await;
+            eprintln!("Nothing was saved.");
+            return Ok(());
+        }
+    }
+
+    let mut target = match create_target(options, planned) {
+        Ok(target) => target,
+        Err(error) => {
+            // Accepted and then unable to write. The sender is told in the
+            // agreed terms rather than left to find a dropped connection.
+            let _ = transport
+                .send_control(json!({ "type": "cancel", "reason": "write_failed" }))
+                .await;
+            return Err(error);
+        }
+    };
+
     let mut opener = crypto::Opener::new(&keys, size);
 
     // The sender chose this name. It reaches the terminal only through
@@ -297,15 +401,6 @@ pub(crate) async fn receive_transfer<T: Transport>(
         display::name(&filename),
         crate::progress::format_bytes(size)
     );
-
-    let decompress = options.extract
-        && (mime_type == GZIP_MIME || mime_type == TAR_GZIP_MIME || filename.ends_with(".gz"));
-    let is_archive = options.extract
-        && (mime_type == TAR_MIME
-            || mime_type == TAR_GZIP_MIME
-            || strip_gz(&filename).ends_with(".tar"));
-
-    let mut target = open_target(options, &filename, is_archive, decompress)?;
     let mut decoder = if decompress {
         Some(flate2::write::GzDecoder::new(Vec::new()))
     } else {
@@ -365,6 +460,11 @@ pub(crate) async fn receive_transfer<T: Transport>(
                         return Err(error.into());
                     }
 
+                    // Closing the file, or finishing an extraction, can take
+                    // a while after the last byte. The sender is told so it
+                    // can say what is happening rather than appear stuck.
+                    let _ = transport.send_control(json!({ "type": "finishing" })).await;
+
                     finish(&mut target, decoder, &mut expansion)?;
                     progress.finish(written);
 
@@ -375,6 +475,27 @@ pub(crate) async fn receive_transfer<T: Transport>(
                     report(&target, written);
                     transport.close().await;
                     return Ok(());
+                }
+                Some("cancel") => {
+                    let written_into = match &target {
+                        Target::Archive { root, extractor } => {
+                            Some((root.clone(), extractor.files_written()))
+                        }
+                        Target::File { .. } => None,
+                    };
+                    discard_partial(target);
+
+                    if let Some((root, files)) = written_into {
+                        eprintln!(
+                            "{files} file{} had already been extracted into {} and were kept.",
+                            if files == 1 { "" } else { "s" },
+                            display::for_terminal(&root.display().to_string())
+                        );
+                    }
+
+                    return Err(
+                        consent::peer_cancelled("sender", payload["reason"].as_str()).into(),
+                    );
                 }
                 Some("error") => {
                     return Err(peer_error(&payload, "the relay reported an error").into());
@@ -484,66 +605,130 @@ async fn wait_for_meta<T: Transport>(
     Err("the transfer connection closed before the sender described the file".into())
 }
 
-fn open_target(
+/// Works out where a transfer would land, touching nothing.
+///
+/// The name a file is expected to get is computed the way [`create_new_file`]
+/// will compute it, but by looking rather than creating, so declining leaves
+/// the directory exactly as it was. If another file takes that name while the
+/// receiver is deciding, [`create_target`] numbers past it and says so.
+fn plan_target(
     options: &ReceiveOptions,
     filename: &str,
     is_archive: bool,
     decompress: bool,
-) -> Result<Target, Box<dyn Error + Send + Sync>> {
-    fs::create_dir_all(&options.out_dir)?;
-
+) -> PlannedTarget {
     if is_archive {
-        return Ok(Target::Archive {
+        return PlannedTarget::Archive {
             root: options.out_dir.clone(),
-            extractor: Box::new(TarExtractor::new(&options.out_dir).overwriting(options.force)),
-        });
+        };
     }
 
     // A remote peer chooses this name, so keep only the final component: an
     // archive-style path in `filename` must not decide where the file lands.
     // On Windows the component is also rewritten, so `report:v2.pdf` is saved
     // as a file rather than as a stream on a file named `report`.
-    let (mut safe_name, renamed) =
+    let (mut name, renamed) =
         names::received_file_name(filename, names::Naming::for_this_platform());
 
-    if renamed {
-        eprintln!(
-            "Saving {} as {}: this system cannot store that name as it is",
-            display::name(filename),
-            display::name(&safe_name)
-        );
-    }
-
     if decompress {
-        safe_name = strip_gz(&safe_name).to_string();
+        name = strip_gz(&name).to_string();
     }
 
-    let requested = options.out_dir.join(&safe_name);
+    let requested = options.out_dir.join(&name);
 
     if options.force {
-        let file = fs::File::create(&requested)?;
-        return Ok(Target::File {
+        let replacing = requested.symlink_metadata().is_ok();
+        return PlannedTarget::File {
+            directory: options.out_dir.clone(),
             path: requested,
-            file,
-        });
+            instead_of: renamed.then(|| filename.to_string()),
+            name,
+            replacing,
+        };
     }
 
-    let (path, file) = create_new_file(&options.out_dir, &safe_name)?;
+    let path = (0..=MAX_NAME_ATTEMPTS)
+        .map(|attempt| {
+            if attempt == 0 {
+                requested.clone()
+            } else {
+                options.out_dir.join(numbered_name(&name, attempt))
+            }
+        })
+        .find(|candidate| candidate.symlink_metadata().is_err())
+        .unwrap_or_else(|| requested.clone());
 
-    if path != requested {
-        eprintln!(
-            "{} already exists; saving as {} instead",
-            display::name(&safe_name),
-            display::name(
-                &path
-                    .file_name()
-                    .unwrap_or(path.as_os_str())
-                    .to_string_lossy()
-            )
-        );
+    let instead_of = (renamed || path != requested).then(|| filename.to_string());
+
+    PlannedTarget::File {
+        directory: options.out_dir.clone(),
+        path,
+        name,
+        instead_of,
+        replacing: false,
     }
+}
 
-    Ok(Target::File { path, file })
+impl PlannedTarget {
+    fn landing(&self) -> consent::Landing {
+        match self {
+            Self::File {
+                path,
+                instead_of,
+                replacing,
+                ..
+            } => consent::Landing::File {
+                path: path.display().to_string(),
+                instead_of: instead_of.clone(),
+                replacing: *replacing,
+            },
+            Self::Archive { root } => consent::Landing::Folder {
+                into: root.display().to_string(),
+            },
+        }
+    }
+}
+
+/// Creates what [`plan_target`] described, now that the receiver has agreed.
+fn create_target(
+    options: &ReceiveOptions,
+    planned: PlannedTarget,
+) -> Result<Target, Box<dyn Error + Send + Sync>> {
+    fs::create_dir_all(&options.out_dir)?;
+
+    match planned {
+        PlannedTarget::Archive { root } => Ok(Target::Archive {
+            extractor: Box::new(TarExtractor::new(&root).overwriting(options.force)),
+            root,
+        }),
+        PlannedTarget::File {
+            directory,
+            path: expected,
+            name,
+            replacing: _,
+            instead_of: _,
+        } => {
+            if options.force {
+                let file = fs::File::create(&expected)?;
+                return Ok(Target::File {
+                    path: expected,
+                    file,
+                });
+            }
+
+            let (path, file) = create_new_file(&directory, &name)?;
+
+            if path != expected {
+                eprintln!(
+                    "{} was taken while you were deciding; saving as {} instead",
+                    display::for_terminal(&expected.display().to_string()),
+                    display::for_terminal(&path.display().to_string())
+                );
+            }
+
+            Ok(Target::File { path, file })
+        }
+    }
 }
 
 /// Creates the destination file, adding `-1`, `-2`, and so on to the name when

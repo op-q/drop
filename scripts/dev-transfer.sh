@@ -84,7 +84,7 @@ done
 [ -n "$CODE" ] || { echo "no code appeared:"; cat "$WORK/send.log"; exit 1; }
 echo "==> code: $CODE"
 
-DROP_SERVER="$ORIGIN" ./target/debug/drop recv "$CODE" -o "$WORK/out" --no-extract -f
+DROP_SERVER="$ORIGIN" ./target/debug/drop recv "$CODE" -o "$WORK/out" --no-extract -f --yes
 wait "$SEND" || { echo "the sender failed:"; cat "$WORK/send.log"; exit 1; }
 
 RECEIVED="$(find "$WORK/out" -type f | head -1)"

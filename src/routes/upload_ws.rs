@@ -22,14 +22,14 @@ use crate::{
         client_ip_from_request,
     },
     domain::{
-        messages::SenderMessage,
-        session::{DownloadEvent, SenderEvent},
+        messages::{SenderMessage, cancel_reason},
+        session::{Acceptance, DownloadEvent, SenderEvent},
     },
     errors::AppError,
     services::{
         cleanup_service::remove_expired_sessions,
         session_service::{SenderClaimResult, SessionService},
-        transfer_service::TransferService,
+        transfer_service::{Ending, TransferService},
     },
     telemetry::tracing::transfer_span,
     ws::protocol,
@@ -240,6 +240,38 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                     break;
                                 }
                             }
+                            SenderEvent::Accepted | SenderEvent::Finishing => {
+                                let kind = if matches!(event, SenderEvent::Accepted) {
+                                    "accept"
+                                } else {
+                                    "finishing"
+                                };
+                                let msg = serde_json::json!({ "type": kind });
+
+                                if ws_sender
+                                    .send(Message::Text(msg.to_string().into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            SenderEvent::Declined(reason) | SenderEvent::Cancelled(reason) => {
+                                let kind = if matches!(event, SenderEvent::Declined(_)) {
+                                    "decline"
+                                } else {
+                                    "cancel"
+                                };
+                                let msg = serde_json::json!({ "type": kind, "reason": reason });
+
+                                // Terminal, and closed with a handshake rather
+                                // than dropped, for the reason
+                                // `transfer_complete` is: a socket dropped with
+                                // data queued resets instead of closing.
+                                let _ = ws_sender.send(Message::Text(msg.to_string().into())).await;
+                                let _ = ws_sender.send(Message::Close(None)).await;
+                                break;
+                            }
                             SenderEvent::MetaOk(confirmation) => {
                                 let msg = serde_json::json!({
                                     "type": "meta_ok",
@@ -285,6 +317,9 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
             // meant taking the global session lock and cloning the whole
             // `Session` several times for every chunk relayed.
             let mut relay_target: Option<mpsc::Sender<DownloadEvent>> = None;
+            // The receiver's consent, resolved with `relay_target` for the
+            // same reason: it is checked on every chunk.
+            let mut acceptance: Option<Acceptance> = None;
             let mut expected_ciphertext_size = None;
             let mut bytes_received = 0_u64;
             let mut progress = ProgressThrottle::new();
@@ -476,7 +511,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                     };
 
                                     expected_ciphertext_size = Some(ciphertext_size);
-                                    let _ = SessionService::touch_session(
+                                    acceptance = SessionService::mark_meta_forwarded(
                                         &state_for_recv,
                                         &code_for_recv,
                                     )
@@ -568,19 +603,27 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                     break;
                                 }
 
-                                SenderMessage::Cancel => {
+                                SenderMessage::Cancel { reason } => {
+                                    // The peer's word, not an error: the
+                                    // receiver is told the sender cancelled
+                                    // and why, and it is not counted as a
+                                    // failure.
+                                    TransferService::send_receiver(
+                                        &state_for_recv,
+                                        &code_for_recv,
+                                        DownloadEvent::Cancelled(cancel_reason(reason.as_deref())),
+                                    )
+                                    .await;
                                     TransferService::send_sender(
                                         &state_for_recv,
                                         &code_for_recv,
                                         SenderEvent::Status("cancelled"),
                                     )
                                     .await;
-                                    TransferService::fail_session(
+                                    TransferService::end_session(
                                         &state_for_recv,
                                         &code_for_recv,
-                                        None,
-                                        Some("sender cancelled"),
-                                        "sender cancelled transfer",
+                                        Ending::Cancelled,
                                     )
                                     .await;
                                     break;
@@ -612,6 +655,22 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                             .await;
                             continue;
                         };
+
+                        // Consent before bytes. The receiver refuses a chunk
+                        // it did not agree to as well, so this is not the only
+                        // guard, but it means the relay never spends its
+                        // memory budget on bytes nobody accepted.
+                        if !acceptance.as_ref().is_some_and(Acceptance::given) {
+                            TransferService::fail_session(
+                                &state_for_recv,
+                                &code_for_recv,
+                                Some("the sender streamed before the receiver accepted"),
+                                Some("the sender streamed before you accepted"),
+                                "sender streamed before the receiver accepted",
+                            )
+                            .await;
+                            break;
+                        }
 
                         let chunk_len = bytes.len() as u64;
                         bytes_received = bytes_received.saturating_add(chunk_len);

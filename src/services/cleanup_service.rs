@@ -80,16 +80,9 @@ mod tests {
     fn detects_expired_sessions() {
         let last_activity = Instant::now() - Duration::from_secs(301);
         let session = Session {
-            ciphertext_size: 1,
             created_at: last_activity,
             last_activity,
-            sender_tx: None,
-            download_tx: None,
-            sender_connected: false,
-            receiver_connected: false,
-            bytes_relayed: 0,
-            receiver_acknowledged_bytes: 0,
-            sender_finished: false,
+            ..Session::new(1)
         };
 
         assert!(is_session_expired(&session, Instant::now()));
@@ -99,16 +92,13 @@ mod tests {
     fn keeps_active_transfers_alive() {
         let now = Instant::now();
         let session = Session {
-            ciphertext_size: 1,
             created_at: now - Duration::from_secs(301),
             last_activity: now,
-            sender_tx: None,
-            download_tx: None,
             sender_connected: true,
             receiver_connected: true,
             bytes_relayed: 1,
             receiver_acknowledged_bytes: 1,
-            sender_finished: false,
+            ..Session::new(1)
         };
 
         assert!(!is_session_expired(&session, now));

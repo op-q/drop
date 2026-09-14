@@ -1,6 +1,6 @@
 # Receiver consent, cancel, and live status plan
 
-Status: **active** — phase 1 done 2026-09-14
+Status: **active** — phases 0–3 done 2026-09-14; phase 4 next
 Created: **2026-09-14**
 Last updated: **2026-09-14**
 
@@ -328,7 +328,7 @@ concrete type.
 
 ### Phase 0 — decisions
 
-- [ ] `decisions.md` entry: consent before bytes, the receiver-owned type
+- [x] `decisions.md` entry 19: consent before bytes, the receiver-owned type
       label, `--yes` required without a terminal, reasons as enumerations,
       version 2 versions the conversation, and exit codes 3 and 4.
 - [ ] Settle open questions 1–3 below.
@@ -369,31 +369,31 @@ was already in the tree through ratatui.
 
 Bumps the version; lands with or after `meta_ok` key confirmation.
 
-- [ ] `crypto`: `ENVELOPE_VERSION = 2`; `Metadata` gains `entry_count` and
+- [x] `crypto`: `ENVELOPE_VERSION = 2`; `Metadata` gains `entry_count` and
       `unpacked_size`, both `Option<u64>`.
-- [ ] `quic.rs`: `DROP_ALPN = b"drop/transfer/2"`, and the ALPN-mismatch error
+- [x] `quic.rs`: `DROP_ALPN = b"drop/transfer/2"`, and the ALPN-mismatch error
       mapped to the version sentence.
-- [ ] Relay: the new `ReceiverMessage` variants, forwarding, ordering
+- [x] Relay: the new `ReceiverMessage` variants, forwarding, ordering
       enforcement (no chunk before `accept`), `decline`/`cancel` counted apart
       from failures, `last_activity` refreshed on forwarded frames.
-- [ ] Relay tests in `tests/websocket_transfer.rs`: accept then transfer;
+- [x] Relay tests in `tests/websocket_transfer.rs`: accept then transfer;
       decline ends the session with no failure metric; a chunk before accept
       fails the session; receiver cancel mid-stream reaches the sender as
       `cancel`; sender cancel reaches the receiver as `cancel`, not `error`.
-- [ ] `protocol.md`: the conversation diagram, both frame tables, the relay's
+- [x] `protocol.md`: the conversation diagram, both frame tables, the relay's
       new ordering rules, and the version section.
 
 ### Phase 3 — receiver consent in the CLI
 
-- [ ] Split `open_target` into `plan_target` / `create_target`.
-- [ ] `ConsentPrompt` trait, the counterpart of `AnotherAttempt`, with
+- [x] Split `open_target` into `plan_target` / `create_target`.
+- [x] `ConsentPrompt` trait, the counterpart of `AnotherAttempt`, with
       `AskTheTerminal`-style and scripted implementations, so the policy is
       tested without a terminal.
-- [ ] Preview rendering for file and folder; `-y/--yes`; no-terminal refusal
+- [x] Preview rendering for file and folder; `-y/--yes`; no-terminal refusal
       **before connecting**; the 120 s deadline.
-- [ ] Sender: `payload.rs` fills `entry_count` and `unpacked_size` from
+- [x] Sender: `payload.rs` fills `entry_count` and `unpacked_size` from
       `TarPlan`; `await_consent`.
-- [ ] Tests over `ScriptedTransport` and in `cli/tests/transfer.rs` over a real
+- [x] Tests over `ScriptedTransport` and in `cli/tests/transfer.rs` over a real
       relay and over the direct pair:
       - decline leaves the destination directory **byte-for-byte unchanged**
         (listing and mtimes)
@@ -402,7 +402,44 @@ Bumps the version; lands with or after `meta_ok` key confirmation.
       - a chunk before accept is refused
       - `--yes` never prompts
       - no terminal without `--yes` exits non-zero **without contacting the relay**
-- [ ] `netlab/runner.py` passes `--yes`.
+- [x] `netlab/runner.py` passes `--yes`.
+
+### Phases 2 and 3, done 2026-09-14 — what landed differently
+
+On `feat/receiver-consent`, stacked on `meta_ok` key confirmation.
+
+- **Receives must be cancel-safe, and the QUIC framing was not.** Found while
+  designing the prompt: a relay socket nobody reads stops answering pings and is
+  dropped after 45 seconds. So the question races a read of the transport, and
+  that read is abandoned when the person answers. `FramedTransport::receive`
+  used `read_exact` into a local buffer, which loses a partial frame when
+  dropped. It now keeps its partial frame in the struct. The trait documents
+  the requirement. **Negative control:** the new test fails on the old reader.
+- **stdin is read on a plain thread**, not `spawn_blocking`: a runtime waits for
+  its blocking tasks when it shuts down, so an unanswered read would have kept
+  the process alive after a timed-out decline.
+- **`cancel.reason` gained `read_failed`** for a sender whose source failed
+  mid-stream, which is not a person cancelling.
+- **The relay's `SenderMessage::Cancel` became a struct variant**, and
+  `{"type":"cancel"}` without a reason still parses.
+- **`Session::new`** replaces seven hand-written `Session` literals, so the two
+  new fields did not have to be spelled out in every test.
+- **`recv::run_deciding`** takes a `ConsentPrompt`, so programs and tests can
+  decide without a terminal. `run` checks for a terminal; `run_deciding` does
+  not need to.
+- The Windows name rewriting from the cross-platform plan feeds the preview's
+  "Save as ... (instead of ...)" line, so the name shown is the name written.
+- Tests: 240, up from 217.
+  - relay: gating, decline, a reason outside the set, cancel both ways, accept
+    before meta, finishing
+  - consent: timeout under paused time, a sender cancel during the question, a
+    chunk before consent, relay narration, rendering, the three clocks
+  - end to end: a decline over a real relay leaves the directory byte-identical
+    and counts as declined, not failed
+  - end to end: a receiver with no terminal refuses without opening a
+    connection to a listening socket
+- **Negative controls:** without the relay's gate, the early-chunk test fails.
+  With a file created on the decline path, the decline test fails.
 
 ### Phase 4 — cancel and status
 
