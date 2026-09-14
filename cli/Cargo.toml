@@ -52,6 +52,10 @@ pkarr = { version = "8.0.0", default-features = false, features = ["dht"] }
 # against it. See docs/plans/interactive-terminal-ui-plan-2026-09-10.md.
 ratatui = "0.30.2"
 crossterm = "0.29.0"
+# Display width of a name a peer chose, so eliding it counts a CJK character as
+# the two columns it takes. Pure Rust, and already in the tree through ratatui,
+# so this adds no crate to the build.
+unicode-width = "0.2"
 
 [dev-dependencies]
 api = { path = ".." }

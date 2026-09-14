@@ -10,7 +10,7 @@ use std::{
 use serde_json::json;
 
 use crate::{
-    client, crypto, direct,
+    client, crypto, direct, display,
     payload::{GZIP_MIME, TAR_GZIP_MIME, TAR_MIME},
     progress::Progress,
     transport::{Frame, Transport, relay},
@@ -179,6 +179,14 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
     receive_transfer(&mut transport, &code, &options).await
 }
 
+/// The message in an `error` frame, made safe to print.
+///
+/// A peer on the direct path, or the relay on the other one, wrote it, and
+/// neither is trusted to put bytes on this terminal.
+fn peer_error(payload: &serde_json::Value, otherwise: &str) -> String {
+    display::peer_message(payload["message"].as_str().unwrap_or(otherwise))
+}
+
 fn missing_record() -> Box<dyn Error + Send + Sync> {
     "nobody has published a peer-to-peer address for this code".into()
 }
@@ -279,9 +287,11 @@ pub(crate) async fn receive_transfer<T: Transport>(
 
     let mut opener = crypto::Opener::new(&keys, size);
 
+    // The sender chose this name. It reaches the terminal only through
+    // `display`, because an escape sequence in it would otherwise run here.
     eprintln!(
         "Receiving {} ({})",
-        filename,
+        display::name(&filename),
         crate::progress::format_bytes(size)
     );
 
@@ -364,11 +374,7 @@ pub(crate) async fn receive_transfer<T: Transport>(
                     return Ok(());
                 }
                 Some("error") => {
-                    return Err(payload["message"]
-                        .as_str()
-                        .unwrap_or("the relay reported an error")
-                        .to_string()
-                        .into());
+                    return Err(peer_error(&payload, "the relay reported an error").into());
                 }
                 _ => {}
             },
@@ -418,11 +424,7 @@ async fn exchange_keys<T: Transport>(
                 }
             }
             Some("error") => {
-                return Err(payload["message"]
-                    .as_str()
-                    .unwrap_or("the relay reported an error")
-                    .to_string()
-                    .into());
+                return Err(peer_error(&payload, "the relay reported an error").into());
             }
             _ => {}
         }
@@ -470,11 +472,7 @@ async fn wait_for_meta<T: Transport>(
                 }
             }
             Some("error") => {
-                return Err(payload["message"]
-                    .as_str()
-                    .unwrap_or("the relay reported an error")
-                    .to_string()
-                    .into());
+                return Err(peer_error(&payload, "the relay reported an error").into());
             }
             _ => {}
         }
@@ -525,10 +523,13 @@ fn open_target(
     if path != requested {
         eprintln!(
             "{} already exists; saving as {} instead",
-            safe_name,
-            path.file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy()
+            display::name(&safe_name),
+            display::name(
+                &path
+                    .file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy()
+            )
         );
     }
 
@@ -654,19 +655,21 @@ fn report(target: &Target, received: u64) {
         Target::File { path, .. } => {
             eprintln!(
                 "Saved {} ({}).",
-                path.display(),
+                display::for_terminal(&path.display().to_string()),
                 crate::progress::format_bytes(received)
             );
         }
         Target::Archive { root, extractor } => {
             for warning in extractor.warnings() {
-                eprintln!("warning: {warning}");
+                // Warnings quote entry names from the archive, which the
+                // sender chose.
+                eprintln!("warning: {}", display::for_terminal(warning));
             }
 
             eprintln!(
                 "Extracted {} files into {}.",
                 extractor.files_written(),
-                root.display()
+                display::for_terminal(&root.display().to_string())
             );
         }
     }

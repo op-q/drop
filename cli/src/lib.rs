@@ -9,6 +9,7 @@ pub mod direct;
 // the browser client can compile it to WebAssembly. Keeping the name `crypto`
 // means every call site below reads the same as before the split.
 pub use drop_crypto as crypto;
+pub mod display;
 pub mod payload;
 pub mod progress;
 pub mod recv;

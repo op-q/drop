@@ -503,7 +503,7 @@ manual checklist recorded.
 ## 11. Receiver consent, cancel, and live status
 
 Plan: [`receiver-consent-and-status-plan-2026-09-14.md`](plans/receiver-consent-and-status-plan-2026-09-14.md)
-Status: **proposed**
+Status: **active** — phase 1 done
 
 The receiver sees name, type, size and where it will be saved, and accepts
 before a byte is written. Either side can cancel and the other is told in words.
@@ -513,9 +513,11 @@ receive, finish.
 - [ ] Phase 0 — decisions entry; consent before bytes, `--yes` required without
       a terminal (user decision 2026-09-14), reasons as enumerations, version 2,
       exit codes.
-- [ ] Phase 1 — display sanitisation, alone. **Live bug**: a received filename
-      reaches `eprintln!` unfiltered today, so an escape sequence in it can
-      redraw the terminal.
+- [x] Phase 1 — display sanitisation, alone. **Live bug**, fixed 2026-09-14: a
+      received filename reached `eprintln!` unfiltered, so an escape sequence
+      in it could redraw the terminal. Also covered: error messages from a peer
+      or the relay, archive warnings, and the file browser. Pinned end to end
+      through the binary, with a negative control.
 - [ ] Phase 2 — protocol and relay: `meta_ok` on both carriers, `accept`,
       `decline`, receiver `cancel`, `finishing`; the relay refuses chunks
       before `accept` and stops counting declines and cancels as failures;

@@ -915,3 +915,96 @@ async fn the_carrier_line_stays_out_of_an_ordinary_transfer() {
         "the sender stopped saying which path it took:\n{sent}"
     );
 }
+
+/// A name the sender chose cannot run on the receiver's terminal.
+///
+/// The name carries a clear-line-and-move-up sequence and a right-to-left
+/// override. Before `display` existed, the receiver's "Receiving" line printed
+/// both verbatim, before the receiver had agreed to anything.
+///
+/// Through the real binary and a pipe, because a pipe is what makes the
+/// assertion meaningful: the progress line only writes escape sequences when
+/// stderr is a terminal, so any escape found here came from the name.
+///
+/// Unix only. Windows refuses control characters in file names, so there is
+/// no way to create the fixture there, and a Windows sender cannot produce
+/// this name either.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hostile_file_name_cannot_write_escape_sequences_to_the_receiver() {
+    let origin = spawn_relay().await;
+    let base = scratch("hostile-name");
+    let hostile_name = "report\x1b[2K\x1b[1A\u{202E}fdp.exe";
+    let source = base.join(hostile_name);
+    let destination = base.join("received");
+    fs::create_dir_all(&destination).expect("destination directory");
+    write_file(&source, b"not what the name says");
+
+    let mut sender = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .arg("send")
+        .arg(&source)
+        .args(["--server", &origin, "--transport", "relay"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the sender");
+
+    let mut announced = BufReader::new(sender.stdout.take().expect("the sender's stdout")).lines();
+    let code = tokio::time::timeout(Duration::from_secs(30), announced.next_line())
+        .await
+        .expect("the sender announced a code in time")
+        .expect("reading the sender's stdout")
+        .expect("the sender announced a code at all");
+
+    let receiver = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .args(["recv", &code, "--server", &origin, "--transport", "relay"])
+        .arg("--out")
+        .arg(&destination)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the receiver")
+        .wait_with_output();
+
+    let receiver = tokio::time::timeout(Duration::from_secs(60), receiver)
+        .await
+        .expect("the receiver finished in time")
+        .expect("the receiver ran");
+    let sender = tokio::time::timeout(Duration::from_secs(60), sender.wait_with_output())
+        .await
+        .expect("the sender finished in time")
+        .expect("the sender ran");
+
+    let sent = String::from_utf8_lossy(&sender.stderr);
+    let received = String::from_utf8_lossy(&receiver.stderr);
+
+    assert!(sender.status.success(), "the sender failed:\n{sent}");
+    assert!(
+        receiver.status.success(),
+        "the receiver failed:\n{received}"
+    );
+
+    for (who, output) in [("receiver", &received), ("sender", &sent)] {
+        assert!(
+            !output.contains('\x1b'),
+            "an escape sequence from the name reached the {who}'s terminal:\n{output:?}"
+        );
+        assert!(
+            !output.contains('\u{202E}'),
+            "a right-to-left override from the name reached the {who}'s terminal:\n{output:?}"
+        );
+    }
+
+    assert!(
+        received.contains("fdp.exe"),
+        "the name should still be shown, only neutralised:\n{received}"
+    );
+
+    // The file itself keeps the name the sender gave it. Displaying a name
+    // safely is not the same as renaming a file, and this test is about the
+    // first.
+    assert_eq!(
+        fs::read(destination.join(hostile_name)).expect("the received file"),
+        b"not what the name says"
+    );
+}
