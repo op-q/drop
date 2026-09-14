@@ -95,9 +95,9 @@ The frontend and backend can be deployed independently:
 - use the backend-only [`../Dockerfile`](../Dockerfile).
 
 The backend honors a hosting provider's `PORT` variable when
-`DROP_BIND_ADDR` is not set. The backend-only Dockerfile does not build the
-web client, so a split deployment serves `/install.sh` from the frontend host
-rather than from the API host.
+`DROP_BIND_ADDR` is not set. Neither host serves the CLI installer: it is a
+release asset, `https://github.com/op-q/drop/releases/latest/download/install.sh`,
+built from [`../scripts/install.sh`](../scripts/install.sh).
 
 ## Kubernetes deployment
 

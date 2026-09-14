@@ -1,6 +1,6 @@
 # Browser client removal plan
 
-Status: **active** — open questions answered 2026-09-14, phase 0 next
+Status: **active** — phase 0 done 2026-09-14; phases 1–4 next
 Created: **2026-09-11**
 Last updated: **2026-09-14**
 
@@ -112,18 +112,28 @@ GitHub releases and verifies them against `checksums.txt`; it lived under
 `web/public/` only because entry 8's split deployment served it as a static file
 from the frontend host. Entry 16 ended that arrangement.
 
-- [ ] Move `web/public/install.sh` to `scripts/install.sh`. `web/dist/install.sh`
+- [x] Move `web/public/install.sh` to `scripts/install.sh`. `web/dist/install.sh`
       is the committed build output of the same file and goes with `web/` in
       phase 2.
-- [ ] Update [`release.yml`](../../.github/workflows/release.yml) lines 123, 130
+- [x] Update [`release.yml`](../../.github/workflows/release.yml) lines 123, 130
       and 153 to the new path.
-- [ ] Remove the `/install.sh` route at
+- [x] Remove the `/install.sh` route at
       [`src/lib.rs:47-49`](../../src/lib.rs#L47-L49). The relay served it so
       `curl https://drop.lifbom.com/install.sh` worked; that host is gone, and
       [`../../README.md`](../../README.md) already points at
       `github.com/op-q/drop/releases/latest/download/install.sh`.
-- [ ] Check the installer still resolves: `DROP_VERSION=v0.3.0 sh scripts/install.sh`
+- [x] Check the installer still resolves: `DROP_VERSION=v0.3.0 sh scripts/install.sh`
       into a scratch `DROP_INSTALL_DIR`.
+
+Done 2026-09-14 on `chore/move-install-script`. `scripts/install.sh` keeps mode
+`100755` and is byte-identical to the v0.3.0 release asset (`cmp` against the
+download). `DROP_VERSION=v0.3.0` installed a binary that reports `drop 0.3.0`.
+180 tests pass, the same count as before, since no test covered the route.
+`docs/deployment.md`'s split-deployment note named the relay route as the
+installer's source and now names the release asset. The publish job cannot be
+exercised without tagging, so the three `release.yml` edits were checked by
+reading: the sparse checkout path, the comment, and the `files:` entry all name
+`scripts/install.sh`, and no `web/public` reference remains.
 
 Landing this alone, before any deletion, means the release path is never broken
 even for one commit — and if the rest of the plan stalls, nothing is left

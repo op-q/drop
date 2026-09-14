@@ -1,7 +1,7 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[browser client removal](plans/browser-client-removal-plan-2026-09-11.md) phase 0**, then tests on Windows, macOS and Linux (item 10, phase 0). Re-prioritised 2026-09-14 around receiver consent and status (item 11), cancel, NAT proof and cross-platform support; the order is in [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law)
+Current work: **[browser client removal](plans/browser-client-removal-plan-2026-09-11.md) phases 1–4**, after phase 0 landed 2026-09-14, then tests on Windows, macOS and Linux (item 10, phase 0). Re-prioritised 2026-09-14 around receiver consent and status (item 11), cancel, NAT proof and cross-platform support; the order is in [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law)
 Last updated: **2026-09-14**
 
 The tactical view of what is being built and what state it is in. The detailed
@@ -405,7 +405,8 @@ and the documentation that describes it. **The relay stays**: entry 16 removed
 the browser's reason for it, not the UDP-blocked network's, and `netlab` covers
 that one.
 
-- [ ] Phase 0 — move `install.sh` out of `web/public/`. **Release-critical and
+- [x] Phase 0 — move `install.sh` out of `web/public/`. Done 2026-09-14:
+      now `scripts/install.sh`, byte-identical to the v0.3.0 asset. **Release-critical and
       lands alone.** `release.yml` sparse-checks it out at line 130 and
       publishes it at 153 under `fail_on_unmatched_files: true`, so deleting
       `web/` first fails the next tag in `publish`, after the whole build matrix
