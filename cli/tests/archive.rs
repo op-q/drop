@@ -631,9 +631,19 @@ fn archive_paths_are_judged_the_same_way_on_every_platform() {
 
     // A colon is an ordinary character on Unix and a stream or a drive on
     // Windows. Neither reading lets it leave the destination.
-    let as_sent = resolve_archive_path(destination, "C:x/notes", Naming::AsSent).expect("accepted");
-    assert_eq!(as_sent.stored_as, "C:x/notes");
-    assert!(!as_sent.renamed);
+    let as_sent = resolve_archive_path(destination, "C:x/notes", Naming::AsSent);
+    if cfg!(windows) {
+        // Stored as sent on Windows, `C:x` is a drive-relative path, and
+        // pushing it replaces the destination rather than extending it. Names
+        // are never stored as sent on Windows, but if they were, the final
+        // check that the result is still inside the destination catches it.
+        // Found by the first Windows run of this test.
+        assert!(as_sent.is_none(), "a drive prefix escaped: {as_sent:?}");
+    } else {
+        let as_sent = as_sent.expect("an ordinary name on this platform");
+        assert_eq!(as_sent.stored_as, "C:x/notes");
+        assert!(!as_sent.renamed);
+    }
 
     let windows =
         resolve_archive_path(destination, "C:x/notes", Naming::Windows).expect("accepted");
