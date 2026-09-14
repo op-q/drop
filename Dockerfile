@@ -2,11 +2,12 @@ FROM rust:1-slim-bookworm AS rust-builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
-# Cargo loads every workspace member's manifest before building any one of
-# them, so the CLI's manifest has to be here even though the CLI is not built.
-# `crypto/` is a real dependency of the server, not only a member. Without it
-# this stage fails before compiling anything, which it did from the day the
-# envelope moved into its own crate until 2026-09-14.
+# Cargo loads every workspace member's manifest, and the manifests of their
+# path dependencies, before building any one of them. So the CLI's manifest has
+# to be here even though the CLI is not built, and so does `crypto/`, which is
+# both a member and the CLI's path dependency. The relay itself does not depend
+# on it. Without it this stage fails before compiling anything, which it did
+# from the day the envelope moved into its own crate until 2026-09-14.
 COPY cli/Cargo.toml ./cli/Cargo.toml
 COPY crypto ./crypto
 COPY src ./src

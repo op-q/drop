@@ -17,9 +17,8 @@ path = "src/lib.rs"
 # second implementation byte-identical by hand (docs/decisions.md entry 11).
 # That client was removed in 0.4.0 (entry 17). The split stays because it is
 # worth having on its own: the envelope has no I/O and no transport in reach,
-# the relay shares its constants without linking the CLI, and whatever compiles
-# it next, a browser iroh node included, starts from a crate rather than a
-# refactor.
+# and whatever compiles it next, a browser iroh node included, starts from a
+# crate rather than a refactor.
 [dependencies]
 aes-gcm = "0.11"
 hkdf = "0.13"
