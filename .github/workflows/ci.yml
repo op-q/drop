@@ -48,6 +48,42 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-targets
 
+  # The same checks on the other two operating systems the CLI is meant to run
+  # on. Until this job existed no `cfg(not(unix))` branch had ever been
+  # compiled, let alone linted or run. See
+  # docs/plans/cross-platform-plan-2026-09-14.md, phase 0.
+  #
+  # A separate job rather than a matrix on `rust` above, for two reasons.
+  # Formatting cannot vary by platform, so it runs once. And branch protection
+  # requires a check named exactly "Rust": a matrix would rename it and block
+  # every pull request until the settings changed. Add these two to the
+  # required checks once they are green.
+  rust-platforms:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Windows and macOS runners start slower and build slower than Linux.
+    # Set from what the first runs take, not from the Linux job's 15.
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-14
+          - windows-2025
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --workspace --all-targets
+
   web:
     name: Web
     runs-on: ubuntu-24.04
