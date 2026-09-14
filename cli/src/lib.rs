@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod direct;
+pub mod names;
 // Re-exported rather than defined here: the envelope is a separate crate with
 // no I/O or transport in reach. Keeping the name `crypto`
 // means every call site below reads the same as before the split.

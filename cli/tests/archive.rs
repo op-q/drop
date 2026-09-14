@@ -11,7 +11,8 @@ use std::{
 };
 
 use drop_cli::{
-    tar::{TarPlan, safe_relative_path, symlink_target_stays_inside},
+    names::Naming,
+    tar::{TarPlan, resolve_archive_path, safe_relative_path, symlink_target_stays_inside},
     untar::TarExtractor,
 };
 // Only the symlink tests use this, and planting a symlink needs Unix.
@@ -592,6 +593,322 @@ fn consumes_declared_content_on_entry_types_that_create_no_file() {
         "real",
         "the entry after a sized directory header must still parse"
     );
+
+    fs::remove_dir_all(&base).ok();
+}
+
+/// Builds a one-entry archive whose name travels in a GNU long-name record,
+/// for names longer than a ustar header can hold.
+fn long_name_archive(name: &str, contents: &[u8]) -> Vec<u8> {
+    let mut archive = archive_of(&[("././@LongLink", b'L', "", name.as_bytes())]);
+    // `archive_of` ends every archive with its trailer; this one continues.
+    archive.truncate(archive.len() - 1024);
+    archive.extend(archive_of(&[("placeholder", b'0', "", contents)]));
+    archive
+}
+
+/// Every archive path is split on `/`, the only separator the format has,
+/// so every platform judges the same components. A backslash inside one is
+/// refused everywhere, because on Windows it would be a separator.
+#[test]
+fn archive_paths_are_judged_the_same_way_on_every_platform() {
+    let destination = Path::new("destination");
+
+    for naming in [Naming::AsSent, Naming::Windows] {
+        for hostile in [
+            "a\\..\\b",
+            "..\\escape.txt",
+            "\\\\server\\share\\x",
+            "\\\\?\\C:\\x",
+            "safe/..\\..\\x",
+        ] {
+            assert!(
+                resolve_archive_path(destination, hostile, naming).is_none(),
+                "{hostile} must be refused under {naming:?}"
+            );
+        }
+    }
+
+    // A colon is an ordinary character on Unix and a stream or a drive on
+    // Windows. Neither reading lets it leave the destination.
+    let as_sent = resolve_archive_path(destination, "C:x/notes", Naming::AsSent);
+    if cfg!(windows) {
+        // Stored as sent on Windows, `C:x` is a drive-relative path, and
+        // pushing it replaces the destination rather than extending it. Names
+        // are never stored as sent on Windows, but if they were, the final
+        // check that the result is still inside the destination catches it.
+        // Found by the first Windows run of this test.
+        assert!(as_sent.is_none(), "a drive prefix escaped: {as_sent:?}");
+    } else {
+        let as_sent = as_sent.expect("an ordinary name on this platform");
+        assert_eq!(as_sent.stored_as, "C:x/notes");
+        assert!(!as_sent.renamed);
+    }
+
+    let windows =
+        resolve_archive_path(destination, "C:x/notes", Naming::Windows).expect("accepted");
+    assert_eq!(windows.stored_as, "C_x/notes");
+    assert!(windows.renamed);
+    assert_eq!(windows.path, destination.join("C_x").join("notes"));
+}
+
+/// The rewriting that protects a Windows receiver, run through the real
+/// extractor on whatever platform the tests are on. The names below are ones
+/// Windows would read as a stream, a device, or a name that loses its last
+/// character. Here they must arrive as ordinary files with their new names
+/// reported.
+#[test]
+fn windows_naming_stores_every_entry_as_an_ordinary_file_and_reports_it() {
+    let base = scratch("windows-naming");
+    let destination = base.join("extracted");
+    fs::create_dir_all(&destination).expect("destination");
+
+    let archive = archive_of(&[
+        ("meeting/", b'5', "", b"".as_slice()),
+        ("meeting/10:30 standup.md", b'0', "", b"agenda".as_slice()),
+        ("meeting/CON", b'0', "", b"not a device".as_slice()),
+        (
+            "meeting/nul.txt",
+            b'0',
+            "",
+            b"not a device either".as_slice(),
+        ),
+        ("meeting/report.", b'0', "", b"trailing dot".as_slice()),
+        (
+            "meeting/notes.txt:hidden",
+            b'0',
+            "",
+            b"not a stream".as_slice(),
+        ),
+    ]);
+
+    let mut extractor = TarExtractor::new(&destination).naming(Naming::Windows);
+    extractor.write(&archive).expect("extraction");
+
+    for (stored, contents) in [
+        ("10_30 standup.md", "agenda"),
+        ("CON_", "not a device"),
+        ("nul_.txt", "not a device either"),
+        ("report_", "trailing dot"),
+        ("notes.txt_hidden", "not a stream"),
+    ] {
+        assert_eq!(
+            fs::read_to_string(destination.join("meeting").join(stored))
+                .unwrap_or_else(|error| panic!("{stored}: {error}")),
+            contents
+        );
+    }
+
+    assert_eq!(extractor.files_written(), 5);
+    let renames = extractor
+        .warnings()
+        .iter()
+        .filter(|warning| warning.starts_with("renamed "))
+        .count();
+    assert_eq!(
+        renames,
+        5,
+        "every rewrite must be reported: {:?}",
+        extractor.warnings()
+    );
+
+    fs::remove_dir_all(&base).ok();
+}
+
+/// Two names that rewrite to the same name do not overwrite each other. The
+/// second is skipped like any other existing file, and says so.
+#[test]
+fn a_rewrite_that_collides_keeps_the_first_file() {
+    let base = scratch("windows-collision");
+    let destination = base.join("extracted");
+    fs::create_dir_all(&destination).expect("destination");
+
+    let archive = archive_of(&[
+        ("a_b", b'0', "", b"first".as_slice()),
+        ("a:b", b'0', "", b"second".as_slice()),
+    ]);
+
+    let mut extractor = TarExtractor::new(&destination).naming(Naming::Windows);
+    extractor.write(&archive).expect("extraction");
+
+    assert_eq!(
+        fs::read_to_string(destination.join("a_b")).expect("read"),
+        "first"
+    );
+    assert!(
+        extractor
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("already exists")),
+        "{:?}",
+        extractor.warnings()
+    );
+
+    fs::remove_dir_all(&base).ok();
+}
+
+/// A name the filesystem refuses skips that entry and nothing else.
+///
+/// A 300-byte component is refused by every mainstream filesystem, which is
+/// what makes this runnable everywhere. It stands in for an exFAT drive
+/// refusing `a:b` on Linux, or a Windows name the rewriting does not cover.
+#[test]
+fn a_name_the_filesystem_refuses_skips_only_that_entry() {
+    let base = scratch("refused-name");
+    let destination = base.join("extracted");
+    fs::create_dir_all(&destination).expect("destination");
+
+    let mut archive = long_name_archive(&"x".repeat(300), b"unstorable");
+    archive.truncate(archive.len() - 1024);
+    archive.extend(archive_of(&[(
+        "after.txt",
+        b'0',
+        "",
+        b"still arrives".as_slice(),
+    )]));
+
+    let mut extractor = TarExtractor::new(&destination);
+    extractor
+        .write(&archive)
+        .expect("one unstorable name must not end the extraction");
+
+    assert_eq!(
+        fs::read_to_string(destination.join("after.txt")).expect("the entry after it"),
+        "still arrives"
+    );
+    assert_eq!(extractor.files_written(), 1);
+    assert!(
+        extractor
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("refused the name")),
+        "{:?}",
+        extractor.warnings()
+    );
+
+    fs::remove_dir_all(&base).ok();
+}
+
+/// A symlink in a folder sent from Linux or macOS must not stop a Windows
+/// receiver from getting everything else. Before this, `create_symlink`'s
+/// error ended the extraction at the first link.
+#[test]
+#[cfg(not(unix))]
+fn a_symlink_the_receiver_cannot_create_is_skipped_not_fatal() {
+    let base = scratch("symlink-unsupported");
+    let destination = base.join("extracted");
+    fs::create_dir_all(&destination).expect("destination");
+
+    let archive = archive_of(&[
+        ("project/", b'5', "", b"".as_slice()),
+        ("project/.bin/", b'5', "", b"".as_slice()),
+        ("project/.bin/tool", b'2', "../tool.js", b"".as_slice()),
+        ("project/tool.js", b'0', "", b"console.log(1)".as_slice()),
+    ]);
+
+    let mut extractor = TarExtractor::new(&destination);
+    extractor
+        .write(&archive)
+        .expect("a link this system cannot create must not end the extraction");
+
+    assert_eq!(
+        fs::read_to_string(destination.join("project").join("tool.js")).expect("read"),
+        "console.log(1)"
+    );
+    assert!(
+        extractor
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("cannot create symbolic links")),
+        "{:?}",
+        extractor.warnings()
+    );
+
+    fs::remove_dir_all(&base).ok();
+}
+
+/// On a case-insensitive filesystem `makefile` is `Makefile`, so the second
+/// entry is an existing file and is kept rather than overwritten.
+#[test]
+#[cfg(any(windows, target_os = "macos"))]
+fn a_name_differing_only_in_case_does_not_overwrite_on_a_case_insensitive_disk() {
+    let base = scratch("case-insensitive");
+    let destination = base.join("extracted");
+    fs::create_dir_all(&destination).expect("destination");
+
+    let archive = archive_of(&[
+        ("Makefile", b'0', "", b"first".as_slice()),
+        ("makefile", b'0', "", b"second".as_slice()),
+    ]);
+
+    let mut extractor = TarExtractor::new(&destination);
+    extractor.write(&archive).expect("extraction");
+
+    assert_eq!(
+        fs::read_to_string(destination.join("Makefile")).expect("read"),
+        "first"
+    );
+    assert_eq!(extractor.files_written(), 1);
+
+    fs::remove_dir_all(&base).ok();
+}
+
+/// The real thing, on Windows: names that Windows would read as a stream on
+/// an existing file, a device, a drive or a shortened name. Nothing outside
+/// the destination changes, and the receiver's own file keeps its contents.
+#[test]
+#[cfg(windows)]
+fn hostile_windows_names_cannot_reach_a_stream_a_device_or_an_existing_file() {
+    let base = scratch("windows-hostile");
+    let destination = base.join("extracted");
+    fs::create_dir_all(&destination).expect("destination");
+    write_file(&destination.join("mine.txt"), b"the receiver's own file");
+
+    let archive = archive_of(&[
+        ("mine.txt::$DATA", b'0', "", b"overwritten".as_slice()),
+        ("mine.txt:hidden", b'0', "", b"smuggled".as_slice()),
+        ("CON", b'0', "", b"device".as_slice()),
+        ("nul.txt", b'0', "", b"device".as_slice()),
+        ("report.", b'0', "", b"dot".as_slice()),
+        ("notes ", b'0', "", b"space".as_slice()),
+        ("C:x", b'0', "", b"drive".as_slice()),
+        ("a\\..\\..\\escape.txt", b'0', "", b"escape".as_slice()),
+    ]);
+
+    let mut extractor = TarExtractor::new(&destination);
+    extractor.write(&archive).expect("extraction");
+
+    assert_eq!(
+        fs::read_to_string(destination.join("mine.txt")).expect("read"),
+        "the receiver's own file",
+        "an entry reached the receiver's existing file"
+    );
+    assert!(
+        fs::read(destination.join("mine.txt:hidden")).is_err(),
+        "an entry created an alternate data stream on the receiver's file"
+    );
+
+    for stored in [
+        "mine.txt__$DATA",
+        "mine.txt_hidden",
+        "CON_",
+        "nul_.txt",
+        "report_",
+        "notes_",
+        "C_x",
+    ] {
+        assert!(
+            destination.join(stored).is_file(),
+            "{stored} was not written"
+        );
+    }
+
+    assert!(!base.join("escape.txt").exists());
+    let outside: Vec<_> = fs::read_dir(&base)
+        .expect("list")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(outside, vec![std::ffi::OsString::from("extracted")]);
 
     fs::remove_dir_all(&base).ok();
 }

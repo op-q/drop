@@ -1,6 +1,6 @@
 # Cross-platform plan: Windows, macOS and Linux, and transfers between them
 
-Status: **active** — phase 0 done 2026-09-14
+Status: **active** — phases 0 and 1 done 2026-09-14
 Created: **2026-09-14**
 Last updated: **2026-09-14**
 
@@ -228,10 +228,10 @@ expected to fail before its fixes.
 
 ### Phase 1 — a Windows receiver writes what it can and reports the rest
 
-- [ ] Finding 1: a symlink the platform cannot create becomes a warning,
+- [x] Finding 1: a symlink the platform cannot create becomes a warning,
       `skipped symlink {name}: this system cannot create symbolic links`, and
       extraction continues.
-- [ ] Finding 2, archives: a pure function that takes one normal component and
+- [x] Finding 2, archives: a pure function that takes one normal component and
       returns what Windows can store, compiled and unit-tested on **every**
       platform and applied only when the receiver runs on Windows. Rewrite
       `: < > " | ? *` and control characters to `_`, a trailing dot or space
@@ -240,23 +240,50 @@ expected to fail before its fixes.
       warning naming both forms. Existence and link checks run on the
       **rewritten** path, so the no-replace rule and the link checks judge the
       path that is actually written.
-- [ ] Finding 2, single files: the same function applied to the name in
+- [x] Finding 2, single files: the same function applied to the name in
       [`recv.rs:503-507`](../../cli/src/recv.rs#L503-L507), before collision
       numbering, so `report:v2.pdf` saves as `report_v2.pdf` and the preview in
       the consent plan shows that name.
-- [ ] Every platform: an entry whose creation fails with an invalid-name or
+- [x] Every platform: an entry whose creation fails with an invalid-name or
       permission error becomes a warning, not an abort, so a Linux receiver
       writing to an exFAT drive gets every file it can store. Disk-full and other
       I/O errors still abort, because continuing would only fail again.
-- [ ] Case-insensitive collisions (`Makefile` and `makefile` on Windows or
+- [x] Case-insensitive collisions (`Makefile` and `makefile` on Windows or
       macOS): no code change is expected, since the second is "already exists"
       and is skipped. Pin it with a test that runs on the two platforms where it
       applies.
-- [ ] Windows-only extraction tests, the counterpart of the Unix symlink tests,
+- [x] Windows-only extraction tests, the counterpart of the Unix symlink tests,
       covering `a:b`, `a::$DATA` next to an existing `a`, `CON`, `nul.txt`,
       `report.`, `report `, `a\..\b`, `C:x`, `\\?\C:\x` and `\\server\share\x`. Each
       asserts both what was written and that nothing outside the destination or
       in an existing file changed.
+
+Done 2026-09-14 on `fix/windows-receiver`. Implementation notes, where they
+differ from the list above:
+
+- The policy lives in `cli/src/names.rs`: `Naming::{AsSent, Windows}`,
+  `windows_component`, and `received_file_name`. It is compiled and
+  unit-tested on every platform, and `TarExtractor::naming` lets the portable
+  tests drive the Windows rewriting through the real extractor on Linux.
+- **Archive paths are now split on `/` by hand** rather than handed to `Path`,
+  which reads `C:x` as a drive on Windows and as a name elsewhere. Every
+  platform now judges the same components. A backslash inside a component is
+  refused everywhere, as before on Unix and newly spelled out for Windows.
+- `COM¹`–`COM³`, `LPT¹`–`LPT³`, `CONIN$` and `CONOUT$` are also reserved
+  device names, and are covered.
+- Trailing dots and spaces are replaced one for one (`report..` becomes
+  `report__`), not collapsed, so two different names stay different.
+- "Warn and continue" covers `InvalidFilename` and `InvalidInput` only. A
+  permission error, a full disk or an I/O error still ends extraction, because
+  it would fail again on the next entry. Symlinks are the exception: on Windows
+  they are not attempted at all (with `--force`, attempting would delete the
+  file already at that path first). On Unix, a filesystem that cannot store a
+  link, such as exFAT, answers with a permission error, which is skipped.
+- Pinned without Windows by a 300-byte component, which every mainstream
+  filesystem refuses. **Negative control:** with the old behaviour restored,
+  the test fails with extraction aborting at that entry.
+- Windows-only and macOS/Windows-only tests are written and run in CI. They
+  have not run on a real Windows machine; phase 5 does that.
 
 **Gate:** a hostile archive built from every name above extracts on a Windows
 runner without writing outside the destination or into an existing file, and

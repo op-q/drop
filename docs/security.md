@@ -140,6 +140,18 @@ path inside it:
 - a symlink is refused if its target leaves the destination, evaluated against
   what is on disk rather than against the target's text;
 - existing files are kept unless `--force` is given;
+- on Windows, a name component Windows would interpret is rewritten, never
+  refused: `:` (which names an alternate data stream, or a drive), the other
+  forbidden characters and control characters become `_`, trailing dots and
+  spaces (which Windows strips) become `_`, and a device name such as `CON` or
+  `nul.txt` gets `_` after its stem. A rewrite changes one component's spelling
+  and cannot introduce a separator, so it cannot move an entry to a different
+  directory. The existence and link checks run on the rewritten path, which is
+  the one written. Every rewrite is reported. `cli/src/names.rs`;
+- a component containing `\` is refused on every platform, because on Windows
+  it would be a separator;
+- an entry whose name the filesystem refuses, or a symlink the system cannot
+  create, is skipped with a warning and extraction continues;
 - permission bits are masked to ownership bits, so an archive cannot set setuid,
   setgid, or sticky;
 - a compressed payload that expands more than a hundredfold is abandoned, which
