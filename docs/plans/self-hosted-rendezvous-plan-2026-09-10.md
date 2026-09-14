@@ -1,8 +1,8 @@
 # Self-hosted rendezvous plan
 
-Status: **in progress** — phase 1 outstanding
+Status: **active** — phases 1 and 2 landed 2026-09-10 and shipped in 0.3.0; phase 3 proposed 2026-09-14 and awaiting a decision
 Created: **2026-09-10**
-Last updated: **2026-09-10**
+Last updated: **2026-09-14**
 
 ## Goal
 
@@ -125,22 +125,22 @@ interface for it.
 
 ### Phase 1 — The two knobs
 
-- [ ] `Rendezvous` in `direct.rs`: parsed from `DROP_RENDEZVOUS_RELAY` and
+- [x] `Rendezvous` in `direct.rs`: parsed from `DROP_RENDEZVOUS_RELAY` and
       `DROP_RENDEZVOUS_BOOTSTRAP`, with a malformed value **failing loudly**
       rather than falling back to the default. Silently ignoring a typo in a
       relay URL would send an operator's traffic to n0 while they believed it
       was staying inside their network, which is the one outcome worse than an
       error.
-- [ ] `QuicEndpoint::bind` takes a `RelayMode`; `bind_without_relays` stays as
+- [x] `QuicEndpoint::bind` takes a `RelayMode`; `bind_without_relays` stays as
       the name for the LAN-only case so existing tests keep reading correctly.
-- [ ] `MainlineDirectory::new` takes bootstrap nodes.
-- [ ] `publish_sender` and `dial_sender` take the `Rendezvous` they bind with.
-- [ ] Unit tests for parsing: unset, set, a malformed URL, a malformed
+- [x] `MainlineDirectory::new` takes bootstrap nodes.
+- [x] `publish_sender` and `dial_sender` take the `Rendezvous` they bind with.
+- [x] Unit tests for parsing: unset, set, a malformed URL, a malformed
       bootstrap entry, and that an empty variable is treated as unset rather
       than as "no bootstrap nodes at all" — the second would silently disable
       the DHT.
-- [ ] `ENVIRONMENT` block in `USAGE`, naming both and saying what unset means.
-- [ ] `security.md`: what an operator takes on, from the section above.
+- [x] `ENVIRONMENT` block in `USAGE`, naming both and saying what unset means.
+- [x] `security.md`: what an operator takes on, from the section above.
 
 Deliberately **not** in phase 1: a pkarr relay. pkarr's HTTP relay client is
 excluded today by `default-features = false`, which `cli/Cargo.toml` says is
@@ -154,6 +154,44 @@ Not work in this plan, and listed so the dependency is visible: Phase 4 of
 [`network-lab-plan-2026-08-31.md`](network-lab-plan-2026-08-31.md) runs an iroh
 relay and a mainline testnet in a namespace and points both variables at them.
 That is where this gets exercised end to end.
+
+### Phase 3 — a relay whose certificate a private CA issued
+
+Proposed 2026-09-14, from the netlab finding. **Not started. It needs the
+user's decision**, because it changes what the CLI trusts.
+
+**The gap.** QUIC address discovery against the rendezvous relay is verified
+against iroh's CA roots. A deployment whose relay uses a certificate from its
+own CA fails that check silently, and that is the ordinary case inside an
+egress-filtered network, the exact audience phase 1 was built for. Transfers
+still complete, over the relay. `--status` still says `path=p2p`. Hole punching
+is never attempted, and nothing tells the operator.
+
+- [ ] Decide whether this is wanted at all. The alternative is documenting that
+      the relay needs a publicly trusted certificate for traversal to work, and
+      stopping there.
+- [ ] If wanted: `DROP_RENDEZVOUS_CA`, a path to a PEM file whose certificates
+      are **added to** the default roots, never replacing them, and only for the
+      endpoint's relay and discovery connections. A malformed, unreadable or
+      empty file is an error, by this plan's own no-silent-fallback rule.
+      Setting it without `DROP_RENDEZVOUS_RELAY` is also an error, so an
+      operator cannot believe they configured something they did not.
+- [ ] What it does **not** change: peer authentication. Peers still
+      authenticate each other by endpoint id and by the transfer code. A hostile
+      CA in this file can impersonate the *relay*, which already sees connection
+      metadata and nothing more (see Risks). `security.md` says so.
+- [ ] Detect the silent failure whether or not the variable is set. When a
+      custom relay is configured and the endpoint comes online with no
+      discovered public address, print one warning naming the likely cause.
+- [ ] Lab: the helper issues a CA and signs its leaf with it, writes the CA to
+      a file, and the runner passes `DROP_RENDEZVOUS_CA`. A self-signed leaf
+      used as its own trust anchor is rejected too, so the helper needs a real
+      CA. Then the full-cone row finally tests traversal, and the symmetric
+      row's negative control becomes meaningful instead of trivially true.
+
+**Rejected:** skipping certificate verification in the lab, even as an
+experiment. It would make the lab exercise a trust path production never runs,
+which is the lab's defining failure mode.
 
 ## Risks
 
@@ -171,7 +209,10 @@ That is where this gets exercised end to end.
   is ever learned and no punch is attempted. The lab's helper therefore serves
   QUIC address discovery on a self-signed certificate, which iroh's client
   accepts because it installs a custom verifier — it authenticates by endpoint
-  id, not by certificate chain. The port is not configurable: `RelayMode::custom`
+  id, not by certificate chain. **Corrected 2026-09-14: it does not.** iroh
+  1.0.3 rejects that certificate with `UnknownIssuer`, so address discovery has
+  never worked in the lab and no punch has ever been attempted there. See
+  phase 3, and the netlab plan's "Second look, 2026-09-14". The port is not configurable: `RelayMode::custom`
   gives every entry `RelayQuicConfig::default()`, so the client probes 7842 and
   nowhere else. Worth knowing if a second relay URL is ever added.
 - **Scope creep into a discovery framework.** Two values, read once, with no

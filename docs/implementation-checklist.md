@@ -1,8 +1,8 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[network topology lab](plans/network-lab-plan-2026-08-31.md)** — item 5, giving the peer-to-peer plan's unreachable validation gates a network to run on. Peer-to-peer transport is reachable and proved over a real network; its Phase 5 (documentation) still remains
-Last updated: **2026-08-31**
+Current work: **[browser client removal](plans/browser-client-removal-plan-2026-09-11.md) phase 0**, then tests on Windows, macOS and Linux (item 10, phase 0). Re-prioritised 2026-09-14 around receiver consent and status (item 11), cancel, NAT proof and cross-platform support; the order is in [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law)
+Last updated: **2026-09-14**
 
 The tactical view of what is being built and what state it is in. The detailed
 reasoning, risks, and validation for each item live in its plan under
@@ -28,6 +28,13 @@ Reordered 2026-08-20 at the user's direction: encryption moved ahead of
 confirmation, and transport was added. The reasoning and the cost of the swap
 are in
 [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law).
+
+**Revised 2026-09-14** at the user's direction: receiver consent, cancel and
+live status (item 11), proof of NAT traversal (items 5 and 6), and Windows,
+macOS and Linux with transfers between them (item 10). 0.4.0 bundles the browser
+removal (item 8), `meta_ok` key confirmation (item 3) and item 11's protocol
+change, so users take one wire break, not three. The full dependency order is
+in the plans index.
 
 The network lab (item 5) was added 2026-08-31 and runs alongside rather than in
 that sequence. It builds nothing the other items depend on; it gives item 3's
@@ -155,6 +162,10 @@ cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
       *noticing* that entry 13 chose the prompt for does not. Fix is a fourth
       HKDF output under `drop/v1/confirm`, compared in constant time. Land it
       before the direct path ships — after that it is a wire break.
+      **Corrected 2026-09-14: that deadline passed.** The direct path, on by
+      default, shipped in v0.2.0 (`cli/src/direct.rs` is in that tag), so this
+      is now a wire break. It ships in 0.4.0 under the same version bump as
+      item 11, so users take one break, not two.
 - [x] Phase 4 — selection, automatic fallback, and reporting the path taken.
       Done 2026-08-29. `--transport p2p|relay|auto` (and `DROP_TRANSPORT`),
       defaulting to `auto`; a locally drawn nameplate, since a serverless send
@@ -179,25 +190,10 @@ so could not express the bug. Now pinned by
 ## 4. Receiver preview and confirmation
 
 Plan: [`receiver-confirmation-plan-2026-08-19.md`](plans/receiver-confirmation-plan-2026-08-19.md)
-Status: **proposed — needs revision**
+Status: **abandoned — superseded by item 11** on 2026-09-14
 
-Moved behind encryption on 2026-08-20. Its plan is written against a cleartext
-`meta` that encryption seals, so it must be revised before it is implemented,
-not followed as written.
-
-The receiver sees name, size, type, and destination, and answers y/n before any
-bytes move.
-
-- [ ] Phase 1 — protocol: accept/decline, `receiver_accepted`, decline as a
-      normal outcome, accept deadline
-- [ ] Phase 2 — safe rendering of peer-supplied names
-- [ ] Phase 3 — CLI prompt, ahead of destination creation, plus `--yes`
-- [ ] Phase 4 — web confirmation step
-- [ ] Phase 5 — decide whether `Meta` gains a file count
-
-Gate: declining leaves nothing on disk and is not counted as a failure; a
-filename carrying escape sequences renders inert; a non-TTY without `--yes`
-fails clearly.
+Written against cleartext metadata and a browser client. Its findings carry
+forward into item 11; its protocol design does not.
 
 ## 5. Network topology lab
 
@@ -284,6 +280,19 @@ binaries and inspects what comes out.
 - [ ] Phase 5 — dated report under [`validation/`](validation/) and a separate
       CI workflow, nightly and label-triggered, never blocking pull requests
 
+- [ ] **Found 2026-09-14: hole punching has never been exercised here.** The
+      peers' QUIC address discovery fails TLS against the lab helper's
+      self-signed certificate (`invalid peer certificate: UnknownIssuer`), so
+      neither learns its public address (`global_v4: None`) and no punch is
+      ever attempted. A throttled 48 MiB run showed the payload on the
+      rendezvous link for all 27 seconds, and conntrack on both NATs showed
+      peers dialling each other's *private* addresses only. The full-cone
+      failure is this, not iroh failing to punch. The helper's comment and the
+      rendezvous plan's risk entry both claimed iroh skips that verification,
+      and neither is true for 1.0.3. The fix needs a decision: item 6 phase 3.
+      Separately, `authentication failed` still appears intermittently (2 of 4
+      runs today) and is unexplained.
+
 Gate: every topology fails when its defining condition is removed, demonstrated
 once per topology and recorded. A lab that passes either way is measuring
 nothing, which is the failure the peer-to-peer plan's loopback tests already
@@ -295,7 +304,7 @@ absent, and now it can.
 ## 6. Self-hosted rendezvous
 
 Plan: [`self-hosted-rendezvous-plan-2026-09-10.md`](plans/self-hosted-rendezvous-plan-2026-09-10.md)
-Status: **phase 1 done**
+Status: **phases 1 and 2 done; phase 3 awaiting a decision**
 
 `DROP_RENDEZVOUS_RELAY` and `DROP_RENDEZVOUS_BOOTSTRAP` point the direct path at
 an iroh relay and DHT nodes a deployment runs itself, instead of n0's relays and
@@ -319,6 +328,15 @@ the public mainline routers compiled in. Unset, nothing changes.
       when that infrastructure is stopped. The negative control is the half that
       matters — this machine can reach the real DHT, so a passing transfer alone
       would not show which one carried the rendezvous.
+
+- [ ] Phase 3 — proposed 2026-09-14, **needs the user's decision** because it
+      changes what the CLI trusts. A relay with a certificate from a private CA
+      silently gets no address discovery, so no hole punching: transfers still
+      complete over the relay and `--status` still says `path=p2p`. Either
+      `DROP_RENDEZVOUS_CA` adds an operator's CA for the rendezvous relay only,
+      or the docs say traversal needs a publicly trusted certificate. Both come
+      with a warning when a custom relay yields no discovered address. The lab
+      needs the former to prove traversal at all.
 
 Why this is a feature and not a knob added for a test is argued in the plan and
 in entry 15: a self-hoster can already run their own relay, but rendezvous was
@@ -375,6 +393,145 @@ Two dependencies are added, ratatui and crossterm, into a manifest that
 justifies every entry it has. Both are pure Rust, which is the standing bar for
 the four prebuilt targets. Release binary went 26,988,848 → 27,482,144 bytes,
 **+493 KB (+1.8%)**, so the crossterm-only fallback is not needed.
+
+## 8. Browser client removal
+
+Plan: [`browser-client-removal-plan-2026-09-11.md`](plans/browser-client-removal-plan-2026-09-11.md)
+Status: **active** — open questions answered 2026-09-14
+
+Delete `web/` and `crypto-wasm/` and every dependent — the server routes that
+serve the client, the CI job that builds it, the Docker stage that bundles it,
+and the documentation that describes it. **The relay stays**: entry 16 removed
+the browser's reason for it, not the UDP-blocked network's, and `netlab` covers
+that one.
+
+- [ ] Phase 0 — move `install.sh` out of `web/public/`. **Release-critical and
+      lands alone.** `release.yml` sparse-checks it out at line 130 and
+      publishes it at 153 under `fail_on_unmatched_files: true`, so deleting
+      `web/` first fails the next tag in `publish`, after the whole build matrix
+      has already succeeded.
+- [ ] Phase 1 — the server stops serving a browser: the `/` and `/assets`
+      routes, and the `index_serves_the_drop_entrypoint` test that asserts the
+      Svelte entrypoint.
+- [ ] Phase 2 — delete `web/` and `crypto-wasm/`, the workspace member, and
+      `.cargo/config.toml`'s wasm32 rustflag.
+- [ ] Phase 3 — the `web` CI job, `Dockerfile.fullstack`, and the ignore-file
+      entries.
+- [ ] Phase 4 — documentation across nine files, `decisions.md` entry 17, and
+      entry 11 marked superseded rather than deleted.
+
+Gate: the workspace is green with two members rather than three, a CLI-to-CLI
+transfer over `--transport relay` still completes, and a release built from the
+resulting tree publishes `install.sh` from its new path. The third cannot be
+checked by running tests and has to be read against the workflow before tagging.
+
+Open questions answered 2026-09-14, all as the plan leaned: remove
+`DROP_ALLOWED_ORIGINS`; `GET /` answers a plain-text 404 naming the project;
+the browser claim rules in `AGENTS.md` stay, reworded as dormant; ships in 0.4.0
+with `meta_ok` confirmation and item 11. The old `chore/remove-web` branch
+deletes `install.sh` first, which is the exact thing phase 0 exists to prevent,
+so it is not the base for this work.
+
+## 9. Browser client on iroh
+
+Plan: [`browser-on-iroh-plan-2026-09-11.md`](plans/browser-on-iroh-plan-2026-09-11.md)
+Status: **proposed — not scheduled**
+
+Rebuild the browser client as an iroh node compiled to WebAssembly, speaking the
+same conversation the CLI speaks, so the relay stops translating between two
+dialects — it renames and invents control frames today, which is item 3 phase
+1's finding and the last consumer of that is the browser.
+
+Recorded so it is not rediscovered as new. **Nothing here is committed work**,
+and open question 1 — whether a browser client that can never be direct is worth
+its maintenance — should be answered before any of it is started.
+
+- [ ] Blocker 1 — `Transport`'s futures are all declared `Send` and wasm futures
+      are not. Wants n0-future's conditional-`Send` approach, and it is a
+      refactor of shipped tested code for the benefit of code that does not
+      exist yet.
+- [ ] Blocker 2 — `discovery-pkarr-dht` cannot run in a browser. Rendezvous
+      needs pkarr over HTTP relay, which `DROP_RENDEZVOUS_BOOTSTRAP`'s
+      `host:port` shape does not describe, and which has to inherit entry 15's
+      no-silent-fallback rule somewhere a user cannot read an error.
+- [ ] Blocker 3 — `peers_enforce_one_guess` needs a third answer, since a
+      browser has neither a Drop relay refusing a second claim nor a terminal to
+      ask. A decisions entry, not a plumbing choice.
+- [ ] Blocker 4 — item 3's `meta_ok` confirmation lands first, or the wire
+      breaks twice.
+- [ ] Blocker 5 — `send::run` and `recv::run` spool and write to a filesystem a
+      browser does not have. The middle of the stack is shared; both ends are
+      per-platform.
+
+A browser peer is **permanently relayed** — iroh cannot hole-punch from a
+sandbox, and WebTransport and WebRTC are both unimplemented there — so a browser
+transfer is never the direct path and must never be described as one.
+
+## 10. Windows, macOS and Linux
+
+Plan: [`cross-platform-plan-2026-09-14.md`](plans/cross-platform-plan-2026-09-14.md)
+Status: **proposed**
+
+Install and run on all three, and a file or folder sent between any two of them
+arrives intact or says exactly what could not be reproduced. **Today: Linux
+works, macOS is built but has never had a test run on it, Windows has no
+build.** CI runs on Ubuntu only, so no `cfg(not(unix))` branch has ever
+compiled.
+
+- [ ] Phase 0 — the Rust job on `ubuntu-24.04`, `macos-14` and `windows-2025`,
+      and record what fails before fixing any of it.
+- [ ] Phase 1 — a Windows receiver: a symlink it cannot create is a warning,
+      not an abort (today it aborts every Linux-to-Windows folder with a
+      symlink in it); names Windows reads differently (`a:b` is an NTFS stream,
+      `CON` a device, `report.` loses its dot) are rewritten with a warning;
+      an uncreatable entry on any platform warns and continues.
+- [ ] Phase 2 — a Windows sender: portable symlink targets, spool cleanup when
+      the console is closed, VT processing for the progress line.
+- [ ] Phase 3 — `x86_64`/`aarch64-pc-windows-msvc` release zips with a static
+      CRT, `install.ps1`, README install lines.
+- [ ] Phase 4 — archives produced on each OS and extracted on the others in CI,
+      nine pairings.
+- [ ] Phase 5 — manual Windows ↔ Linux checklist on the user's machine, both
+      carriers, the interface, Ctrl-C, closing the window, the firewall dialog.
+- [ ] Phase 6 — documentation and a decision entry for the Windows name policy.
+
+Gate: CI green on three OSes; hostile Windows names contained and honest ones
+rewritten with warnings; Windows assets install; nine archive pairings green; the
+manual checklist recorded.
+
+## 11. Receiver consent, cancel, and live status
+
+Plan: [`receiver-consent-and-status-plan-2026-09-14.md`](plans/receiver-consent-and-status-plan-2026-09-14.md)
+Status: **proposed**
+
+The receiver sees name, type, size and where it will be saved, and accepts
+before a byte is written. Either side can cancel and the other is told in words.
+The sender sees the receiver connect, pass the code, review, accept or decline,
+receive, finish.
+
+- [ ] Phase 0 — decisions entry; consent before bytes, `--yes` required without
+      a terminal (user decision 2026-09-14), reasons as enumerations, version 2,
+      exit codes.
+- [ ] Phase 1 — display sanitisation, alone. **Live bug**: a received filename
+      reaches `eprintln!` unfiltered today, so an escape sequence in it can
+      redraw the terminal.
+- [ ] Phase 2 — protocol and relay: `meta_ok` on both carriers, `accept`,
+      `decline`, receiver `cancel`, `finishing`; the relay refuses chunks
+      before `accept` and stops counting declines and cancels as failures;
+      `ENVELOPE_VERSION` and `DROP_ALPN` to 2.
+- [ ] Phase 3 — receiver consent in the CLI: destination planned but not
+      created, preview with a receiver-derived type and a program warning,
+      120 s deadline, refusal without a terminal before connecting.
+- [ ] Phase 4 — cancel through both transfer paths, two-stage Ctrl-C, sender
+      state lines and `drop-status: state=`, exit codes 3 and 4.
+- [ ] Phase 5 — review and transfer screens with Accept/Decline and Cancel,
+      with item 7 phase 3.
+- [ ] Phase 6 — documentation; release notes lead with `--yes`.
+
+Gate: declining leaves the destination unchanged and the sender exits 3; a
+hostile filename renders inert everywhere; either side's cancel reaches the other
+in words on both carriers; no terminal without `--yes` refuses before contacting
+anything; 0.3.0 against 0.4.0 fails with a sentence, not a hang.
 
 ## Not scheduled
 
