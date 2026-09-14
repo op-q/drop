@@ -476,7 +476,7 @@ transfer is never the direct path and must never be described as one.
 ## 10. Windows, macOS and Linux
 
 Plan: [`cross-platform-plan-2026-09-14.md`](plans/cross-platform-plan-2026-09-14.md)
-Status: **proposed**
+Status: **active** — phases 0 and 1 done
 
 Install and run on all three, and a file or folder sent between any two of them
 arrives intact or says exactly what could not be reproduced. **Today: Linux
@@ -484,9 +484,14 @@ works, macOS is built but has never had a test run on it, Windows has no
 build.** CI runs on Ubuntu only, so no `cfg(not(unix))` branch has ever
 compiled.
 
-- [ ] Phase 0 — the Rust job on `ubuntu-24.04`, `macos-14` and `windows-2025`,
-      and record what fails before fixing any of it.
-- [ ] Phase 1 — a Windows receiver: a symlink it cannot create is a warning,
+- [x] Phase 0 — the Rust job on `ubuntu-24.04`, `macos-14` and `windows-2025`,
+      and record what fails before fixing any of it. Done 2026-09-14. macOS
+      passed first time. On Windows, only two Unix-only test helpers failed
+      Clippy; the whole suite passed once they were gated, and every non-Unix
+      branch in the CLI compiled for the first time ever. One macOS-only race
+      in a relay test was fixed. The new checks are not required yet (a
+      settings change).
+- [x] Phase 1 — done 2026-09-14. A Windows receiver: a symlink it cannot create is a warning,
       not an abort (today it aborts every Linux-to-Windows folder with a
       symlink in it); names Windows reads differently (`a:b` is an NTFS stream,
       `CON` a device, `report.` loses its dot) are rewritten with a warning;

@@ -10,7 +10,7 @@ use std::{
 use serde_json::json;
 
 use crate::{
-    client, crypto, direct, display,
+    client, crypto, direct, display, names,
     payload::{GZIP_MIME, TAR_GZIP_MIME, TAR_MIME},
     progress::Progress,
     transport::{Frame, Transport, relay},
@@ -498,11 +498,18 @@ fn open_target(
 
     // A remote peer chooses this name, so keep only the final component: an
     // archive-style path in `filename` must not decide where the file lands.
-    let mut safe_name = Path::new(filename)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty() && name != "." && name != "..")
-        .unwrap_or_else(|| "download.bin".to_string());
+    // On Windows the component is also rewritten, so `report:v2.pdf` is saved
+    // as a file rather than as a stream on a file named `report`.
+    let (mut safe_name, renamed) =
+        names::received_file_name(filename, names::Naming::for_this_platform());
+
+    if renamed {
+        eprintln!(
+            "Saving {} as {}: this system cannot store that name as it is",
+            display::name(filename),
+            display::name(&safe_name)
+        );
+    }
 
     if decompress {
         safe_name = strip_gz(&safe_name).to_string();
