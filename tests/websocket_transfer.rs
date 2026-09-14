@@ -162,10 +162,34 @@ async fn upload_socket_rejects_chunks_over_the_message_cap() {
         .expect("expected sender meta message to be sent");
     next_json_message_matching(&mut receiver_ws, |payload| payload["type"] == "meta").await;
 
-    sender_ws
-        .send(Message::binary(oversized))
-        .await
-        .expect("expected oversized chunk to be written");
+    // The relay refuses the frame from its header and closes the socket, which
+    // can happen while this side is still writing the frame's body. Whether
+    // the write finishes first depends on how much the kernel's socket buffer
+    // absorbs: on Linux it usually does, on macOS it usually does not, and the
+    // write fails with a broken pipe or a reset. Both mean the relay hung up on
+    // an oversized frame, which is the behaviour under test. What is asserted
+    // is what the receiver saw, below.
+    if let Err(error) = sender_ws.send(Message::binary(oversized)).await {
+        let hung_up = matches!(
+            &error,
+            tokio_tungstenite::tungstenite::Error::Io(io)
+                if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                )
+        ) || matches!(
+            &error,
+            tokio_tungstenite::tungstenite::Error::ConnectionClosed
+                | tokio_tungstenite::tungstenite::Error::AlreadyClosed
+        );
+
+        assert!(
+            hung_up,
+            "writing the oversized chunk failed for a reason other than the relay hanging up: {error}"
+        );
+    }
 
     // The relay must tear the session down instead of relaying the chunk. The
     // receiver stream therefore ends, with an error frame rather than any part
