@@ -11,9 +11,12 @@ use std::{
 };
 
 use drop_cli::{
-    tar::{TarPlan, safe_relative_path, symlink_target_stays_inside, traverses_only_real_dirs},
+    tar::{TarPlan, safe_relative_path, symlink_target_stays_inside},
     untar::TarExtractor,
 };
+// Only the symlink tests use this, and planting a symlink needs Unix.
+#[cfg(unix)]
+use drop_cli::tar::traverses_only_real_dirs;
 
 fn scratch(name: &str) -> PathBuf {
     let base = std::env::temp_dir().join(format!(

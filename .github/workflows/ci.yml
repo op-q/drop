@@ -81,7 +81,11 @@ jobs:
           components: clippy
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # Runs even when Clippy fails. A lint and a failing test are separate
+      # findings, and one run should report both rather than hiding the tests
+      # behind the first warning.
       - name: Run tests
+        if: success() || failure()
         run: cargo test --workspace --all-targets
 
   web:
