@@ -11,36 +11,14 @@ scripts/check-secrets.sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets
-npm --prefix web ci
-npm --prefix web run build
-npm --prefix web run typecheck
-npm --prefix web test
-npm --prefix web audit --audit-level=high
 ```
 
-The repository is a Cargo workspace with four members — `api`, `drop-cli`,
-`drop-crypto`, and `drop-crypto-wasm`. A root-package-only run misses all but
-the relay, which is why every Rust command here is workspace-wide.
+The repository is a Cargo workspace with three members — `api`, `drop-cli`,
+and `drop-crypto`. A root-package-only run misses all but the relay, which is
+why every Rust command here is workspace-wide.
 
-## The web build is not a pure Node build
-
-`npm run build` compiles `crypto-wasm/` before it runs Vite, because the
-browser runs the same envelope the CLI runs rather than a second
-implementation of it ([`decisions.md`](decisions.md) entry 11). That needs a
-Rust toolchain, the wasm32 target, and `wasm-pack`:
-
-```bash
-rustup target add wasm32-unknown-unknown
-cargo install wasm-pack        # or a release binary from rustwasm/wasm-pack
-```
-
-Without them `npm run build`, `npm test`, and `npm run dev` all fail at the
-`build:wasm` step rather than at anything that mentions the browser.
-
-`npm test` runs the envelope tests and, when `target/debug/api` and
-`target/debug/drop` exist, the CLI-to-browser interoperation tests against a
-real relay. It skips those rather than failing when the binaries are absent, so
-run `cargo build --workspace --bins` first if you mean to exercise them.
+CI runs Clippy and the tests on Linux, macOS and Windows. Passing locally on one
+of them says nothing about the other two.
 
 ## Secret scan
 
@@ -62,27 +40,13 @@ cargo test -p drop-cli --test transfer        # CLI transfer tests
 ## Run the relay locally
 
 ```bash
-npm --prefix web ci
-npm --prefix web run build
 cargo run
 ```
 
-Then `http://127.0.0.1:8080/`, with `/health`, `/ready`, and `/metrics`
-alongside it.
+Then `/health`, `/ready`, and `/metrics` on `http://127.0.0.1:8080`. The root
+answers 404 with a line saying what the host is; there is no web page.
 
 Bind elsewhere with `DROP_BIND_ADDR=127.0.0.1:8080 cargo run`.
-
-## Frontend development
-
-```bash
-cd web && VITE_BACKEND_ORIGIN=http://127.0.0.1:8080 npm run dev
-```
-
-The backend must allow the Vite origin:
-
-```bash
-DROP_ALLOWED_ORIGINS=http://127.0.0.1:5173 cargo run
-```
 
 ## Local transfer
 
@@ -169,9 +133,7 @@ development machine".
 docker compose up --build
 ```
 
-[`Dockerfile.fullstack`](../Dockerfile.fullstack) builds the web client and the
-relay; [`Dockerfile`](../Dockerfile) builds the backend only, for split
-deployments.
+[`Dockerfile`](../Dockerfile) builds the relay. There is no other image.
 
 ## Kubernetes
 

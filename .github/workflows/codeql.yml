@@ -15,7 +15,13 @@ permissions:
 
 jobs:
   analyze:
-    name: Analyze JavaScript and TypeScript
+    # Was JavaScript and TypeScript, which analysed the browser client. With it
+    # gone there is no TypeScript left, and the code worth scanning is Rust.
+    # Renaming the job renames its check: branch protection's required check
+    # "Analyze JavaScript and TypeScript" has to become "Analyze Rust" in the
+    # repository settings when this lands, or pull requests wait on a check
+    # that never reports.
+    name: Analyze Rust
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -30,6 +36,9 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4.37.9
         with:
-          languages: javascript-typescript
+          languages: rust
+          # Rust is analysed from source, without a build. Faster, and it
+          # needs no toolchain setup in this job.
+          build-mode: none
       - name: Analyze
         uses: github/codeql-action/analyze@v4.37.9

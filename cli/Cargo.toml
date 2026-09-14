@@ -27,9 +27,10 @@ ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 # C dependency would require a cross C toolchain for each of them.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
-# The encryption envelope. Its own crate because the browser client compiles
-# the same code to WebAssembly rather than reimplementing it — see
-# docs/decisions.md entry 11.
+# The encryption envelope. Its own crate so it has no I/O and no transport in
+# reach. It was first split out for a browser client that compiled it to
+# WebAssembly (docs/decisions.md entries 11 and 17); that client is gone and the
+# boundary stays for its own sake.
 drop-crypto = { path = "../crypto" }
 
 # The direct transport. `iroh` is the QUIC endpoint and hole punching; it

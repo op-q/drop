@@ -16,7 +16,7 @@ A useful report includes:
 - the affected revision and deployment shape;
 - impact and the security boundary that failed;
 - minimal reproduction steps using synthetic data;
-- relevant browser, operating-system, or proxy details;
+- relevant operating-system, terminal, or proxy details;
 - a suggested mitigation, if you have one.
 
 Maintainers should acknowledge a report within five business days and

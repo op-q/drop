@@ -1,8 +1,8 @@
 //! The relay transport: a WebSocket to a Drop relay.
 //!
 //! This is the carrier every transfer used before there was a choice, and it
-//! stays the one that works everywhere — browsers can reach it, and so can a
-//! network that blocks everything but outbound TLS.
+//! stays the one that works where the direct path cannot: a network that blocks
+//! everything but outbound TLS.
 //!
 //! Session creation lives in [`crate::client`] rather than here: it is the
 //! relay's HTTP API, it happens before a code exists, and the sender needs its

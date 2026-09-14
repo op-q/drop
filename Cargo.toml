@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli", "crypto", "crypto-wasm"]
+members = ["cli", "crypto"]
 
 # One version for the whole workspace. Every member inherits it, so the relay
 # and the CLI cannot drift apart and there is a single line to bump before a
@@ -21,7 +21,7 @@ publish = false
 [dependencies]
 axum = { version = "0.8", features = ["ws", "json"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.7", features = ["cors", "trace", "fs"] }
+tower-http = { version = "0.7", features = ["trace"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"

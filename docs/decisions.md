@@ -277,6 +277,12 @@ depends on infrastructure nobody involved is paying for.
 
 ## 11. The browser runs the envelope as WebAssembly, not a second implementation
 
+> **Superseded by entry 17.** The browser client and `crypto-wasm/` were
+> removed in 0.4.0. What survives is the crate boundary this entry created:
+> `crypto/` stays a separate crate for its own sake, and the argument below,
+> one implementation compiled rather than two kept in step by hand, is the
+> one any future browser client inherits.
+
 **Decision.** The envelope is its own crate, `crypto/`, and `crypto-wasm/`
 compiles it to WebAssembly for the browser. The web client implements no
 cryptography of its own: the SPAKE2 transcript, the chunk framing, the HKDF
@@ -590,3 +596,53 @@ move those pieces in-house.
 
 The `k8s/overlays/gke` manifests still carry the placeholder `drop.example.com`.
 They describe how to host a relay, not one that is running.
+
+## 17. The browser client is removed, and the relay stays
+
+**Decision.** `web/` and `crypto-wasm/` are deleted, with everything that
+existed only for them: the relay's `/` and `/assets` routes, CORS and
+`DROP_ALLOWED_ORIGINS`, `Dockerfile.fullstack`, the `web` CI job, npm in
+dependabot, and the JavaScript CodeQL analysis, which now analyses Rust. `GET /`
+answers 404 with one line saying what the host is. The CLI installer, which only
+lived in `web/public/` because entry 8's frontend host served it, moved to
+`scripts/install.sh` first, in its own change, so no commit could break a
+release. Shipped in 0.4.0.
+
+**Why.** Entry 16 removed the browser client's audience. With no hosted relay,
+the only person who could reach it was someone self-hosting the full-stack
+image. It had also never been exercised by a browser: its interoperation tests
+drove the envelope from Node, and `tsc` does not check `.svelte` files. So it
+was an untested second implementation of the protocol, and it cost the most
+expensive CI job and a stream of dependency updates. And it would have had to
+learn every wire change coming in 0.4.0 (key confirmation, receiver consent,
+cancel), each of which it would have carried untested.
+
+**The relay is not part of this.** Its browser reason is gone; its other reason
+is real and tested. `--transport relay` is what works on a network that lets no
+UDP out, and netlab's UDP-blocked topology covers exactly that case.
+Deleting the browser client is not a step towards deleting the relay, and
+that would need its own entry.
+
+**What is kept.** The rules in `AGENTS.md` and `security.md` about what a
+browser transfer may be called stay, marked dormant, because they bind any
+future browser client unchanged:
+[`plans/browser-on-iroh-plan-2026-09-11.md`](plans/browser-on-iroh-plan-2026-09-11.md)
+is that future, and a browser still runs code its site delivered whatever
+carries the bytes. The `crypto/` crate boundary stays (entry 11).
+
+**Recovering the client.** The last tree with it is `a1e84d6`, the 0.3.0 release
+merge; `App.svelte` and the rest are there.
+
+**Consequences.** A self-hoster running `Dockerfile.fullstack` loses the browser
+UI and has to build `Dockerfile` instead; release notes say so plainly. A relay
+with `DROP_ALLOWED_ORIGINS` set ignores it, so anyone serving their own
+frontend against a self-hosted relay stops getting CORS headers. Removing the
+job names changes two required status checks in the repository's branch
+protection ("Web" goes, "Analyze JavaScript and TypeScript" becomes "Analyze
+Rust"), which is a settings change, not a code change.
+
+While removing `Dockerfile.fullstack`, `Dockerfile` turned out not to build: it
+copied the CLI's manifest but not `crypto/`, the CLI's path dependency, so
+cargo could not load the workspace. That had been true of both images since the
+envelope became its own crate. It now copies `crypto/` and builds with
+`--locked`.

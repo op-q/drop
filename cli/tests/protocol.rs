@@ -54,8 +54,8 @@ fn a_sealed_metadata_blob_fits_well_inside_the_relays_opaque_field_limit() {
 ///
 /// This assertion used to live inside the envelope's own tests, where both
 /// values were reachable as modules of one crate. The envelope became a
-/// separate crate so the browser client could compile it to WebAssembly, which
-/// put the payload reader out of its reach — so the guard moves up to the
+/// separate crate (first for a browser client, since removed; see
+/// `docs/decisions.md` entry 17), which put the payload reader out of its reach — so the guard moves up to the
 /// layer that can still see both, rather than being dropped.
 #[test]
 fn the_envelope_chunk_size_matches_the_payload_reader() {

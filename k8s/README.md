@@ -1,6 +1,6 @@
 # Kubernetes deployment
 
-These manifests run Drop as one full-stack Rust and Svelte container. The
+These manifests run the Drop relay as one Rust container. The
 `base` is portable Kubernetes, while `overlays/local` supports a local `kind`
 cluster and `overlays/gke` adds Google Cloud-specific load balancing, TLS, and
 connection draining.
@@ -75,12 +75,16 @@ hours; the timeout applies to **idle** connections. The server's 15s heartbeat
 keeps a transferring connection well inside the 60s idle budget, so `timeoutSec`
 does not cap transfer duration.
 
-Because a hard container memory limit now applies, the relay also caps inbound
-WebSocket messages at `WS_MAX_MESSAGE_BYTES` (256 KiB). Axum's default of 64 MiB
-would let a hostile sender queue
+Because a hard container memory limit applies, the relay caps inbound
+WebSocket messages at `WS_MAX_MESSAGE_BYTES`: 1 MiB plus 64 KiB, which is one
+sealed CLI chunk (`RECOMMENDED_CHUNK_BYTES` plus its tag) with room for a client
+that pads slightly. Axum's default of 64 MiB would let a hostile sender queue
 `MAX_CONCURRENT_SESSIONS * DOWNLOAD_EVENT_CHANNEL_CAPACITY` oversized chunks and
-push the pod past its 512Mi limit into an OOM kill. The browser client sends
-64 KiB chunks, so the cap leaves four times the headroom it needs.
+push the pod past its 512Mi limit into an OOM kill. What actually bounds
+buffered chunks across every session at once is `RELAY_BUDGET_BYTES`, 200 MiB,
+which is what keeps the relay inside that limit. (This paragraph used to say the
+cap was 256 KiB and justify it by a browser client's chunk size. Both were
+already stale before the browser client was removed.)
 
 ## Run locally with kind
 
@@ -88,7 +92,7 @@ Install Docker, `kubectl`, and
 [`kind`](https://kind.sigs.k8s.io/docs/user/quick-start/), then run:
 
 ```bash
-docker build -f Dockerfile.fullstack -t drop:dev .
+docker build -t drop:dev .
 kind create cluster --name drop
 kind load docker-image drop:dev --name drop
 kubectl apply -k k8s/overlays/local
@@ -227,10 +231,10 @@ gcloud container clusters get-credentials drop \
 gcloud compute addresses create drop-ip --global
 ```
 
-Build and push the full-stack image:
+Build and push the image:
 
 ```bash
-docker build -f Dockerfile.fullstack -t "$DROP_IMAGE" .
+docker build -t "$DROP_IMAGE" .
 docker push "$DROP_IMAGE"
 ```
 

@@ -38,10 +38,6 @@ OPTIONS (send and recv)
                          and falls back only if a relay is configured; with
                          none it is p2p, and says so rather than falling back
                          to nowhere.
-
-                         A browser on the other end can only meet you at a
-                         relay, because it cannot speak QUIC to a peer. That
-                         transfer needs --server naming a relay you run.
         --status         Print one machine-readable line naming the carrier
                          that moved the bytes [env: DROP_STATUS]
 
