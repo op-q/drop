@@ -86,8 +86,8 @@ worth something; the branch is old enough that either is defensible.
   Deleting the browser must not be allowed to drift into deleting the relay —
   that is a separate decision with a separate argument, and this plan does not
   make it.
-- **`drop-crypto`.** (Corrected 2026-09-14: `api` does not depend on it. It repeats the constants, guarded by `cli/tests/protocol.rs`.) The CLI depends on it for the envelope, and
-  the CLI depends on it for the envelope. Only the wasm *bindings* crate goes.
+- **`drop-crypto`.** (Corrected 2026-09-14: `api` does not depend on it. It repeats the constants, guarded by `cli/tests/protocol.rs`.) The CLI depends on it for
+  the envelope. Only the wasm *bindings* crate goes.
 - **The wire.** No protocol change, no framing change, no envelope change. A
   `drop` binary built before this lands interoperates with one built after it.
   This is the one reason the removal can ship independently of everything else
