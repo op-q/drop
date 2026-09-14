@@ -86,7 +86,7 @@ worth something; the branch is old enough that either is defensible.
   Deleting the browser must not be allowed to drift into deleting the relay —
   that is a separate decision with a separate argument, and this plan does not
   make it.
-- **`drop-crypto`.** `api` depends on it for version and limit constants, and
+- **`drop-crypto`.** (Corrected 2026-09-14: `api` does not depend on it. It repeats the constants, guarded by `cli/tests/protocol.rs`.) The CLI depends on it for the envelope, and
   the CLI depends on it for the envelope. Only the wasm *bindings* crate goes.
 - **The wire.** No protocol change, no framing change, no envelope change. A
   `drop` binary built before this lands interoperates with one built after it.
@@ -251,7 +251,10 @@ cross-platform CI change. The deletions were as listed. Found on the way:
 
 - **`Dockerfile` did not build, and neither did `Dockerfile.fullstack`.** Both
   copied `Cargo.toml`, `cli/Cargo.toml` and `src/`, but not `crypto/`, and cargo
-  loads every workspace member's manifest before building any one of them. The
+  loads every workspace member's manifest, and each member's path dependencies,
+  before building any one of them. The relay itself does not depend on
+  `crypto/`: it repeats the constants it enforces, and `cli/tests/protocol.rs`
+  guards the copies. `docs/architecture.md` said otherwise, and is corrected. The
   plan said `Dockerfile` "already builds `api` alone and needs no change". That
   was wrong, and had been since the envelope became its own crate. Checked
   without Docker by copying exactly the files the Dockerfile copies into a

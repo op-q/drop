@@ -6,7 +6,7 @@
 pub mod client;
 pub mod direct;
 // Re-exported rather than defined here: the envelope is a separate crate with
-// no I/O in reach, and the relay shares its constants. Keeping the name `crypto`
+// no I/O or transport in reach. Keeping the name `crypto`
 // means every call site below reads the same as before the split.
 pub use drop_crypto as crypto;
 pub mod display;

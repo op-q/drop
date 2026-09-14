@@ -28,8 +28,7 @@ ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 # The encryption envelope. Its own crate so it has no I/O and no transport in
-# reach, and so the relay can share its constants without linking any of the
-# CLI. It was first split out for a browser client that compiled it to
+# reach. It was first split out for a browser client that compiled it to
 # WebAssembly (docs/decisions.md entries 11 and 17); that client is gone and the
 # boundary stays for its own sake.
 drop-crypto = { path = "../crypto" }

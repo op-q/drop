@@ -49,14 +49,15 @@ The repository is one Cargo workspace with three members.
 ### What depends on what
 
 ```text
-        drop-crypto  ◀── the envelope, shared by both halves
-        ╱         ╲
-  drop-cli         api
+  drop-crypto  ◀── the envelope
+       │
+  drop-cli         api ◀── deployed alone, and depends on neither
   (the `drop`      (the relay)
    binary)
 
-  api depends on drop-crypto for version and limit constants only; it never
-  opens an envelope
+  The relay repeats the handful of envelope constants it enforces, such as the
+  version and the size limit, rather than depending on drop-crypto for them.
+  cli/tests/protocol.rs fails if a copy drifts.
 ```
 
 **The CLI does not depend on the relay.** `cli/Cargo.toml` lists

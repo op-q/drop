@@ -642,7 +642,7 @@ protection ("Web" goes, "Analyze JavaScript and TypeScript" becomes "Analyze
 Rust"), which is a settings change, not a code change.
 
 While removing `Dockerfile.fullstack`, `Dockerfile` turned out not to build: it
-copied the CLI's manifest but not `crypto/`, which the relay depends on, so
+copied the CLI's manifest but not `crypto/`, the CLI's path dependency, so
 cargo could not load the workspace. That had been true of both images since the
 envelope became its own crate. It now copies `crypto/` and builds with
 `--locked`.
