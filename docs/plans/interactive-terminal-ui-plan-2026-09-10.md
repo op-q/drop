@@ -263,6 +263,11 @@ clears the most recent one. Settings already toggled survive it.
 - [ ] Receiver-side cancel (Finding 4): send `cancel`, and teach the sender to
       end cleanly on it.
 - [ ] Esc during a transfer cancels and closes both sides.
+- Note 2026-09-14: the cancel protocol, the receiver's review screen and the
+  sender's state list are designed in
+  [`receiver-consent-and-status-plan-2026-09-14.md`](receiver-consent-and-status-plan-2026-09-14.md)
+  (its phases 4 and 5). This phase builds the transfer screen and the progress
+  sink those phases fill in; do not design a second cancel here.
 
 ### Phase 4 — The guess prompt as a screen
 

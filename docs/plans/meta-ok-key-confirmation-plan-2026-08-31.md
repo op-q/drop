@@ -2,7 +2,7 @@
 
 Status: **proposed**
 Created: **2026-08-31**
-Last updated: **2026-08-31**
+Last updated: **2026-09-14**
 
 ## Goal
 
@@ -179,7 +179,14 @@ impl SessionKeys {
 - **Wire compatibility.** A new-sender/old-receiver pair on the direct path
   fails: the receiver sends a bare `meta_ok` and the sender charges an
   attempt. The direct path is unreleased, so this is acceptable now and will
-  not be later. Land it before the QUIC path ships.
+  not be later. Land it before the QUIC path ships. **Corrected 2026-09-14: the QUIC path shipped in v0.2.0**, on by default, so
+  this is already a wire break. It now lands under the version bump in
+  [`receiver-consent-and-status-plan-2026-09-14.md`](receiver-consent-and-status-plan-2026-09-14.md)
+  (`ENVELOPE_VERSION` and `DROP_ALPN` to 2), so an old peer is refused with a
+  sentence rather than charged a failed attempt. Phase 3 (the browser)
+  disappears once the browser client removal lands first, which it is ordered
+  to do. That plan also makes `meta_ok` travel over the relay, so the "relay
+  path must not change" risk below is replaced by the relay forwarding it.
 - **The relay path must not change.** The relay parses receiver frames into a
   closed set and treats an unknown one as fatal. The confirmation must ride
   only where `peers_enforce_one_guess()` is true. Decision 13's commit records
