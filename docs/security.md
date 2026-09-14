@@ -155,6 +155,18 @@ overrides. Any surface that renders it — especially a confirmation prompt, whe
 misleading the reader is the whole payoff — must render it inert first. The web
 client escapes by default; a terminal does not.
 
+The CLI does this in `cli/src/display.rs`. Every name a peer chose, every
+archive warning that quotes one, and every error message a peer or the relay
+sent passes through it before reaching the terminal. The relay is untrusted, so
+its messages count as peer text too. Control characters, including the bytes
+that begin every escape sequence, and bidirectional and invisible formatting
+characters are **replaced** with `U+FFFD`, not removed, so a doctored name looks
+doctored. Whitespace runs collapse, so padding cannot push an extension out of
+sight. Long names are shortened in the middle, keeping the extension. Only
+display changes: a received file keeps the name its bytes arrived with, subject
+to the path rules above. Until 2026-09-14 the receiver printed the sender's
+filename verbatim in its `Receiving` line.
+
 ## Resource bounds
 
 Every bound exists to stop one peer consuming the relay:

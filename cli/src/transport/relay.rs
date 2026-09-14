@@ -80,12 +80,12 @@ fn while_waiting(payload: &Value) -> WhileWaiting {
         Some("status") if payload["status"].as_str() == Some("receiver_connected") => {
             WhileWaiting::PeerArrived
         }
-        Some("error") => WhileWaiting::Refused(
+        // The relay is untrusted, and this reaches the terminal verbatim.
+        Some("error") => WhileWaiting::Refused(crate::display::peer_message(
             payload["message"]
                 .as_str()
-                .unwrap_or("the relay reported an error")
-                .to_string(),
-        ),
+                .unwrap_or("the relay reported an error"),
+        )),
         _ => WhileWaiting::KeepWaiting,
     }
 }

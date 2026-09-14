@@ -140,14 +140,16 @@ pub async fn run(
     let payload = Payload::prepare(path, options.compress)?;
 
     for warning in &payload.warnings {
-        eprintln!("warning: {warning}");
+        // Names from the tree being sent. They are local, but a hostile name
+        // can already be sitting on a shared disk.
+        eprintln!("warning: {}", crate::display::for_terminal(warning));
     }
 
     if payload.size == 0 {
         return Err("there is nothing to send: the payload is empty".into());
     }
 
-    eprintln!("Sending {}", payload.summary);
+    eprintln!("Sending {}", crate::display::for_terminal(&payload.summary));
     eprintln!("Size    {}", crate::progress::format_bytes(payload.size));
 
     // The relay bounds and accounts for what actually crosses it, which is
@@ -742,11 +744,16 @@ async fn await_completion<T: Transport>(
     Err("the transfer connection closed before the receiver confirmed the file".into())
 }
 
+/// The message in an `error` frame, made safe to print.
+///
+/// The relay wrote it, or on the direct path the receiver did. Neither is
+/// trusted to put bytes on this terminal.
 fn relay_error(payload: &Value) -> String {
-    payload["message"]
-        .as_str()
-        .unwrap_or("the relay reported an error")
-        .to_string()
+    crate::display::peer_message(
+        payload["message"]
+            .as_str()
+            .unwrap_or("the relay reported an error"),
+    )
 }
 
 #[cfg(test)]

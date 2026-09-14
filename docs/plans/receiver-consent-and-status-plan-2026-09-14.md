@@ -1,6 +1,6 @@
 # Receiver consent, cancel, and live status plan
 
-Status: **proposed**
+Status: **active** — phase 1 done 2026-09-14
 Created: **2026-09-14**
 Last updated: **2026-09-14**
 
@@ -334,16 +334,32 @@ concrete type.
 It fixes a live bug independent of consent: an escape sequence in a received
 filename reaches the terminal today.
 
-- [ ] `sanitize_for_display` in a new `cli/src/display.rs`, with unit tests:
-      CSI sequence, OSC 8 hyperlink, C1 control, each bidirectional control,
-      collapsed whitespace padding, middle ellipsis keeping the extension, and a
-      legitimate non-ASCII name (`Łódź 東京 🎉.txt`) passing through unchanged.
-- [ ] Applied to every peer-chosen string that reaches a terminal:
-      `recv.rs:282-286`, `recv.rs:526-532`, extractor warnings printed at
-      `recv.rs:662-664`, and the sender's printing of paths it scanned (its own
-      files, but a hostile filename can already exist on a shared disk).
-- [ ] `type_label(name)` and `is_program(name)`, tested against the padding
-      trick above.
+- [x] `cli/src/display.rs`: `for_terminal`, `name` and `peer_message`, with
+      unit tests covering a CSI sequence, an OSC 8 hyperlink, an OSC window
+      title, a C1 control, newlines and tabs, each bidirectional control, the
+      right-to-left-override extension trick, collapsed whitespace padding, a
+      middle ellipsis that keeps the extension, wide characters counted as two
+      columns, and honest names (`Łódź 東京 🎉.txt`, Arabic, an emoji ZWJ
+      sequence, `10:30 standup.md`) passing through unchanged.
+- [x] Applied at every site where someone else's text reaches a terminal:
+      - the receiver's `Receiving` line, collision note, `Saved` path, archive
+        warnings and extraction line
+      - every `error` frame's message, in `recv.rs`, `send.rs` and
+        `transport/relay.rs`
+      - the relay's HTTP error body in `client.rs`
+      - the sender's own `Sending` summary and warnings
+      - the interface's file browser rows
+- [x] End to end through the real binary: a file named with a clear-line
+      sequence and a right-to-left override crosses a real relay, and neither
+      side's stderr contains `ESC` or `U+202E`. **Negative control:** with the
+      `Receiving` line reverted to printing the name verbatim, the test fails
+      with "an escape sequence from the name reached the receiver's terminal".
+- Moved to phase 3, where the preview first needs them: `type_label(name)` and
+  `is_program(name)`. Adding them here would be code with no caller.
+
+Done 2026-09-14 on `fix/sanitize-peer-text`. 193 tests, up from 180: 12 unit
+tests and one end-to-end. `unicode-width` becomes a direct dependency, and it
+was already in the tree through ratatui.
 
 ### Phase 2 — protocol and relay
 
