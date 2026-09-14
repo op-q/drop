@@ -15,10 +15,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CryptoError, handshake::SessionKeys};
 
-/// Bumped when the framing changes in a way an older build cannot read. A
+/// The protocol version: the sealing *and* the conversation around it.
+///
+/// Bumped when either changes in a way an older build cannot follow. Version 2
+/// added the key confirmation in `meta_ok`, carried on both paths; a version 1
+/// peer would not send it and would otherwise be charged a failed guess. A
 /// mismatch is a hard failure: a version that is negotiated downward is a
 /// version a hostile relay can negotiate to plaintext.
-pub const ENVELOPE_VERSION: u8 = 1;
+pub const ENVELOPE_VERSION: u8 = 2;
 
 /// AES-GCM authentication tag, appended to every sealed chunk.
 pub const TAG_BYTES: u64 = 16;

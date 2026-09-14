@@ -240,6 +240,20 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                     break;
                                 }
                             }
+                            SenderEvent::MetaOk(confirmation) => {
+                                let msg = serde_json::json!({
+                                    "type": "meta_ok",
+                                    "confirmation": confirmation
+                                });
+
+                                if ws_sender
+                                    .send(Message::Text(msg.to_string().into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
                             SenderEvent::Error(message) => {
                                 let msg = serde_json::json!({
                                     "type": "error",
@@ -356,11 +370,19 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                                         // purpose. Anything softer is a
                                         // downgrade a hostile relay could
                                         // steer toward plaintext.
+                                        // Say which versions, because the
+                                        // person reading it has to know
+                                        // which of three programs to upgrade.
+                                        let message = format!(
+                                            "unsupported protocol version {version}: this relay \
+                                             speaks version {ENVELOPE_VERSION}, and the relay and \
+                                             both copies of drop must match"
+                                        );
                                         TransferService::fail_session(
                                             &state_for_recv,
                                             &code_for_recv,
-                                            Some("unsupported envelope version"),
-                                            Some("unsupported envelope version"),
+                                            Some(&message),
+                                            Some(&message),
                                             "sender declared an unsupported envelope version",
                                         )
                                         .await;

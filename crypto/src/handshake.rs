@@ -14,6 +14,7 @@
 use hkdf::Hkdf;
 use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{CryptoError, code::TransferCode};
@@ -35,6 +36,10 @@ fn identity_for(code: &TransferCode) -> Vec<u8> {
 const CHUNK_KEY_INFO: &[u8] = b"drop/v1/chunk";
 const META_KEY_INFO: &[u8] = b"drop/v1/meta";
 const SALT_INFO: &[u8] = b"drop/v1/salt";
+const CONFIRM_INFO: &[u8] = b"drop/v1/confirm";
+
+/// Length of the key confirmation a receiver sends in `meta_ok`.
+pub const CONFIRMATION_BYTES: usize = 32;
 
 /// The nonce prefix length. The remaining 8 bytes of the 96-bit nonce are the
 /// chunk counter.
@@ -50,6 +55,29 @@ pub struct SessionKeys {
     pub(crate) chunk_key: [u8; 32],
     pub(crate) meta_key: [u8; 32],
     pub(crate) salt: [u8; SALT_BYTES],
+    confirmation: [u8; CONFIRMATION_BYTES],
+}
+
+impl SessionKeys {
+    /// Proof, for the peer, that this side derived the same keys.
+    ///
+    /// Sent by the receiver in `meta_ok`. Revealing it gives nothing away: it
+    /// is one HKDF output, which does not lead back to the shared secret or to
+    /// the other keys, and only a peer that already holds the same keys can
+    /// check it.
+    pub fn confirmation(&self) -> [u8; CONFIRMATION_BYTES] {
+        self.confirmation
+    }
+
+    /// Whether `offered` is the confirmation these keys expect.
+    ///
+    /// Constant time, and deliberately here rather than at the call site: a
+    /// later refactor to `==` would be silent, and would let a guesser forge
+    /// the value one byte at a time. `ct_eq` is only constant time across equal
+    /// lengths, so the length is checked first, and the length is not a secret.
+    pub fn confirms(&self, offered: &[u8]) -> bool {
+        offered.len() == CONFIRMATION_BYTES && bool::from(self.confirmation.ct_eq(offered))
+    }
 }
 
 /// One side of an in-progress key agreement.
@@ -88,6 +116,7 @@ impl Handshake {
             chunk_key: [0u8; 32],
             meta_key: [0u8; 32],
             salt: [0u8; SALT_BYTES],
+            confirmation: [0u8; CONFIRMATION_BYTES],
         };
 
         let derived = Hkdf::<Sha256>::new(None, &shared);
@@ -95,6 +124,7 @@ impl Handshake {
             (CHUNK_KEY_INFO, &mut keys.chunk_key[..]),
             (META_KEY_INFO, &mut keys.meta_key[..]),
             (SALT_INFO, &mut keys.salt[..]),
+            (CONFIRM_INFO, &mut keys.confirmation[..]),
         ] {
             derived
                 .expand(info, output)
@@ -180,6 +210,53 @@ mod tests {
         let receiver_keys = receiver.finish(&sender_message).unwrap();
 
         assert_ne!(sender_keys.chunk_key, receiver_keys.chunk_key);
+    }
+
+    #[test]
+    fn matching_codes_confirm_each_other() {
+        let code = "7F2A91-abandon-ability-able";
+        let (sender, receiver) = agree(code, code);
+
+        assert!(sender.confirms(&receiver.confirmation()));
+        assert!(receiver.confirms(&sender.confirmation()));
+    }
+
+    /// The case the confirmation exists for: a peer holding the wrong keys
+    /// cannot produce the value, whatever it claims.
+    #[test]
+    fn a_wrong_code_cannot_confirm() {
+        let (sender, receiver) = agree(
+            "7F2A91-abandon-ability-able",
+            "7F2A91-abandon-ability-above",
+        );
+
+        assert!(!sender.confirms(&receiver.confirmation()));
+    }
+
+    #[test]
+    fn a_confirmation_of_the_wrong_length_or_content_is_refused() {
+        let code = "7F2A91-abandon-ability-able";
+        let (keys, _) = agree(code, code);
+        let genuine = keys.confirmation();
+
+        assert!(!keys.confirms(&[]));
+        assert!(!keys.confirms(&genuine[..CONFIRMATION_BYTES - 1]));
+        assert!(!keys.confirms(&[genuine.as_slice(), &[0]].concat()));
+
+        let mut flipped = genuine;
+        flipped[CONFIRMATION_BYTES - 1] ^= 1;
+        assert!(!keys.confirms(&flipped));
+    }
+
+    #[test]
+    fn the_confirmation_is_none_of_the_other_secrets() {
+        let code = "7F2A91-abandon-ability-able";
+        let (keys, _) = agree(code, code);
+        let confirmation = keys.confirmation();
+
+        assert_ne!(confirmation, keys.chunk_key);
+        assert_ne!(confirmation, keys.meta_key);
+        assert_ne!(&confirmation[..SALT_BYTES], &keys.salt[..]);
     }
 
     #[test]

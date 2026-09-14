@@ -33,6 +33,8 @@ pub enum SenderEvent {
     },
     /// The receiver's key-exchange message, forwarded verbatim.
     KeyExchange(String),
+    /// The receiver's key confirmation, forwarded verbatim.
+    MetaOk(String),
     Error(String),
 }
 

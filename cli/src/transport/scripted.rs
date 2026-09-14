@@ -12,10 +12,15 @@ use serde_json::Value;
 
 use super::{Frame, Transport, TransportError};
 
+/// Frames a scripted peer adds to what it will say, in reply to one this side
+/// sent.
+type Responder = Box<dyn FnMut(&Frame) -> Vec<Frame> + Send>;
+
 pub struct ScriptedTransport {
     inbound: VecDeque<Frame>,
     sent: Vec<Frame>,
     peers_enforce_one_guess: bool,
+    responder: Option<Responder>,
 }
 
 impl ScriptedTransport {
@@ -28,6 +33,20 @@ impl ScriptedTransport {
             // are written against. A test that wants the direct path's extra
             // checkpoint asks for it by name.
             peers_enforce_one_guess: false,
+            responder: None,
+        }
+    }
+
+    /// A peer that answers what it is sent, rather than only replaying.
+    ///
+    /// Needed wherever a reply depends on this side's randomness. A key
+    /// confirmation is the case that forced it: the sender's handshake half is
+    /// fresh every run, so no fixed script can prove it holds the same keys,
+    /// and a script that could would not be testing the proof.
+    pub fn responding(responder: impl FnMut(&Frame) -> Vec<Frame> + Send + 'static) -> Self {
+        Self {
+            responder: Some(Box::new(responder)),
+            ..Self::new(Vec::new())
         }
     }
 
@@ -75,18 +94,27 @@ impl ScriptedTransport {
     }
 }
 
+impl ScriptedTransport {
+    fn record(&mut self, frame: Frame) {
+        if let Some(responder) = self.responder.as_mut() {
+            self.inbound.extend(responder(&frame));
+        }
+        self.sent.push(frame);
+    }
+}
+
 impl Transport for ScriptedTransport {
     fn peers_enforce_one_guess(&self) -> bool {
         self.peers_enforce_one_guess
     }
 
     async fn send_control(&mut self, frame: Value) -> Result<(), TransportError> {
-        self.sent.push(Frame::Control(frame));
+        self.record(Frame::Control(frame));
         Ok(())
     }
 
     async fn send_chunk(&mut self, chunk: Vec<u8>) -> Result<(), TransportError> {
-        self.sent.push(Frame::Chunk(chunk));
+        self.record(Frame::Chunk(chunk));
         Ok(())
     }
 

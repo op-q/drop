@@ -29,6 +29,12 @@ pub enum ReceiverMessage {
     KeyExchange {
         message: String,
     },
+    /// The receiver opened the sealed metadata, and proves it with a value
+    /// only a peer holding the same keys can produce. Forwarded to the sender
+    /// untouched: the relay cannot check the proof, and does not need to.
+    MetaOk {
+        confirmation: String,
+    },
     ChunkAck {
         bytes_received: u64,
     },

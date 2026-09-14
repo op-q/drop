@@ -105,8 +105,9 @@ not, and confusing the two is how a path ships without either.
 Over the relay this is server-side and invisible to both peers. Over a direct
 connection there is no server, so the sender does it: it sends nothing until
 the peer proves it opened the sealed metadata, and a peer that fails — by
-saying so, by timing out, or by vanishing, which count the same — consumes the
-transfer. The sender then asks the person in front of it:
+saying so, by timing out, by vanishing, or by claiming success it cannot prove,
+which all count the same — consumes the transfer. The sender then asks the
+person in front of it:
 
 ```text
 A peer connected and failed the code.
@@ -120,6 +121,25 @@ human speed and — the part that matters more than the bits — *makes it
 visible*: the attempt counter climbs where the sender's owner can see it. A
 sender with no terminal allows nothing, so unattended use gets the strict
 behaviour.
+
+**The proof is what makes the prompt mean something.** Until protocol version
+2 the peer's answer was a bare `meta_ok`, an assertion made by the party being
+limited. A wrong guesser could send it anyway: the transfer was still consumed
+and nothing readable leaked, but the attempt counter never climbed and nobody
+was asked, so being probed was invisible. Since version 2 `meta_ok` carries a
+32-byte key confirmation, a fourth HKDF output only a peer holding the same
+keys can produce, and the sender checks it in constant time
+(`SessionKeys::confirms`, in `crypto/`, so a later `==` cannot creep in at a
+call site). Sending it reveals nothing: it does not lead back to the secret or
+to the other keys, and the sender never sends its own copy, so there is
+nothing to replay. It proves the receiver to the sender, not the other way
+round, and needs no reverse proof: a sender without the keys could not have
+sealed the metadata the receiver just opened. Recorded as
+[`decisions.md`](decisions.md) entry 18.
+
+Over the relay the same checkpoint runs, and a failure ends the transfer rather
+than prompting, since the relay has already burned the session. There it is
+what lets a sender know the code was right before a byte moves.
 
 The denial of service above is unchanged by this and applies to both paths:
 someone who guesses a nameplate can burn a transfer without learning anything.

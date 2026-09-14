@@ -1,7 +1,7 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[`meta_ok` key confirmation](plans/meta-ok-key-confirmation-plan-2026-08-31.md)**, then receiver consent phases 2–4 (item 11), under one wire bump to version 2. Browser removal (item 8) is done; macOS passes CI; Windows CI is being brought green (item 10, phase 0). Priorities set 2026-09-14; the order is in [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law)
+Current work: **receiver consent, cancel and live status** (item 11, phases 2–4) under protocol version 2, which `meta_ok` key confirmation opened on 2026-09-14. Browser removal (item 8) is done; Windows and macOS CI are green and the Windows receiver is fixed (item 10, phases 0–1). Priorities set 2026-09-14; the order is in [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law)
 Last updated: **2026-09-14**
 
 The tactical view of what is being built and what state it is in. The detailed
@@ -153,7 +153,8 @@ cannot work. Recorded in [`decisions.md`](decisions.md) entry 10.
       proved:** none of it has run over a real network, for the same UDP reason
       as Phases 2 and 3 — the pair tests use an in-memory byte pipe and
       loopback QUIC.
-- [ ] **Make `meta_ok` provable rather than self-reported.** Proposed
+- [x] **Make `meta_ok` provable rather than self-reported.** Done 2026-09-14,
+      on both carriers, as protocol version 2 (decisions entry 18). Proposed
       2026-08-31, in
       [`plans/meta-ok-key-confirmation-plan-2026-08-31.md`](plans/meta-ok-key-confirmation-plan-2026-08-31.md).
       The frame above is an unauthenticated assertion made by the party being

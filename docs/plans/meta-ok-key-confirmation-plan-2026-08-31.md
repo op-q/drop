@@ -1,6 +1,6 @@
 # `meta_ok` key confirmation plan
 
-Status: **proposed**
+Status: **done** — landed 2026-09-14 on `feat/meta-ok-confirmation`; recorded as decisions entry 18
 Created: **2026-08-31**
 Last updated: **2026-09-14**
 
@@ -131,37 +131,60 @@ impl SessionKeys {
 
 ### Phase 1 — key schedule
 
-- [ ] Add `subtle = "2"` to `crypto/Cargo.toml`.
-- [ ] Add `CONFIRM_INFO`, `CONFIRMATION_BYTES`, the `confirmation` field, and
+- [x] Add `subtle = "2"` to `crypto/Cargo.toml`.
+- [x] Add `CONFIRM_INFO`, `CONFIRMATION_BYTES`, the `confirmation` field, and
       the fourth `expand` call in `crypto/src/handshake.rs`.
-- [ ] Export `CONFIRMATION_BYTES` from `crypto/src/lib.rs`.
-- [ ] Tests: matching codes agree on the confirmation; it differs from the
+- [x] Export `CONFIRMATION_BYTES` from `crypto/src/lib.rs`.
+- [x] Tests: matching codes agree on the confirmation; it differs from the
       chunk key, the metadata key and the salt; mismatched codes disagree.
 
 ### Phase 2 — the wire
 
-- [ ] `recv.rs`: attach the hex confirmation to the existing `meta_ok`.
-- [ ] `send.rs`: in `await_meta_checkpoint`, decode and compare, folding every
+- [x] `recv.rs`: attach the hex confirmation to the existing `meta_ok`.
+- [x] `send.rs`: in `await_meta_checkpoint`, decode and compare, folding every
       failure into the existing `FailedTheCode` outcome.
-- [ ] Tests, driven through `ScriptedTransport`: a real SPAKE2 pair confirms;
+- [x] Tests, driven through `ScriptedTransport`: a real SPAKE2 pair confirms;
       a wrong-code peer is refused; non-hex is refused; absent is refused;
       data-before-confirming is refused.
 
 ### Phase 3 — the browser
 
-- [ ] Confirm no change is needed. The browser is a relay client, the relay
-      answers `peers_enforce_one_guess()` as false, and the WebAssembly build
-      shares `crypto/`, so the fourth output appears automatically and is
-      simply unused.
+- Not needed: the browser client was removed first (decisions entry 17).
 
 ### Phase 4 — documentation
 
-- [ ] `docs/protocol.md`: the key schedule gains a line; `meta_ok` gains a
+- [x] `docs/protocol.md`: the key schedule gains a line; `meta_ok` gains a
       field, direct path only.
-- [ ] `docs/security.md`: state what the confirmation does and does not buy.
-- [ ] `docs/decisions.md`: promote to entry 15 once this lands (contract rule
+- [x] `docs/security.md`: state what the confirmation does and does not buy.
+- [x] `docs/decisions.md`: promote to entry 15 once this lands (contract rule
       6), and mark this plan done.
-- [ ] Mirror into `docs/implementation-checklist.md`.
+- [x] Mirror into `docs/implementation-checklist.md`.
+
+### What landed differently, 2026-09-14
+
+- **Both carriers, not the direct path only.** The relay forwards `meta_ok`
+  (`ReceiverMessage::MetaOk`, bounded by `MAX_OPAQUE_FIELD_BYTES`), and the
+  receiver sends it and its `error` on both. `peers_enforce_one_guess()` now
+  decides what a failed checkpoint means (a counted attempt, or the end of the
+  transfer), not whether the checkpoint runs. The risk "the relay path must not
+  change" became "the relay forwards it", with a relay test for forwarding and
+  one for the size bound.
+- **Relay narration.** Over the relay, `status: sending` and `progress` arrive
+  between `meta` and `meta_ok`, so the one-frame read would have counted the
+  relay's own words as a failed guess. The checkpoint reads past those two
+  types on the relay carrier only, under one deadline for the whole wait.
+- **Version 2.** `ENVELOPE_VERSION` and `DROP_ALPN` are bumped together, and
+  `the_alpn_carries_the_protocol_version` fails if they drift. The relay's
+  mismatch error now names both versions.
+- **Tests needed a peer that reacts.** A confirmation depends on the sender's
+  fresh handshake half, so no fixed script can hold one.
+  `ScriptedTransport::responding` lets a test peer run a real handshake. Seven
+  tests replace or extend the old ones: a proven pass; five unproven claims
+  (bare, wrong keys, non-hex, wrong length, not a string) on both carriers;
+  narration read past on the relay and not on the direct path; and the retry
+  tests driven by a real handshake. **Negative control:** with the comparison
+  forced true, the claims test fails on the bare `meta_ok`.
+- 217 tests, up from 210.
 
 ## Files
 

@@ -102,6 +102,15 @@ pub fn log_sender_event(code: &str, event: &SenderEvent) {
                 "dispatching sender event"
             );
         }
+        // The value is not logged. It reveals nothing about the key, but
+        // nothing opaque a peer sent belongs in operational logs.
+        SenderEvent::MetaOk(_) => {
+            debug!(
+                session_code = %code,
+                event = "receiver_key_confirmation_forwarded",
+                "dispatching sender event"
+            );
+        }
         SenderEvent::Error(message) => {
             debug!(
                 session_code = %code,
