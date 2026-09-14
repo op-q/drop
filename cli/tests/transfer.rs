@@ -318,6 +318,10 @@ async fn a_malformed_code_fails_before_the_relay_is_contacted() {
 }
 
 /// Builds a ustar archive from `(name, typeflag, link_target, contents)`.
+///
+/// Unix only because its one caller is: the hostile archive it builds plants
+/// symlinks, and the receiver cannot create those on Windows.
+#[cfg(unix)]
 fn archive_of(entries: &[(&str, u8, &str, &[u8])]) -> Vec<u8> {
     let mut archive = Vec::new();
 
