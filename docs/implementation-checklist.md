@@ -1,7 +1,7 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **[browser client removal](plans/browser-client-removal-plan-2026-09-11.md) phases 1–4**, after phase 0 landed 2026-09-14, then tests on Windows, macOS and Linux (item 10, phase 0). Re-prioritised 2026-09-14 around receiver consent and status (item 11), cancel, NAT proof and cross-platform support; the order is in [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law)
+Current work: **[`meta_ok` key confirmation](plans/meta-ok-key-confirmation-plan-2026-08-31.md)**, then receiver consent phases 2–4 (item 11), under one wire bump to version 2. Browser removal (item 8) is done; macOS passes CI; Windows CI is being brought green (item 10, phase 0). Priorities set 2026-09-14; the order is in [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law)
 Last updated: **2026-09-14**
 
 The tactical view of what is being built and what state it is in. The detailed
@@ -397,7 +397,12 @@ the four prebuilt targets. Release binary went 26,988,848 → 27,482,144 bytes,
 ## 8. Browser client removal
 
 Plan: [`browser-client-removal-plan-2026-09-11.md`](plans/browser-client-removal-plan-2026-09-11.md)
-Status: **active** — open questions answered 2026-09-14
+Status: **done** 2026-09-14, recorded as [`decisions.md`](decisions.md) entry 17
+
+Found on the way and fixed: `Dockerfile` has not built since the envelope became
+its own crate (it never copied `crypto/`). **Needs a settings change when this
+merges:** branch protection requires "Web", which no longer reports, and
+"Analyze JavaScript and TypeScript", which is now "Analyze Rust".
 
 Delete `web/` and `crypto-wasm/` and every dependent — the server routes that
 serve the client, the CI job that builds it, the Docker stage that bundles it,
@@ -411,14 +416,14 @@ that one.
       publishes it at 153 under `fail_on_unmatched_files: true`, so deleting
       `web/` first fails the next tag in `publish`, after the whole build matrix
       has already succeeded.
-- [ ] Phase 1 — the server stops serving a browser: the `/` and `/assets`
+- [x] Phase 1 — the server stops serving a browser: the `/` and `/assets`
       routes, and the `index_serves_the_drop_entrypoint` test that asserts the
       Svelte entrypoint.
-- [ ] Phase 2 — delete `web/` and `crypto-wasm/`, the workspace member, and
+- [x] Phase 2 — delete `web/` and `crypto-wasm/`, the workspace member, and
       `.cargo/config.toml`'s wasm32 rustflag.
-- [ ] Phase 3 — the `web` CI job, `Dockerfile.fullstack`, and the ignore-file
+- [x] Phase 3 — the `web` CI job, `Dockerfile.fullstack`, and the ignore-file
       entries.
-- [ ] Phase 4 — documentation across nine files, `decisions.md` entry 17, and
+- [x] Phase 4 — documentation across nine files, `decisions.md` entry 17, and
       entry 11 marked superseded rather than deleted.
 
 Gate: the workspace is green with two members rather than three, a CLI-to-CLI

@@ -103,11 +103,11 @@ to the owning document.
 - Mark a checkbox complete only when its evidence exists. A check that was not
   run is reported as not run, never assumed to pass.
 - Two claims are narrow and must stay narrow. **End-to-end encrypted** is true
-  of CLI-to-CLI transfers and not of browser transfers, which are only as strong
-  as the code the site delivered. **Peer-to-peer** is a claim about the direct
-  QUIC path once it ships, never about Drop as a whole, since every transfer
-  today crosses the relay. Never blur either pair. See
-  [AGENTS.md](../AGENTS.md) and [`decisions.md`](decisions.md) entries 7 and 11.
+  of CLI-to-CLI transfers. No browser client ships, and any future one would be
+  only as strong as the code its site delivered. **Peer-to-peer** is a claim
+  about the direct QUIC path, never about Drop as a whole, since a transfer can
+  fall back to the relay. Never blur either. See [AGENTS.md](../AGENTS.md) and
+  [`decisions.md`](decisions.md) entries 7, 11 and 17.
 - Record a decision entry when changing the persistence stance, the session
   lifecycle, the encryption model, the deployment shape, or the resource
   bounds.

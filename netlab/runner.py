@@ -2,8 +2,8 @@
 
 This module starts processes and inspects their output. It does not implement
 any part of the Drop protocol — no envelope, no handshake, no framing, no chunk
-sealing. `docs/decisions.md` entry 11 refuses a second implementation of the
-envelope for the browser, and a Python one here would reintroduce exactly the
+sealing. `docs/decisions.md` entry 11 refused a second implementation of the
+envelope for the browser client, and a Python one here would reintroduce exactly the
 drift that decision prevents. What the lab knows about a transfer is what the
 binaries said and what landed on disk.
 

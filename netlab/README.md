@@ -250,7 +250,6 @@ easier, not harder, to believe a test proved something it did not.
   uniform loss. Real links produce bursts, reordering, bufferbloat and
   asymmetry; surviving 1% independent loss is not surviving 1% bursty loss.
 - **No IPv6, no dual-stack**, so no address-family selection.
-- **No browser.** The web client needs the relay and has no namespace story.
 - **Throughput numbers are veth numbers.** What the latency lane tests is the
   *shape* of the relationship between the window and the round-trip time, which
   is a property of Drop's flow control. It is not a measurement of any real
@@ -275,8 +274,8 @@ easier, not harder, to believe a test proved something it did not.
 
 - **No part of the Drop protocol is implemented here.** No envelope, no
   handshake, no framing, no chunk sealing.
-  [`decisions.md`](../docs/decisions.md) entry 11 refuses a second
-  implementation of the envelope for the browser; a Python one would
+  [`decisions.md`](../docs/decisions.md) entry 11 refused a second
+  implementation of the envelope for the browser client; a Python one would
   reintroduce the same drift. The lab starts real binaries and inspects what
   comes out — a checksum, an exit code, and the line `drop --status` prints.
 - **It matches the status line, not the prose.** `drop-status: path=relay

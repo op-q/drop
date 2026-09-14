@@ -1,6 +1,6 @@
 # Transfer shakeout template
 
-Last checked: 2026-08-19
+Last checked: 2026-09-14
 
 Use this when the owner asks for a deep exercise of a running relay — "try
 transfers as hard as you can and tell me what breaks" — or before a release.
@@ -13,7 +13,7 @@ test suite or for [`../release-checklist.md`](../release-checklist.md).
 
 ```text
 Run a full Drop transfer shakeout. Build and run a local relay, exercise
-browser and CLI transfers in every pairing, test the failure and abuse paths,
+CLI transfers over both the relay and the direct path, test the failure and abuse paths,
 then write a dated numbered report under docs/validation. Prioritize
 truthfulness about what you actually observed, the no-persistence guarantee,
 the resource bounds, and whether errors reach the right peer with a
@@ -32,7 +32,7 @@ Before testing:
 
 - Read [AGENTS.md](../../AGENTS.md) and [`../security.md`](../security.md).
 - Run `git status --short --branch` and preserve unrelated working-tree changes.
-- Build the web client and run the relay locally. Never run a shakeout against
+- Build the relay and the CLI and run the relay locally. Never run a shakeout against
   the public instance.
 - Use synthetic files only. Generate them; do not use personal data.
 - Do not put a real session code, filename, or IP address in the report.
@@ -41,7 +41,6 @@ Recommended environment:
 
 ```bash
 DROP_BIND_ADDR=127.0.0.1:8080
-DROP_ALLOWED_ORIGINS=http://127.0.0.1:5173
 RUST_LOG=drop=debug
 ```
 
@@ -55,17 +54,18 @@ RUST_LOG=drop=debug
 Record: the metrics snapshot shape, and whether `/ready` and `/health` mean
 different things as documented.
 
-### 2. The four pairings
+### 2. Both carriers
 
-Transfer a small synthetic file in each direction:
+Transfer a small synthetic file CLI to CLI:
 
-- browser to browser
-- CLI to CLI
-- browser to CLI
-- CLI to browser
+- `--transport relay`, through the local relay
+- `--transport p2p`, with no relay configured
+- `--transport auto`, and record which path it took and why
 
-Record: checksum match at the receiving end, wall-clock duration, and whether
-progress reporting looked sane in each client.
+Record: checksum match at the receiving end, wall-clock duration, the
+`drop --status` line on both sides, and whether progress reporting looked sane.
+(The browser pairings this lane used to have went with the browser client in
+0.4.0.)
 
 ### 3. Payload shapes
 
@@ -134,9 +134,11 @@ whether anything landed outside the destination.
 Send files whose names contain control characters, an ANSI escape sequence, a
 right-to-left override, and an extreme length.
 
-Record: exactly what the terminal and the browser rendered. This lane matters
-more once the confirmation prompt exists; see
-[`../plans/receiver-confirmation-plan-2026-08-19.md`](../plans/receiver-confirmation-plan-2026-08-19.md).
+Record: exactly what the terminal rendered, on both sides. Names are neutralised
+by `cli/src/display.rs` since 2026-09-14, so a raw escape reaching either
+terminal is a regression. This lane matters more once the consent preview
+exists; see
+[`../plans/receiver-consent-and-status-plan-2026-09-14.md`](../plans/receiver-consent-and-status-plan-2026-09-14.md).
 
 ### 9. Shutdown behavior
 

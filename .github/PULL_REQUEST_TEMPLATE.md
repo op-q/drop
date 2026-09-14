@@ -12,10 +12,8 @@
 
 - [ ] `scripts/check-secrets.sh`
 - [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings`
-- [ ] `cargo test --all-targets`
-- [ ] `npm --prefix web ci && npm --prefix web run build`
-- [ ] `npm --prefix web audit --audit-level=high`
+- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- [ ] `cargo test --workspace --all-targets`
 
 ## Security, privacy, and operations
 

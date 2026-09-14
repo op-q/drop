@@ -2,10 +2,16 @@ FROM rust:1-slim-bookworm AS rust-builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
+# Cargo loads every workspace member's manifest before building any one of
+# them, so the CLI's manifest has to be here even though the CLI is not built.
+# `crypto/` is a real dependency of the server, not only a member. Without it
+# this stage fails before compiling anything, which it did from the day the
+# envelope moved into its own crate until 2026-09-14.
 COPY cli/Cargo.toml ./cli/Cargo.toml
+COPY crypto ./crypto
 COPY src ./src
 # Only the server is built here; the CLI ships as a separate release binary.
-RUN cargo build --release --package api
+RUN cargo build --release --locked --package api
 
 FROM debian:bookworm-slim
 WORKDIR /app

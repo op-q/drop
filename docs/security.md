@@ -21,30 +21,30 @@ the secret half of the transfer code by SPAKE2, and that half never reaches the
 relay; what crosses it is ciphertext, a byte count, and a nameplate that routes
 the two peers together. See [`decisions.md`](decisions.md) entry 7.
 
-**The CLI case and the browser case are not the same, and must never be
-described in wording that blurs them.**
+**CLI to CLI is end-to-end encrypted.** The binary is fetched once, out of
+band, and the relay has no part in delivering it.
 
-- **CLI to CLI is end-to-end encrypted.** The binary is fetched once, out of
-  band, and the relay has no part in delivering it.
-- **Browser transfers are encrypted in the browser, and are only as strong as
-  the code the site delivered.** The page fetches its JavaScript and the
-  WebAssembly envelope from the same origin as the relay, so an operator
-  willing to serve modified client code can capture a transfer at the point
-  where it is still plaintext. Compiling the envelope from the same Rust the
-  CLI uses (entry 11) removes a class of implementation bugs; it does not
-  remove this. What browser encryption does defeat is a passive operator, a
-  compromised store of relayed traffic, and anyone who obtains the ciphertext
-  later.
+**No browser client ships** since 0.4.0 ([`decisions.md`](decisions.md) entry
+17). The rule it lived under still binds any future one, and is kept here so it
+is not rediscovered the hard way: **a browser transfer is encrypted in the
+browser, and is only as strong as the code the site delivered.** A page that
+fetches its JavaScript and envelope from an operator's origin lets that
+operator, if willing to serve modified client code, capture a transfer where it
+is still plaintext. Compiling the envelope from the same Rust the CLI uses
+(entry 11) removes a class of implementation bugs; it does not remove this. What
+browser encryption does defeat is a passive operator, a compromised store of
+relayed traffic, and anyone who obtains the ciphertext later. Never describe the
+two cases in wording that blurs them.
 
-Do not describe Drop as peer-to-peer.
+Do not describe Drop as a whole as peer-to-peer. The direct path is; a transfer
+that falls back to the relay is not.
 
 ## What the relay does not do
 
 - It does not write transferred file bytes to application storage.
 - It does not retain a session after completion, cancellation, disconnect, or
   five minutes without activity.
-- It does not send telemetry, upload anything externally, or make third-party
-  browser requests.
+- It does not send telemetry or upload anything externally.
 
 The no-storage property is an application guarantee. Operating-system, proxy,
 and infrastructure behavior is outside it — a kernel buffer, a swap file, or an
@@ -152,8 +152,8 @@ entry created.
 A filename is also hostile input for *display*. It is chosen by the sender and
 may contain control characters, ANSI escape sequences, or bidirectional
 overrides. Any surface that renders it — especially a confirmation prompt, where
-misleading the reader is the whole payoff — must render it inert first. The web
-client escapes by default; a terminal does not.
+misleading the reader is the whole payoff — must render it inert first. A
+terminal does not do this for you.
 
 The CLI does this in `cli/src/display.rs`. Every name a peer chose, every
 archive warning that quotes one, and every error message a peer or the relay
@@ -232,14 +232,11 @@ publishes the relay and still withholds every private address of the sender's.
 
 Recorded honestly rather than fixed:
 
-- browser transfers are bounded by the code the site delivered, as above;
 - 24-bit session codes, as discussed above;
 - no resume or retry, so a disconnect loses the transfer;
 - release binaries are verified against checksums published in the same release,
   which detects corruption and truncation but not a compromised release. The
-  trust anchor is GitHub; artifacts are not signed;
-- browsers without direct-to-disk download support buffer the whole file in
-  memory, capped at 256 MiB by the web client.
+  trust anchor is GitHub; artifacts are not signed.
 
 ## Reporting
 

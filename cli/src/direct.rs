@@ -206,7 +206,7 @@ pub enum Path {
     /// Direct only. Fails rather than falling back, which is what someone
     /// verifying that no Drop server is involved actually wants.
     Direct,
-    /// The relay only. Also what a browser peer needs on the other end.
+    /// The relay only. What works on a network that lets no UDP out.
     Relay,
 }
 

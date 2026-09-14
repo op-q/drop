@@ -1,6 +1,6 @@
 # Browser client removal plan
 
-Status: **active** — phase 0 done 2026-09-14; phases 1–4 next
+Status: **done** — phase 0 and phases 1–4 landed 2026-09-14; recorded as decisions entry 17
 Created: **2026-09-11**
 Last updated: **2026-09-14**
 
@@ -141,51 +141,51 @@ half-done.
 
 ## Phase 1 — the server stops serving a browser
 
-- [ ] Delete the routes at [`src/lib.rs:43`](../../src/lib.rs#L43) (`/` →
+- [x] Delete the routes at [`src/lib.rs:43`](../../src/lib.rs#L43) (`/` →
       `web/dist/index.html`) and [`src/lib.rs:57`](../../src/lib.rs#L57)
       (`/assets` → `web/dist/assets`). The `/install.sh` route went in phase 0.
-- [ ] Drop the now-unused `ServeDir` / `ServeFile` imports at
+- [x] Drop the now-unused `ServeDir` / `ServeFile` imports at
       [`src/lib.rs:28`](../../src/lib.rs#L28), and `get_service` from the
       `axum::routing` import at [`src/lib.rs:19`](../../src/lib.rs#L19) if
       nothing else uses it.
-- [ ] Delete `index_serves_the_drop_entrypoint` at
+- [x] Delete `index_serves_the_drop_entrypoint` at
       [`tests/health_check.rs:59-76`](../../tests/health_check.rs#L59-L76). It
       asserts the response body contains `<div id="app"></div>` and `./assets/`,
       both of which are the Svelte entrypoint.
-- [ ] Decide what `GET /` returns now. It must not 404 silently into a
+- [x] Decide what `GET /` returns now. It must not 404 silently into a
       monitoring gap — `/health` and `/ready` exist for probes, so the honest
       options are a 404 with a one-line body naming the project, or a redirect
       to the repository. See [open question 2](#open-question-2--what-does-get--return).
 
 ## Phase 2 — delete the client and its wasm bindings
 
-- [ ] Delete `web/`.
-- [ ] Delete `crypto-wasm/`.
-- [ ] Remove `crypto-wasm` from `members` at
+- [x] Delete `web/`.
+- [x] Delete `crypto-wasm/`.
+- [x] Remove `crypto-wasm` from `members` at
       [`Cargo.toml:2`](../../Cargo.toml#L2).
-- [ ] Delete [`.cargo/config.toml`](../../.cargo/config.toml). Its only content
+- [x] Delete [`.cargo/config.toml`](../../.cargo/config.toml). Its only content
       is the `wasm32-unknown-unknown` `getrandom_backend` rustflag, and its own
       comment says it is scoped to that target on purpose. With no wasm target
       in the workspace the file has no remaining job. **Check first** that
       nothing else was added to it since this plan was written.
-- [ ] `cargo update --workspace` or equivalent so `Cargo.lock` drops
+- [x] `cargo update --workspace` or equivalent so `Cargo.lock` drops
       `drop-crypto-wasm` and the wasm-only dependency tree under it.
 
 ## Phase 3 — build, CI, and container surface
 
-- [ ] Delete the `web` job, [`ci.yml:51-102`](../../.github/workflows/ci.yml#L51-L102).
+- [x] Delete the `web` job, [`ci.yml:51-102`](../../.github/workflows/ci.yml#L51-L102).
       That removes the Node setup, the pinned `wasm-pack` download, the wasm32
       target, `npm audit`, and the extra `cargo build --workspace --bins` that
       existed to stop the interop test skipping silently.
-- [ ] Delete [`Dockerfile.fullstack`](../../Dockerfile.fullstack) and point
+- [x] Delete [`Dockerfile.fullstack`](../../Dockerfile.fullstack) and point
       [`docker-compose.yml:5`](../../docker-compose.yml#L5) at
       [`Dockerfile`](../../Dockerfile), which already builds `api` alone and
       needs no change.
-- [ ] Remove `web/node_modules` and `web/dist` from
+- [x] Remove `web/node_modules` and `web/dist` from
       [`.dockerignore:6-7`](../../.dockerignore#L6-L7).
-- [ ] Remove the web entries from [`.gitignore:9-12`](../../.gitignore#L9-L12)
+- [x] Remove the web entries from [`.gitignore:9-12`](../../.gitignore#L9-L12)
       and fix the section comment at line 1 (`# Rust and web build state`).
-- [ ] Remove `*.svelte text` at
+- [x] Remove `*.svelte text` at
       [`.gitattributes:4`](../../.gitattributes#L4) and the Vite whitespace
       exemption at lines 8-10. Keep `*.ts text` only if any TypeScript remains;
       after this plan, none does.
@@ -196,35 +196,35 @@ The largest phase by file count and the easiest to leave half-done. Every item
 here is a claim that becomes false the moment phase 2 lands, and
 [AGENTS.md](../../AGENTS.md) requires README claims to track tested behavior.
 
-- [ ] [`AGENTS.md`](../../AGENTS.md): delete the web build rule and the
+- [x] [`AGENTS.md`](../../AGENTS.md): delete the web build rule and the
       `tsc`/`.svelte` rule at lines 71-74, and the five `npm --prefix web`
       commands at lines 86-90. **The two claim invariants at lines 33-40 are a
       separate question** — see [open question 3](#open-question-3--the-claim-invariants).
-- [ ] [`architecture.md`](../architecture.md): drop the `crypto-wasm/` and
+- [x] [`architecture.md`](../architecture.md): drop the `crypto-wasm/` and
       `web/` rows from the crate table (lines 47-48), redraw the dependency
       diagram at lines 55-56, drop the Browser row from the transfer-work table
       at line 87, and reword line 28 — *"It stays as the fallback for browsers,
       for UDP-blocked networks, and for the NAT cases hole-punching cannot
       solve"* — to the two reasons that survive. Line 37's "four members plus a
       web client" becomes three members.
-- [ ] [`commands.md`](../commands.md): delete the npm block at lines 14-18, the
+- [x] [`commands.md`](../commands.md): delete the npm block at lines 14-18, the
       wasm toolchain setup at lines 27-38, the interop note at lines 40-41, the
       second npm block at 65-66, and the Vite dev-server section at 78-81.
-- [ ] [`deployment.md`](../deployment.md): drop Node.js and npm from
+- [x] [`deployment.md`](../deployment.md): drop Node.js and npm from
       Requirements (lines 10-11), fix "Run it from source" (line 17) to
       `cargo run` alone, remove `VITE_BACKEND_ORIGIN` from the configuration
       table (line 38), rewrite the Docker section (lines 81-83), and delete the
       "Split deployment" section (lines 89-100) — a frontend/backend split with
       no frontend is not a shape anyone can deploy.
-- [ ] [`release-checklist.md`](../release-checklist.md): delete the three npm
+- [x] [`release-checklist.md`](../release-checklist.md): delete the three npm
       commands (lines 33-35) and the `npm audit` item (42), and the browser
       smoke tests at lines 54, 58 and 62. Line 62's direct-to-disk item refers
       to the File System Access API and goes with them.
-- [ ] [`security.md`](../security.md): lines 24-47 are the CLI-versus-browser
+- [x] [`security.md`](../security.md): lines 24-47 are the CLI-versus-browser
       section and lines 223-229 the known-weaknesses entries that depend on it.
       Subject to [open question 3](#open-question-3--the-claim-invariants).
-- [ ] [`docs/README.md`](../README.md): line 106's browser caveat.
-- [ ] [`k8s/README.md`](../../k8s/README.md): lines 78-83 justify
+- [x] [`docs/README.md`](../README.md): line 106's browser caveat.
+- [x] [`k8s/README.md`](../../k8s/README.md): lines 78-83 justify
       `WS_MAX_MESSAGE_BYTES` by *"The browser client sends 64 KiB chunks, so the
       cap leaves four times the headroom it needs."* **That paragraph is already
       wrong and this is a good moment to fix it**: the constant is
@@ -233,16 +233,63 @@ here is a claim that becomes false the moment phase 2 lands, and
       256 KiB the text claims. Re-justify it against the CLI's 1 MiB chunk. No
       code change; the cap is already keyed to the shared constant rather than
       to the browser.
-- [ ] [`README.md`](../../README.md): no change needed. Its only match on
+- [x] [`README.md`](../../README.md): no change needed. Its only match on
       "browser" is *"a file browser for `send`"*, which is the terminal UI.
       Confirm rather than assume.
-- [ ] [`decisions.md`](../decisions.md): add **entry 17**, recording the removal
+- [x] [`decisions.md`](../decisions.md): add **entry 17**, recording the removal
       and its reasoning. Mark **entry 11** (the browser runs the envelope as
       WebAssembly) superseded, the way entry 8 was marked by 16, rather than
       deleting it. Entry 11 is the record of why `crypto/` is a separate crate,
       and `crypto/Cargo.toml:15`, `cli/src/lib.rs:9` and `cli/tests/protocol.rs:57`
       all cite that reason in comments — they need rewording to say the split is
       kept for the envelope's own sake and for whatever compiles it next.
+
+## Phases 1–4, done 2026-09-14 — what the plan missed
+
+Landed together on `chore/remove-browser-client`, stacked on phase 0 and the
+cross-platform CI change. The deletions were as listed. Found on the way:
+
+- **`Dockerfile` did not build, and neither did `Dockerfile.fullstack`.** Both
+  copied `Cargo.toml`, `cli/Cargo.toml` and `src/`, but not `crypto/`, and cargo
+  loads every workspace member's manifest before building any one of them. The
+  plan said `Dockerfile` "already builds `api` alone and needs no change". That
+  was wrong, and had been since the envelope became its own crate. Checked
+  without Docker by copying exactly the files the Dockerfile copies into a
+  scratch directory: `cargo metadata` failed on `drop-crypto`. With `crypto/`
+  added, `cargo build --release --locked --package api` succeeded there. The
+  image itself was not built, since Docker is not installed on this machine.
+- **Branch protection requires "Web" and "Analyze JavaScript and TypeScript".**
+  Deleting the `web` job makes the first never report, so every pull request
+  would wait on it. Not in the plan. It is a repository settings change.
+- **CodeQL analysed JavaScript and TypeScript only.** With no TypeScript left
+  that job would scan nothing. It now analyses Rust (`build-mode: none`) under
+  the name "Analyze Rust", which is the second required-check rename.
+- **`.github/dependabot.yml` had an npm entry for `/web`**, and the GitHub
+  templates (`CONTRIBUTING.md`, the pull request template, the bug report's
+  "Browser client" surface, `SECURITY.md`) listed npm commands and browser
+  details. All updated. None were in the plan's file list.
+- **`k8s/README.md` was wrong in more ways than the plan said.** It named the
+  cap as 256 KiB and justified it by a browser chunk size. The cap is 1 MiB plus
+  64 KiB, and the bound that actually keeps the pod inside its memory limit is
+  `RELAY_BUDGET_BYTES`. Both build commands used `Dockerfile.fullstack`.
+- **`AGENTS.md` said "every transfer today crosses the relay"**, which has been
+  false since the direct path shipped in v0.2.0. Rewritten along with the
+  dormant browser rules.
+- `cli/src/main.rs`'s `--transport` help told users a browser peer needs a
+  relay. Removed, along with the comments in `cli/Cargo.toml`,
+  `crypto/Cargo.toml`, `cli/src/lib.rs`, `crypto/src/lib.rs`,
+  `cli/src/direct.rs`, `cli/src/transport/relay.rs`, `cli/tests/protocol.rs`,
+  `netlab/README.md`, `netlab/runner.py` and the shakeout template.
+
+Validation: 193 tests (the removed `index_serves_the_drop_entrypoint` is replaced
+one-for-one by `the_root_explains_what_this_host_is`). `git grep` for `web/`,
+`svelte`, `wasm-pack`, `vite` and `npm ` finds nothing outside `docs/plans/`,
+`decisions.md` and the checklist's history, except `deployment.md`'s
+removal note. Not run here: `docker compose up --build` (no Docker), the
+Kubernetes render (CI's `kubernetes` job covers it), netlab (the relay code it
+drives is untouched apart from the removed routes and CORS layer), and a
+relayed CLI transfer as a separate manual check, because the end-to-end tests
+already drive real relayed transfers and pass.
 
 ## Risks
 

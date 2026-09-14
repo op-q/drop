@@ -25,8 +25,10 @@ Those are two separate goals and they landed in that order deliberately:
    [`decisions.md`](decisions.md) entry 10 and
    [`plans/peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md).
 
-The relay is not being removed. It stays as the fallback for browsers, for
-UDP-blocked networks, and for the NAT cases hole-punching cannot solve. What
+The relay is not being removed. It stays as the fallback for UDP-blocked
+networks and for the NAT cases hole-punching cannot solve. It used to be the
+browser client's only path too; that client was removed in 0.4.0
+([`decisions.md`](decisions.md) entry 17). What
 changes is that it stops being *required*, and encryption is what makes falling
 back to it acceptable.
 
@@ -36,27 +38,25 @@ first would have produced a fast path with no honest story for the slow one.
 
 ## The crates
 
-The repository is one Cargo workspace with four members plus a web client that
-is not a Cargo crate.
+The repository is one Cargo workspace with three members.
 
 | Path | Crate | What it is |
 | --- | --- | --- |
 | `src/` | `api` | The **relay server**. Axum, WebSockets, an in-memory session map. This is what gets deployed. |
 | `cli/` | `drop-cli` | The **`drop` binary**. What a user installs; sends and receives. |
 | `crypto/` | `drop-crypto` | The **envelope**: codes, SPAKE2, HKDF, AES-256-GCM chunk framing. No I/O, no transport. |
-| `crypto-wasm/` | `drop-crypto-wasm` | `crypto/` compiled to WebAssembly for the browser. Bindings only. |
-| `web/` | — | Svelte and TypeScript browser client. Loads the WebAssembly above. |
 
 ### What depends on what
 
 ```text
-        drop-crypto  ◀── the only thing both halves share
+        drop-crypto  ◀── the envelope, shared by both halves
         ╱         ╲
-  drop-cli         drop-crypto-wasm ◀── web/
-  (the `drop`             (browser)
+  drop-cli         api
+  (the `drop`      (the relay)
    binary)
 
-  api ◀── deployed alone; depends on drop-crypto for version and limit constants
+  api depends on drop-crypto for version and limit constants only; it never
+  opens an envelope
 ```
 
 **The CLI does not depend on the relay.** `cli/Cargo.toml` lists
@@ -84,7 +84,6 @@ goal above reachable rather than aspirational.
 | Sender | `drop send` | the file, the words, the derived keys |
 | Receiver | `drop recv` | the derived keys, the written file |
 | Relay | `api` | a nameplate, a byte count, an opaque blob in flight |
-| Browser | `web/` + wasm | the same envelope as the CLI, delivered by a server |
 
 The relay's row is the short one on purpose. It holds no filename, no key, and
 no bytes it can read; `Session` has no filename field to hold one.
