@@ -1,6 +1,6 @@
 # Cross-platform plan: Windows, macOS and Linux, and transfers between them
 
-Status: **active** — phases 0–3 done (2 and 3 on 2026-09-15); 4 and 5 next
+Status: **active** — phases 0–4 written (2–4 on 2026-09-15); phase 4's first CI run and phase 5, the manual Windows checklist, next
 Created: **2026-09-14**
 Last updated: **2026-09-15**
 
@@ -389,7 +389,7 @@ The wire is platform-neutral (see above), so an archive written on one OS and
 extracted on another is the cross-OS risk that remains. It can be tested
 without networking two runners together.
 
-- [ ] A separate workflow, `cross-os.yml`, triggered on pull requests that touch
+- [x] A separate workflow, `cross-os.yml`, triggered on pull requests that touch
       `cli/src/tar.rs`, `cli/src/untar.rs`, `cli/src/payload.rs` or
       `cli/src/recv.rs`, and nightly. Job `produce`, a matrix over three OSes,
       builds a fixed tree using every name that platform can hold: nested
@@ -398,12 +398,12 @@ without networking two runners together.
       allows one, an executable script, and colons where the platform allows
       them. It writes the archive bytes `TarPlan` produces, uncompressed and
       gzipped, and uploads them with a manifest of expected contents.
-- [ ] Job `consume`, needing `produce`, is also a matrix over three OSes. It
+- [x] Job `consume`, needing `produce`, is also a matrix over three OSes. It
       downloads all three archives and extracts each through the real receive
       path, not only through `TarExtractor`, so the gzip and naming code runs
       too. It then checks against the manifest: identical bytes for every
       representable file, and the expected warning for every file that is not.
-- [ ] Driven by `#[ignore]`d tests reading `DROP_FIXTURE_OUT` /
+- [x] Driven by `#[ignore]`d tests reading `DROP_FIXTURE_OUT` /
       `DROP_FIXTURE_IN`, so the logic lives in Rust with the rest of the tests
       and the workflow is only plumbing.
 
@@ -413,6 +413,23 @@ Considered and **rejected**: a live transfer between two CI runners. The runners
 have no channel to swap a code mid-run, and making one would mean a test-only
 way to fix a transfer code in advance. That is a knob that weakens the one
 secret the protocol has, and it would exist in shipped binaries.
+
+Written 2026-09-15 on `ci/cross-os-archives`; the nine pairings have their first
+run on that branch's pull request. Notes:
+
+- Fixture contents are derived from each file's path, so a consumer regenerates
+  what it expects instead of the producer shipping hashes or copies.
+- The tree covers: nested folders, an empty folder, an empty file, a 3 MiB file,
+  Unicode names, a name too long for a ustar header, a path deeper than 260
+  characters, and an executable script. Only a Unix producer adds a relative
+  symlink, `10:30 standup.md`, `nul.txt` and `trailing dot.`, which a Windows
+  receiver has to rewrite or skip.
+- The consumer expects Windows names rewritten exactly as `names::Naming` says,
+  links skipped (and nothing left in their place) on Windows, and executable bits
+  kept on Unix.
+- **Negative control:** with one byte flipped in the middle of the Linux tar,
+  `consume` fails with `nested/deeper/data.bin: contents differ`.
+- Linux to Linux was run locally, for both the tar and the gzipped tar.
 
 ### Phase 5 — a real Windows machine against a real Linux one
 
