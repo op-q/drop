@@ -129,7 +129,10 @@ jobs:
           python3 -m http.server 8765 --bind 127.0.0.1 --directory "$release" >/dev/null 2>&1 &
           server=$!
           trap 'kill $server' EXIT
-          sleep 2
+          for attempt in $(seq 1 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:8765/checksums.txt && break
+            sleep 0.5
+          done
 
           DROP_RELEASE_BASE=http://127.0.0.1:8765 DROP_INSTALL_DIR="$RUNNER_TEMP/bin" sh scripts/install.sh
           "$RUNNER_TEMP/bin/drop" --version
@@ -158,7 +161,20 @@ jobs:
           Set-Content -Path (Join-Path $tampered 'checksums.txt') -Value ("0" * 64 + "  drop-x86_64-pc-windows-msvc.zip")
 
           $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $release -PassThru -WindowStyle Hidden
-          Start-Sleep -Seconds 3
+          # Wait for the server to answer rather than for a fixed time: a cold
+          # Python start on a Windows runner once took longer than three
+          # seconds, and the installer failed to download from nothing.
+          $ready = $false
+          foreach ($attempt in 1..60) {
+            try {
+              Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8765/checksums.txt' | Out-Null
+              $ready = $true
+              break
+            } catch {
+              Start-Sleep -Milliseconds 500
+            }
+          }
+          if (-not $ready) { throw 'the local release server never answered' }
           try {
             $env:DROP_RELEASE_BASE = 'http://127.0.0.1:8765'
 
