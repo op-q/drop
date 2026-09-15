@@ -51,6 +51,32 @@ pub const MAX_FRAME_BYTES: usize =
 pub struct FramedTransport<R, W> {
     reader: R,
     writer: W,
+    /// The frame being read, kept here rather than in a local so that a
+    /// `receive` dropped part-way through loses nothing. See
+    /// [`Transport::receive`] on why that has to hold.
+    partial: Partial,
+}
+
+/// How far into the next frame the reader has got.
+enum Partial {
+    Header {
+        bytes: [u8; HEADER_BYTES],
+        filled: usize,
+    },
+    Payload {
+        kind: u8,
+        bytes: Vec<u8>,
+        filled: usize,
+    },
+}
+
+impl Partial {
+    fn fresh() -> Self {
+        Self::Header {
+            bytes: [0; HEADER_BYTES],
+            filled: 0,
+        }
+    }
 }
 
 impl<R, W> FramedTransport<R, W>
@@ -59,7 +85,11 @@ where
     W: AsyncWrite + Unpin + Send,
 {
     pub fn new(reader: R, writer: W) -> Self {
-        Self { reader, writer }
+        Self {
+            reader,
+            writer,
+            partial: Partial::fresh(),
+        }
     }
 
     async fn write_frame(&mut self, kind: u8, payload: &[u8]) -> Result<(), TransportError> {
@@ -92,44 +122,23 @@ where
             .map_err(|error| TransportError::Io(error.to_string()))
     }
 
-    /// Reads a header, or `None` if the peer finished cleanly.
-    ///
-    /// A peer that stops between frames is done; one that stops part-way
-    /// through a header truncated the stream. `read_exact` cannot tell those
-    /// apart — both are `UnexpectedEof` — so this counts the bytes itself.
-    async fn read_header(&mut self) -> Result<Option<(u8, usize)>, TransportError> {
-        let mut header = [0u8; HEADER_BYTES];
-        let mut filled = 0;
+    /// Turns a complete frame into what the transfer paths see.
+    fn decode(kind: u8, payload: Vec<u8>) -> Result<Frame, TransportError> {
+        match kind {
+            KIND_CONTROL => {
+                let value = serde_json::from_slice(&payload).map_err(|error| {
+                    TransportError::Malformed(format!(
+                        "the peer sent a control frame that is not JSON: {error}"
+                    ))
+                })?;
 
-        while filled < HEADER_BYTES {
-            let read = self
-                .reader
-                .read(&mut header[filled..])
-                .await
-                .map_err(|error| TransportError::Io(error.to_string()))?;
-
-            if read == 0 {
-                if filled == 0 {
-                    return Ok(None);
-                }
-
-                return Err(TransportError::Malformed(format!(
-                    "the stream ended {filled} bytes into a {HEADER_BYTES} byte frame header"
-                )));
+                Ok(Frame::Control(value))
             }
-
-            filled += read;
+            KIND_CHUNK => Ok(Frame::Chunk(payload)),
+            other => Err(TransportError::Malformed(format!(
+                "the peer sent a frame of unknown kind {other:#04x}"
+            ))),
         }
-
-        let length = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
-
-        if length > MAX_FRAME_BYTES {
-            return Err(TransportError::Malformed(format!(
-                "the peer declared a {length} byte frame; the limit is {MAX_FRAME_BYTES}"
-            )));
-        }
-
-        Ok(Some((header[0], length)))
     }
 }
 
@@ -156,35 +165,97 @@ where
         self.write_frame(KIND_CHUNK, &chunk).await
     }
 
+    /// Reads the next frame, one `read` at a time.
+    ///
+    /// Every byte read is stored in `self.partial` before the next await, and
+    /// a single `read` hands over nothing unless it completes. So dropping
+    /// this future part-way through a frame loses no bytes, and the next call
+    /// carries on where it stopped. `read_exact` could not promise that: it
+    /// consumes bytes into a buffer the dropped future owned.
+    ///
+    /// A peer that stops between frames is done. One that stops part-way
+    /// through a frame truncated the stream, and says so.
     async fn receive(&mut self) -> Result<Option<Frame>, TransportError> {
-        let Some((kind, length)) = self.read_header().await? else {
-            return Ok(None);
-        };
+        loop {
+            match &mut self.partial {
+                Partial::Header { bytes, filled } => {
+                    let read = self
+                        .reader
+                        .read(&mut bytes[*filled..])
+                        .await
+                        .map_err(|error| TransportError::Io(error.to_string()))?;
 
-        let mut payload = vec![0u8; length];
-        self.reader
-            .read_exact(&mut payload)
-            .await
-            .map_err(|error| {
-                TransportError::Malformed(format!(
-                    "the stream ended inside a {length} byte frame: {error}"
-                ))
-            })?;
+                    if read == 0 {
+                        if *filled == 0 {
+                            return Ok(None);
+                        }
 
-        match kind {
-            KIND_CONTROL => {
-                let value = serde_json::from_slice(&payload).map_err(|error| {
-                    TransportError::Malformed(format!(
-                        "the peer sent a control frame that is not JSON: {error}"
-                    ))
-                })?;
+                        return Err(TransportError::Malformed(format!(
+                            "the stream ended {filled} bytes into a {HEADER_BYTES} byte frame header"
+                        )));
+                    }
 
-                Ok(Some(Frame::Control(value)))
+                    *filled += read;
+                    if *filled < HEADER_BYTES {
+                        continue;
+                    }
+
+                    let kind = bytes[0];
+                    let length =
+                        u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+
+                    // Checked before anything is allocated for it.
+                    if length > MAX_FRAME_BYTES {
+                        self.partial = Partial::fresh();
+                        return Err(TransportError::Malformed(format!(
+                            "the peer declared a {length} byte frame; the limit is {MAX_FRAME_BYTES}"
+                        )));
+                    }
+
+                    if length == 0 {
+                        self.partial = Partial::fresh();
+                        return Self::decode(kind, Vec::new()).map(Some);
+                    }
+
+                    self.partial = Partial::Payload {
+                        kind,
+                        bytes: vec![0; length],
+                        filled: 0,
+                    };
+                }
+                Partial::Payload {
+                    kind,
+                    bytes,
+                    filled,
+                } => {
+                    let read = self
+                        .reader
+                        .read(&mut bytes[*filled..])
+                        .await
+                        .map_err(|error| TransportError::Io(error.to_string()))?;
+
+                    if read == 0 {
+                        return Err(TransportError::Malformed(format!(
+                            "the stream ended {filled} bytes inside a {} byte frame",
+                            bytes.len()
+                        )));
+                    }
+
+                    *filled += read;
+                    if *filled < bytes.len() {
+                        continue;
+                    }
+
+                    let kind = *kind;
+                    let Partial::Payload { bytes, .. } =
+                        std::mem::replace(&mut self.partial, Partial::fresh())
+                    else {
+                        unreachable!("matched as a payload above");
+                    };
+
+                    return Self::decode(kind, bytes).map(Some);
+                }
             }
-            KIND_CHUNK => Ok(Some(Frame::Chunk(payload))),
-            other => Err(TransportError::Malformed(format!(
-                "the peer sent a frame of unknown kind {other:#04x}"
-            ))),
         }
     }
 
@@ -265,6 +336,43 @@ mod tests {
             panic!("the frame after it must still parse");
         };
         assert_eq!(control["type"], "complete");
+    }
+
+    /// A read abandoned half-way through a frame must not lose the half it
+    /// had. The receiver abandons reads on purpose while a person decides
+    /// whether to accept a transfer, and a lost half would leave every later
+    /// frame misparsed.
+    #[tokio::test]
+    async fn a_receive_dropped_mid_frame_loses_nothing() {
+        let (left, right) = duplex(4 * 1024 * 1024);
+        let (right_read, right_write) = split(right);
+        let mut receiver = FramedTransport::new(right_read, right_write);
+        let (_, mut raw) = split(left);
+
+        let payload = br#"{"type":"cancel","reason":"user"}"#;
+        let mut frame = vec![0x01];
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(payload);
+
+        // Three bytes into the header, then the read is abandoned.
+        raw.write_all(&frame[..3]).await.expect("first part");
+        let abandoned =
+            tokio::time::timeout(std::time::Duration::from_millis(50), receiver.receive()).await;
+        assert!(abandoned.is_err(), "nothing complete had arrived yet");
+
+        // Into the payload, and abandoned again.
+        raw.write_all(&frame[3..12]).await.expect("second part");
+        let abandoned =
+            tokio::time::timeout(std::time::Duration::from_millis(50), receiver.receive()).await;
+        assert!(abandoned.is_err(), "the payload was still short");
+
+        raw.write_all(&frame[12..]).await.expect("the rest");
+        let Some(Frame::Control(control)) = receiver.receive().await.expect("a frame arrived")
+        else {
+            panic!("the frame should have been reassembled from its three parts");
+        };
+        assert_eq!(control["type"], "cancel");
+        assert_eq!(control["reason"], "user");
     }
 
     #[tokio::test]
@@ -407,10 +515,13 @@ mod tests {
             out_dir: destination.clone(),
             extract: true,
             force: true,
+            acceptance: crate::consent::Acceptance::Yes,
         };
 
+        let mut accepting = crate::consent::Acceptance::Yes;
         let send = crate::send::send_transfer(&mut sending, &code, payload, sealed_size);
-        let receive = crate::recv::receive_transfer(&mut receiving, &code, &options);
+        let receive =
+            crate::recv::receive_transfer(&mut receiving, &code, &options, &mut accepting);
 
         let (sent, received) = tokio::join!(send, receive);
         assert!(
@@ -478,10 +589,13 @@ mod tests {
             out_dir: destination.clone(),
             extract: true,
             force: true,
+            acceptance: crate::consent::Acceptance::Yes,
         };
 
+        let mut accepting = crate::consent::Acceptance::Yes;
         let send = crate::send::send_transfer(&mut sending, &sender_code, payload, sealed_size);
-        let receive = crate::recv::receive_transfer(&mut receiving, &guessed_code, &options);
+        let receive =
+            crate::recv::receive_transfer(&mut receiving, &guessed_code, &options, &mut accepting);
 
         let (sent, received) = tokio::join!(send, receive);
 

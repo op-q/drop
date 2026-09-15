@@ -38,6 +38,9 @@ fn a_sealed_metadata_blob_fits_well_inside_the_relays_opaque_field_limit() {
             filename: "a".repeat(255),
             mime_type: "application/octet-stream".to_string(),
             plaintext_size: 1024,
+            // The largest these can be, so the bound is checked at its worst.
+            entry_count: Some(u64::MAX),
+            unpacked_size: Some(u64::MAX),
         },
     )
     .unwrap();

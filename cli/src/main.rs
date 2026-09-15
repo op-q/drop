@@ -57,8 +57,15 @@ OPTIONS (recv)
     -o, --out <DIR>      Where to write [default: current directory]
         --no-extract     Write the archive as a file instead of unpacking it
     -f, --force          Overwrite an existing file
+    -y, --yes            Accept without being shown the transfer and asked.
+                         Without a terminal to ask on, recv refuses to start
+                         unless this is given.
 
 NOTES
+    The receiver sees the name, type, size and destination of a transfer and
+    accepts or declines before anything is written. A question nobody answers
+    is declined after two minutes.
+
     Both peers must be online at the same time: Drop never stores the file.
     A code is single use and expires after five idle minutes.
 
@@ -163,6 +170,11 @@ fn run(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + 
                         .unwrap_or_else(|| PathBuf::from(".")),
                     extract: !options.no_extract,
                     force: options.force,
+                    acceptance: if options.yes {
+                        drop_cli::consent::Acceptance::Yes
+                    } else {
+                        drop_cli::consent::Acceptance::Ask
+                    },
                 },
             ))
         }
@@ -220,6 +232,8 @@ fn interactive(
                 out_dir: plan.out_dir,
                 extract: true,
                 force: plan.force,
+                // The person who just used the interface is at the terminal.
+                acceptance: drop_cli::consent::Acceptance::Ask,
             },
         )),
     }
@@ -242,6 +256,7 @@ struct Options {
     no_extract: bool,
     force: bool,
     status: bool,
+    yes: bool,
     /// Whether any flag at all was given. Flags are the program-facing
     /// surface, so using one is how an invocation says which audience it is.
     /// See [`drop_cli::ui::Invocation`].
@@ -338,6 +353,7 @@ fn parse(arguments: &[String]) -> Result<Options, Box<dyn std::error::Error + Se
             "-c" | "--compress" => options.compress = true,
             "--no-extract" => options.no_extract = true,
             "-f" | "--force" => options.force = true,
+            "-y" | "--yes" => options.yes = true,
             "--status" => options.status = true,
             "-h" | "--help" => {
                 print!("{USAGE}");

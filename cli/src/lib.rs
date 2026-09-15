@@ -4,6 +4,7 @@
 //! safety rules, and transport can be exercised directly by tests.
 
 pub mod client;
+pub mod consent;
 pub mod direct;
 pub mod names;
 // Re-exported rather than defined here: the envelope is a separate crate with

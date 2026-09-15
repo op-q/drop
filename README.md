@@ -53,9 +53,22 @@ Waiting for the receiver to connect...
 ```bash
 $ drop recv 7F2A91-crossover-clockwork-ridge
 Path    peer-to-peer (no Drop server)
+
+Incoming transfer
+  Folder   project   128 files, 1.1 GiB unpacked
+  Size     412.7 MiB to download
+  Into     .
+Accept? [y/N] y
 Receiving  100.0%  412.7 MiB / 412.7 MiB  86.4 MiB/s  ETA --
 Extracted 128 files into .
 ```
+
+The receiver is shown what is coming, with its name, type, size and where it
+will be saved, and nothing is written until they accept. The sender sees each
+step: the receiver entering the code, deciding, accepting, finishing. A
+question nobody answers is declined after two minutes. In a script, where
+there is nobody to ask, pass `--yes`; without a terminal `drop recv` refuses to
+start rather than accept silently.
 
 That's the default, `auto`: direct, falling back to a relay only if you have
 configured one with `--server` or `DROP_SERVER`. Every transfer is encrypted

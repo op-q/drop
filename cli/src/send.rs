@@ -26,6 +26,15 @@ const WINDOW_BYTES: u64 = 16 * 1024 * 1024;
 /// that has stopped talking, not a slow one.
 const META_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long the sender waits for the receiver to accept.
+///
+/// The receiver's own question closes after
+/// [`crate::consent::ACCEPT_DEADLINE`] and answers `decline` then, so this only
+/// bounds a receiver that has stopped talking altogether. Longer than that
+/// deadline, so a slow link cannot make the sender give up on a receiver that
+/// is still deciding.
+pub const CONSENT_TIMEOUT: Duration = Duration::from_secs(150);
+
 /// How one attempt at a transfer ended.
 ///
 /// Two outcomes rather than a success and an error, because a peer that could
@@ -47,7 +56,9 @@ pub enum Attempt {
         /// counts them the same: from this side the honest mistyper and the
         /// silent attacker are indistinguishable, and should be.
         what_happened: &'static str,
-        payload: Payload,
+        /// Boxed because a payload is large, and an `Attempt` is returned
+        /// through every layer of the send path.
+        payload: Box<Payload>,
     },
 }
 
@@ -340,6 +351,8 @@ pub(crate) async fn send_transfer<T: Transport>(
             filename: payload.filename.clone(),
             mime_type: payload.mime_type.clone(),
             plaintext_size: payload.size,
+            entry_count: payload.entry_count,
+            unpacked_size: payload.unpacked_size,
         },
     )?;
 
@@ -359,9 +372,17 @@ pub(crate) async fn send_transfer<T: Transport>(
 
         return Ok(Attempt::FailedTheCode {
             what_happened,
-            payload,
+            payload: Box::new(payload),
         });
     }
+
+    // Nor until the receiver has seen what this is and agreed to it.
+    eprintln!("The receiver entered the code and is deciding whether to accept...");
+    if let Err(ended) = await_consent(transport).await {
+        transport.close().await;
+        return Err(ended);
+    }
+    eprintln!("Accepted.");
 
     let total = payload.size;
     let result = stream_payload(transport, payload, &mut sealer, sealed_size).await;
@@ -369,7 +390,9 @@ pub(crate) async fn send_transfer<T: Transport>(
     if let Err(error) = result {
         // Tell the peer this transfer is over so the receiver is not left
         // waiting on a session that will never finish.
-        let _ = transport.send_control(json!({ "type": "cancel" })).await;
+        let _ = transport
+            .send_control(json!({ "type": "cancel", "reason": "read_failed" }))
+            .await;
         transport.close().await;
         return Err(error);
     }
@@ -507,7 +530,7 @@ where
             } => {
                 // Handed back rather than re-read: nothing was streamed, so a
                 // retry costs a connection and not the file.
-                payload = returned;
+                payload = *returned;
 
                 if !approver.allow(attempt, what_happened).await {
                     return Err(format!(
@@ -613,6 +636,58 @@ async fn await_meta_checkpoint<T: Transport>(
     };
 
     outcome
+}
+
+/// Waits for the receiver to accept the transfer it has been shown.
+///
+/// Anything other than `accept` ends the transfer, and says how in the
+/// receiver's terms: declined, did not answer in time, or cancelled. The
+/// relay's narration is read past; a peer never sends it.
+async fn await_consent<T: Transport>(
+    transport: &mut T,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let answer = tokio::time::timeout(CONSENT_TIMEOUT, async {
+        loop {
+            let Some(frame) = transport.receive().await? else {
+                return Err::<(), Box<dyn Error + Send + Sync>>(
+                    "the receiver went away without answering".into(),
+                );
+            };
+
+            let Frame::Control(payload) = frame else {
+                return Err("the receiver sent data instead of answering".into());
+            };
+
+            match payload["type"].as_str() {
+                Some("accept") => return Ok(()),
+                Some("decline") => {
+                    return Err(match payload["reason"].as_str() {
+                        Some("timed_out") => {
+                            "the receiver did not answer within two minutes, so the transfer \
+                             was declined"
+                        }
+                        _ => "the receiver declined the transfer",
+                    }
+                    .into());
+                }
+                Some("cancel") => {
+                    return Err(crate::consent::peer_cancelled(
+                        "receiver",
+                        payload["reason"].as_str(),
+                    )
+                    .into());
+                }
+                Some("error") => return Err(relay_error(&payload).into()),
+                _ => {}
+            }
+        }
+    })
+    .await;
+
+    match answer {
+        Ok(result) => result,
+        Err(_) => Err("the receiver stopped responding before accepting".into()),
+    }
 }
 
 /// Runs the key exchange and returns the derived session keys.
@@ -728,6 +803,11 @@ async fn next_acknowledgement<T: Transport>(
                     return Ok(bytes.max(current));
                 }
             }
+            Some("cancel") => {
+                return Err(
+                    crate::consent::peer_cancelled("receiver", payload["reason"].as_str()).into(),
+                );
+            }
             Some("error") => return Err(relay_error(&payload).into()),
             _ => {}
         }
@@ -776,6 +856,14 @@ async fn await_completion<T: Transport>(
                 }
                 _ => {}
             },
+            Some("finishing") => {
+                eprintln!("The receiver has everything and is finishing up...");
+            }
+            Some("cancel") => {
+                return Err(
+                    crate::consent::peer_cancelled("receiver", payload["reason"].as_str()).into(),
+                );
+            }
             Some("error") => return Err(relay_error(&payload).into()),
             _ => {}
         }
@@ -981,11 +1069,10 @@ mod tests {
                     json!({ "type": "key_exchange", "message": crypto::to_hex(&half) }),
                 )]
             }
-            Frame::Control(sent) if sent["type"] == "meta" => {
-                vec![Frame::Control(meta_ok_from(
-                    keys.as_ref().expect("keys first"),
-                ))]
-            }
+            Frame::Control(sent) if sent["type"] == "meta" => vec![
+                Frame::Control(meta_ok_from(keys.as_ref().expect("keys first"))),
+                Frame::Control(json!({ "type": "accept" })),
+            ],
             Frame::Chunk(chunk) => {
                 received += chunk.len() as u64;
                 if received == sealed_size {

@@ -138,9 +138,69 @@ fn elide_middle(text: &str, columns: usize) -> String {
     format!("{head}\u{2026}{}", tail.into_iter().collect::<String>())
 }
 
+/// The extension of a name, as this receiver will store it: after the last
+/// dot, lowercased, and only if there is something before the dot.
+fn extension(name: &str) -> Option<String> {
+    let last = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let (stem, extension) = last.rsplit_once('.')?;
+
+    if stem.is_empty() || extension.is_empty() {
+        return None;
+    }
+
+    Some(extension.trim().to_ascii_lowercase())
+}
+
+/// Extensions a system will run rather than open, on at least one of the three
+/// platforms Drop runs on.
+const PROGRAM_EXTENSIONS: &[&str] = &[
+    "exe", "msi", "bat", "cmd", "com", "scr", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh",
+    "hta", "cpl", "msc", "lnk", "jar", "app", "dmg", "pkg", "command", "sh", "run", "appimage",
+    "desktop", "deb", "rpm",
+];
+
+/// Whether a name says it is a program, going by what the receiving system
+/// will look at: its real, final extension.
+///
+/// This is why it takes the name and not the sender's MIME type. The sender
+/// chooses both, but the extension of the file that lands is what decides
+/// what happens when it is opened.
+pub fn is_program(name: &str) -> bool {
+    extension(name).is_some_and(|extension| PROGRAM_EXTENSIONS.contains(&extension.as_str()))
+}
+
+/// A short description of a file's type, from its final extension.
+///
+/// Never from the sender's MIME type: see [`is_program`]. The extension shown
+/// is sanitised like every other peer-chosen string.
+pub fn type_label(name: &str) -> String {
+    let Some(extension) = extension(name) else {
+        return "File (no extension)".to_string();
+    };
+
+    let kind = match extension.as_str() {
+        _ if is_program(name) => "Program",
+        "pdf" => "PDF document",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "heic" | "bmp" | "tif" | "tiff" | "svg" => {
+            "Image"
+        }
+        "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v" => "Video",
+        "mp3" | "wav" | "flac" | "m4a" | "ogg" | "opus" | "aac" => "Audio",
+        "zip" | "tar" | "gz" | "tgz" | "7z" | "rar" | "xz" | "bz2" | "zst" => "Archive",
+        "txt" | "md" | "log" | "csv" | "json" | "yaml" | "yml" | "toml" | "xml" => "Text",
+        "doc" | "docx" | "odt" | "rtf" | "pages" => "Document",
+        "xls" | "xlsx" | "ods" | "numbers" => "Spreadsheet",
+        "ppt" | "pptx" | "odp" | "key" => "Presentation",
+        "html" | "htm" => "Web page",
+        _ => "File",
+    };
+
+    format!("{kind} (.{})", for_terminal(&extension))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{NAME_COLUMNS, for_terminal, name, peer_message};
+    use super::{NAME_COLUMNS, for_terminal, is_program, name, peer_message, type_label};
     use unicode_width::UnicodeWidthStr;
 
     #[test]
@@ -258,5 +318,38 @@ mod tests {
 
         assert!(!shown.contains('\x1b'));
         assert!(shown.width() <= 200);
+    }
+
+    #[test]
+    fn a_type_comes_from_the_real_extension() {
+        assert_eq!(type_label("report.pdf"), "PDF document (.pdf)");
+        assert_eq!(type_label("Holiday.JPG"), "Image (.jpg)");
+        assert_eq!(type_label("notes"), "File (no extension)");
+        assert_eq!(type_label(".bashrc"), "File (no extension)");
+        assert_eq!(type_label("archive.tar.gz"), "Archive (.gz)");
+    }
+
+    #[test]
+    fn padding_cannot_hide_a_programs_extension() {
+        let disguised = "invoice.pdf                                        .exe";
+        assert!(is_program(disguised));
+        assert_eq!(type_label(disguised), "Program (.exe)");
+    }
+
+    #[test]
+    fn programs_on_every_platform_are_recognised() {
+        for name in [
+            "setup.exe",
+            "run.BAT",
+            "tool.ps1",
+            "App.app",
+            "installer.dmg",
+            "go.sh",
+        ] {
+            assert!(is_program(name), "{name}");
+        }
+        for name in ["report.pdf", "photo.jpg", "exe", "notes.txt"] {
+            assert!(!is_program(name), "{name}");
+        }
     }
 }

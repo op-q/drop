@@ -199,6 +199,33 @@ display changes: a received file keeps the name its bytes arrived with, subject
 to the path rules above. Until 2026-09-14 the receiver printed the sender's
 filename verbatim in its `Receiving` line.
 
+## Consent before bytes
+
+A receiver used to learn what it was getting only as it arrived. Since protocol
+version 2 it is shown the transfer first, and nothing is created until it
+accepts:
+
+- **The preview is built to be hard to lie with.** The name is sanitised (see
+  above). The type label comes from the extension the file will actually have,
+  not from the MIME type the sender chose, so `invoice.pdf` followed by padding
+  and `.exe` shows as a program. A program extension on any of the three
+  platforms adds a warning line. A folder's file count and unpacked size are the
+  sender's claims and are labelled as such. The extractor's expansion limit,
+  not the claim, bounds what is written.
+- **Declining changes nothing on disk.** The destination is planned by looking,
+  not creating, so no empty file and no reserved numbered name is left behind.
+  A test compares the directory before and after.
+- **The relay cannot accept on the receiver's behalf**, because `accept` is a
+  receiver frame. It can refuse to forward one, which is denial of service, the
+  same power it always had. It can also refuse to carry chunks before `accept`,
+  and does.
+- **Unattended use must be explicit.** Without a terminal, `drop recv` refuses to
+  start unless given `--yes`. Scripts that piped `drop recv` before 0.4.0 need
+  that flag, and the refusal names it.
+- **Reasons are enumerated.** `decline` and `cancel` carry a word from a fixed
+  set. The relay normalises them and each client maps them to its own sentence,
+  so neither the relay nor a peer can put text on the other terminal that way.
+
 ## Resource bounds
 
 Every bound exists to stop one peer consuming the relay:

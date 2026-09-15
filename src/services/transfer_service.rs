@@ -59,6 +59,18 @@ impl TransferService {
         }
     }
 
+    /// Ends a session a peer chose to end. Neither a completion nor a
+    /// failure, and counted as neither.
+    pub async fn end_session(state: &AppState, code: &str, ending: Ending) {
+        if SessionService::remove_session(state, code).await.is_some() {
+            match ending {
+                Ending::Declined => state.metrics.record_transfer_declined(),
+                Ending::Cancelled => state.metrics.record_transfer_cancelled(),
+            }
+            info!(session_code = %code, ?ending, "transfer session ended by a peer");
+        }
+    }
+
     pub async fn complete_session(state: &AppState, code: &str, bytes_transferred: u64) {
         if SessionService::remove_session(state, code).await.is_some() {
             state.metrics.record_transfer_completed();
@@ -80,4 +92,11 @@ impl TransferService {
     pub fn record_bytes_relayed(state: &AppState, bytes: u64) {
         state.metrics.record_bytes_relayed(bytes);
     }
+}
+
+/// How a peer ended a session on purpose.
+#[derive(Debug, Clone, Copy)]
+pub enum Ending {
+    Declined,
+    Cancelled,
 }

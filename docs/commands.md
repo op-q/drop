@@ -105,10 +105,18 @@ $ drop recv A1B2C3-zone-zoo-zebra --server http://127.0.0.1:8080
 error: could not decrypt the transfer details — check the code and try again
 ```
 
-The sender's session is consumed by that attempt and it exits `receiver
-disconnected`. That is the relay refusing a second claim, and it is the
-one-guess enforcement [`decisions.md`](decisions.md) entry 13 has to reproduce
-on the direct path, where there is no relay to do it.
+The sender's session is consumed by that attempt, and it exits saying the
+receiver could not open the transfer. Over the relay that is the relay refusing
+a second claim; on the direct path the sender counts the attempt itself and
+asks before allowing another ([`decisions.md`](decisions.md) entries 13 and 18).
+
+A receiver is shown the transfer and asked before anything is written. In a
+script, pass `--yes`: without a terminal, `drop recv` refuses to start.
+
+```text
+$ drop recv A1B2C3-zone-zoo-zebra --server http://127.0.0.1:8080 < /dev/null
+error: there is no terminal to ask whether to accept this transfer. Pass --yes to accept whatever the sender sends without asking
+```
 
 Use synthetic files. Never point a test at the public instance.
 

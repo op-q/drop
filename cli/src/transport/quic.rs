@@ -519,7 +519,9 @@ mod tests {
                         out_dir: destination,
                         extract: true,
                         force: true,
+                        acceptance: crate::consent::Acceptance::Yes,
                     },
+                    &mut crate::consent::Acceptance::Yes,
                 )
                 .await
                 .map_err(|error| error.to_string())
