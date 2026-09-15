@@ -101,8 +101,8 @@ impl TarPlan {
             .count()
     }
 
-    /// Entries that could not be represented in a ustar archive, such as
-    /// sockets, FIFOs, and device nodes.
+    /// Entries left out of the archive, each with why: sockets, FIFOs and
+    /// device nodes, and on Windows links to absolute paths.
     pub fn skipped(&self) -> &[String] {
         &self.skipped
     }
@@ -147,6 +147,15 @@ fn collect(
 
     if file_type.is_symlink() {
         let target = fs::read_link(path)?;
+        let Some(link_target) = portable_link_target(&target.to_string_lossy(), cfg!(windows))
+        else {
+            skipped.push(format!(
+                "{archive_path}: its link points to an absolute Windows path, \
+                 which would not resolve on any other machine"
+            ));
+            return Ok(());
+        };
+
         entries.push(TarEntry {
             archive_path: archive_path.to_string(),
             source: path.to_path_buf(),
@@ -154,7 +163,7 @@ fn collect(
             size: 0,
             mode: 0o777,
             mtime: modified_seconds(&metadata),
-            link_target: target.to_string_lossy().into_owned(),
+            link_target,
         });
         return Ok(());
     }
@@ -197,8 +206,32 @@ fn collect(
         return Ok(());
     }
 
-    skipped.push(archive_path.to_string());
+    skipped.push(format!("{archive_path}: unsupported file type"));
     Ok(())
+}
+
+/// A symlink target as an archive should record it.
+///
+/// Tar stores targets with `/`, and every receiver reads them that way. A
+/// Windows sender's `read_link` gives `..\shared\config`, which a Linux
+/// receiver would take as one name containing backslashes and create a link
+/// that never resolves. So on Windows relative targets are rewritten with `/`,
+/// and absolute ones (`C:\...`, `\\server\...`, `\...`) are left out: they
+/// would dangle anywhere else, and a receiver refuses them anyway.
+///
+/// Elsewhere a target is recorded as it is. A backslash is an ordinary
+/// character in a Unix file name.
+pub fn portable_link_target(target: &str, windows: bool) -> Option<String> {
+    if !windows {
+        return Some(target.to_string());
+    }
+
+    let has_drive = target.as_bytes().get(1) == Some(&b':');
+    if has_drive || target.starts_with(['\\', '/']) {
+        return None;
+    }
+
+    Some(target.replace('\\', "/"))
 }
 
 #[cfg(unix)]

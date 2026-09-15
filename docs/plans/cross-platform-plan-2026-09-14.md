@@ -1,8 +1,8 @@
 # Cross-platform plan: Windows, macOS and Linux, and transfers between them
 
-Status: **active** — phases 0 and 1 done 2026-09-14
+Status: **active** — phases 0–2 done (2 on 2026-09-15)
 Created: **2026-09-14**
-Last updated: **2026-09-14**
+Last updated: **2026-09-15**
 
 ## Goal
 
@@ -292,17 +292,36 @@ warnings and every representable file intact.
 
 ### Phase 2 — a Windows sender produces a portable archive, and cleans up
 
-- [ ] Finding 3: on Windows, write relative link targets with `/`, and skip
+- [x] Finding 3: on Windows, write relative link targets with `/`, and skip
       absolute targets with a warning. Tested by a pure function on every
       platform.
-- [ ] Finding 5: `wait_for_termination` also resolves on `ctrl_close`,
+- [x] Finding 5: `wait_for_termination` also resolves on `ctrl_close`,
       `ctrl_logoff` and `ctrl_shutdown` on Windows. Test: the existing spool
       cleanup test already runs on every platform after phase 0. Add a Windows
       test that the spool file can be deleted while the payload still holds it
       open. `std` opens files with `FILE_SHARE_DELETE`, but that is exactly the
       kind of thing to pin rather than trust.
-- [ ] Finding 4: turn VT processing on once at startup on Windows. If the
+- [x] Finding 4: turn VT processing on once at startup on Windows. If the
       console refuses, fall back to `\r` and padding without escapes.
+
+Done 2026-09-15 on `feat/windows-sender`. Notes:
+
+- `tar::portable_link_target` is pure and tested on every platform. A link left
+  out is reported with its reason, which needed `TarPlan::skipped` to carry
+  reasons: it used to hold bare paths that the payload labelled "unsupported
+  file type".
+- `wait_for_termination` also resolves on Ctrl-Break, the console's other
+  interrupt. It now feeds the two-stage cancel from the consent plan's phase 4,
+  so closing the window cancels, tells the peer if it can, and cleans up within
+  the few seconds Windows allows.
+- VT processing is turned on through `crossterm::ansi_support::supports_ansi`.
+  Where that fails, the progress line is redrawn with `\r` and space padding
+  instead of escapes. The padding is a pure function with its own tests.
+- The open-spool test streams an incompressible 12-chunk payload, so the reader
+  is still holding the file open when it is deleted.
+- **None of the `cfg(windows)` code compiles on this machine**, which has no
+  Windows target. The Windows CI runner is the first compiler to see it, and the
+  manual checklist in phase 5 is the first to see it run in a real console.
 
 ### Phase 3 — build, package and install for Windows
 

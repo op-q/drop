@@ -912,3 +912,33 @@ fn hostile_windows_names_cannot_reach_a_stream_a_device_or_an_existing_file() {
 
     fs::remove_dir_all(&base).ok();
 }
+
+/// A Windows sender's link targets use backslashes, and every receiver reads
+/// tar targets with slashes. Relative ones are rewritten; absolute ones would
+/// dangle anywhere else and are left out.
+#[test]
+fn a_windows_link_target_is_recorded_portably() {
+    use drop_cli::tar::portable_link_target;
+
+    assert_eq!(
+        portable_link_target("..\\shared\\config", true).as_deref(),
+        Some("../shared/config")
+    );
+    assert_eq!(
+        portable_link_target("sibling", true).as_deref(),
+        Some("sibling")
+    );
+
+    for absolute in [
+        "C:\\Users\\me\\file",
+        "c:relative-to-drive",
+        "\\\\server\\share",
+        "\\rooted",
+        "/rooted",
+    ] {
+        assert_eq!(portable_link_target(absolute, true), None, "{absolute}");
+    }
+
+    // Anywhere else a backslash is part of a name, and is kept.
+    assert_eq!(portable_link_target("a\\b", false).as_deref(), Some("a\\b"));
+}

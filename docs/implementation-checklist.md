@@ -477,7 +477,7 @@ transfer is never the direct path and must never be described as one.
 ## 10. Windows, macOS and Linux
 
 Plan: [`cross-platform-plan-2026-09-14.md`](plans/cross-platform-plan-2026-09-14.md)
-Status: **active** — phases 0 and 1 done
+Status: **active** — phases 0–2 done
 
 Install and run on all three, and a file or folder sent between any two of them
 arrives intact or says exactly what could not be reproduced. **Today: Linux
@@ -497,7 +497,7 @@ compiled.
       symlink in it); names Windows reads differently (`a:b` is an NTFS stream,
       `CON` a device, `report.` loses its dot) are rewritten with a warning;
       an uncreatable entry on any platform warns and continues.
-- [ ] Phase 2 — a Windows sender: portable symlink targets, spool cleanup when
+- [x] Phase 2 — done 2026-09-15. A Windows sender: portable symlink targets, spool cleanup when
       the console is closed, VT processing for the progress line.
 - [ ] Phase 3 — `x86_64`/`aarch64-pc-windows-msvc` release zips with a static
       CRT, `install.ps1`, README install lines.
