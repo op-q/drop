@@ -751,6 +751,37 @@ use and reports what that said, naming the refusing knob as a hint. Predicting
 a capability you are about to depend on irrecoverably is the bug; the fix is to
 try it while there is still a process left to report.
 
+#### `authentication failed`, explained and fixed, 2026-09-15
+
+The intermittent failure first seen in the full-cone row, and later in plain LAN,
+was **not in iroh's traversal and not in TLS verification.** A traced run
+(`iroh=debug`, from a temporary subscriber that was not committed) shows the
+failing sender's last moments:
+
+```text
+iroh::_events::conn::incoming: remote_addr=Ip(10.40.0.2:7842)
+noq_proto::endpoint: failed to authenticate initial packet
+error: a peer failed to complete the handshake: ... authentication failed
+```
+
+`10.40.0.2:7842` is the rendezvous host's QUIC address-discovery port. A late
+packet from the address-discovery exchange reached the sender's socket and was
+taken for an incoming connection. It failed its handshake, and
+`QuicEndpoint::accept_transfer` returned that failure, **ending the whole send**
+before the real receiver dialled. The receiver then timed out reaching a sender
+that had already gone.
+
+Fixed on `fix/accept-survives-stray-handshakes`: a connection attempt that fails
+its handshake is dropped and the wait goes on. It is neither the receiver, which
+completes the handshake, nor a guess, which needs a completed handshake first.
+Measured on this machine, plain LAN on `main` passed **1 run in 5** before the fix
+and **8 in 8** after. A unit test sends a junk QUIC Initial to a waiting sender
+and then connects a real receiver; with the old behaviour restored it fails 3
+times in 3.
+
+The same failure is reachable in production. Anyone who can send one UDP packet
+to a sender waiting on a public address could end its transfer.
+
 ### Phase 5 — Reporting and CI
 
 - [ ] `netlab/report.py` — writes `docs/validation/network-lab-<NNN>-YYYY-MM-DD.md`
