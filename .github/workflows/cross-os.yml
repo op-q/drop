@@ -1,0 +1,92 @@
+name: Cross-OS archives
+
+# A folder archived on each operating system, received on every operating
+# system, through the real receive path. The wire is platform-neutral, so the
+# part of a cross-OS transfer that can differ is how a sender reads a tree and
+# how a receiver writes one; this is that part, nine pairings.
+#
+# Two runners cannot swap a transfer code, so the transfer is split: `produce`
+# archives on each OS, `consume` receives every archive on each OS over an
+# in-process relay. The logic lives in cli/tests/cross_os.rs.
+#
+# Not on every pull request: only those touching the code that reads or writes
+# trees, plus nightly, plus by hand. See
+# docs/plans/cross-platform-plan-2026-09-14.md, phase 4.
+
+on:
+  pull_request:
+    paths:
+      - cli/src/tar.rs
+      - cli/src/untar.rs
+      - cli/src/payload.rs
+      - cli/src/recv.rs
+      - cli/src/names.rs
+      - cli/tests/cross_os.rs
+      - .github/workflows/cross-os.yml
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cross-os-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  produce:
+    name: Archive on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2025]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build the fixture archive
+        shell: bash
+        env:
+          DROP_FIXTURE_OUT: ${{ runner.temp }}/fixtures
+        run: cargo test --locked -p drop-cli --test cross_os -- --ignored produce
+      - name: Upload the archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: fixtures-${{ matrix.os }}
+          path: ${{ runner.temp }}/fixtures
+          if-no-files-found: error
+          retention-days: 3
+
+  consume:
+    name: Receive on ${{ matrix.os }}
+    needs: produce
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2025]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Download every OS's archive
+        uses: actions/download-artifact@v8
+        with:
+          pattern: fixtures-*
+          path: ${{ runner.temp }}/fixtures
+          merge-multiple: true
+      - name: Receive and check them all
+        shell: bash
+        env:
+          DROP_FIXTURE_IN: ${{ runner.temp }}/fixtures
+        run: cargo test --locked -p drop-cli --test cross_os -- --ignored consume --nocapture

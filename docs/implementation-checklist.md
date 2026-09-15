@@ -501,7 +501,7 @@ compiled.
       the console is closed, VT processing for the progress line.
 - [x] Phase 3 — done 2026-09-15, short of a tagged release. `x86_64`/`aarch64-pc-windows-msvc` release zips with a static
       CRT, `install.ps1`, README install lines.
-- [ ] Phase 4 — archives produced on each OS and extracted on the others in CI,
+- [x] Phase 4 — written 2026-09-15; first run on its pull request. Archives produced on each OS and extracted on the others in CI,
       nine pairings.
 - [ ] Phase 5 — manual Windows ↔ Linux checklist on the user's machine, both
       carriers, the interface, Ctrl-C, closing the window, the firewall dialog.
