@@ -198,3 +198,15 @@ order that serves them, by dependency:
 7. **Tag 0.4.0.**
 8. Then the NAT proof, once self-hosted rendezvous phase 3 is decided, and
    cross-platform phases 4–5.
+
+**Progress, 2026-09-15.** Steps 1–5 and the cross-platform phases 1–4 are written,
+as a stack of pull requests waiting for review: #65 (these plans), #66 (move the
+installer), #67 (CI on three OSes), #68 (display sanitisation), #69 (browser
+removal), #70 (Windows receiver), #71 (`meta_ok` confirmation), #72 (consent),
+#73 (cancel and status), #74 (Windows sender), #75 (Windows release and
+installers), #76 (cross-OS archives in CI). Separately, #77 fixes a shipped bug
+found by the lab: a stray QUIC handshake ended a direct-path send, which was
+the long-unexplained `authentication failed`. Not started: consent phase 5 (the
+interface screens) and cross-platform phase 5 (the manual Windows checklist).
+Tagging 0.4.0 waits on the merges. The NAT proof still waits on the decision in
+the self-hosted rendezvous plan's phase 3.
