@@ -800,6 +800,15 @@ async fn stream_payload<T: Transport>(
             break;
         };
 
+        // Hear the peer between chunks, not only when the window is full. A
+        // receiver that cancels is followed by the relay closing the socket,
+        // and a sender that only writes never answers that close, so it ends
+        // in a reset. Windows discards unread data on a reset, the `cancel`
+        // with it, and the sender reported "connection aborted" instead of the
+        // receiver's reason. Looking first finds the `cancel` while it is still
+        // there.
+        acknowledged = hear_peer_while_streaming(transport, acknowledged).await?;
+
         let sealed = sealer.seal_chunk(&chunk?)?;
         sent += sealed.len() as u64;
         if let Err(error) = transport.send_chunk(sealed).await {
@@ -828,6 +837,48 @@ async fn stream_payload<T: Transport>(
         .await?;
 
     Ok(())
+}
+
+/// Reads whatever the peer has already said, without waiting for more.
+///
+/// Acknowledgements move the window forward. A `cancel` or an `error` ends the
+/// transfer with the peer's reason. Nothing arrived is the usual answer, and
+/// costs one poll. Safe to abandon because a receive must be cancel-safe.
+async fn hear_peer_while_streaming<T: Transport>(
+    transport: &mut T,
+    mut acknowledged: u64,
+) -> Result<u64, Box<dyn Error + Send + Sync>> {
+    loop {
+        // A zero timeout polls the receive once and gives up if nothing is
+        // ready.
+        let Ok(frame) = tokio::time::timeout(Duration::ZERO, transport.receive()).await else {
+            return Ok(acknowledged);
+        };
+
+        let Some(Frame::Control(payload)) = frame? else {
+            // `None` is the connection closing; the next write reports it with
+            // `explain_write_failure`, which has the better sentence.
+            return Ok(acknowledged);
+        };
+
+        match payload["type"].as_str() {
+            Some("ack") | Some("chunk_ack") => {
+                if let Some(bytes) = payload["bytes_received"].as_u64() {
+                    acknowledged = acknowledged.max(bytes);
+                }
+            }
+            Some("cancel") => {
+                direct::state("cancelled");
+                return Err(Ended::PeerCancelled(crate::consent::peer_cancelled(
+                    "receiver",
+                    payload["reason"].as_str(),
+                ))
+                .into());
+            }
+            Some("error") => return Err(relay_error(&payload).into()),
+            _ => {}
+        }
+    }
 }
 
 /// Turns a failed write into the reason the peer gave, if it gave one.
