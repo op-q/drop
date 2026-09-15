@@ -70,6 +70,10 @@ question nobody answers is declined after two minutes. In a script, where
 there is nobody to ask, pass `--yes`; without a terminal `drop recv` refuses to
 start rather than accept silently.
 
+Ctrl-C on either side cancels the transfer and tells the other side, and a
+half-received file is not left behind. `drop --help` lists the exit statuses a
+script can act on.
+
 That's the default, `auto`: direct, falling back to a relay only if you have
 configured one with `--server` or `DROP_SERVER`. Every transfer is encrypted
 end to end either way — what the carrier changes is who moves the bytes, not

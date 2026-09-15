@@ -394,6 +394,38 @@ pub fn report(carrier: Carrier, fallback: Fallback, status: bool) {
     }
 }
 
+/// Whether `drop-status: state=` lines are printed. Set once, by `run`, from
+/// `--status` or `DROP_STATUS`.
+///
+/// Process-wide rather than threaded through every function that reaches a
+/// state, because a state is reached deep inside the transfer paths and the
+/// flag is a property of the invocation, not of any one call. In-process tests
+/// never set it.
+static STATE_LINES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns on [`state`] lines for the rest of the process.
+pub fn enable_state_lines() {
+    STATE_LINES.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reports that a transfer reached a state, for a program reading stderr.
+///
+/// The states, in the order a successful sender sees them: `connected`,
+/// `code-ok`, `accepted`, `finishing`, `done`. A receiver reports `accepted`
+/// and `done`. Either side may end at `declined` or `cancelled` instead. The
+/// prose beside these lines says the same things in words and may be reworded;
+/// these may not.
+pub fn state(name: &str) {
+    if STATE_LINES.load(std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("{}", state_line(name));
+    }
+}
+
+/// Rendered rather than printed, so it can be tested without a stream.
+pub fn state_line(name: &str) -> String {
+    format!("drop-status: state={name}")
+}
+
 /// The machine-readable half of [`report`].
 ///
 /// Deliberately one line of `key=value` rather than a `--json` mode. A JSON

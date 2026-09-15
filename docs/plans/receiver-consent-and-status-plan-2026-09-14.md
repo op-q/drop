@@ -1,6 +1,6 @@
 # Receiver consent, cancel, and live status plan
 
-Status: **active** — phases 0–3 done 2026-09-14; phase 4 next
+Status: **active** — phases 0–4 done (4 on 2026-09-15); phase 5, the interface, next
 Created: **2026-09-14**
 Last updated: **2026-09-14**
 
@@ -443,21 +443,68 @@ On `feat/receiver-consent`, stacked on `meta_ok` key confirmation.
 
 ### Phase 4 — cancel and status
 
-- [ ] The `Cancel` token through both transfer paths; every wait loop handles
+- [x] The `Cancel` token through both transfer paths; every wait loop handles
       `cancel`/`decline`.
-- [ ] Ctrl-C: first press cancels politely, second press or 2 s exits hard.
-- [ ] `SenderEvent` channel, and the command-surface lines and
-      `drop-status: state=` lines from it.
-- [ ] `finishing` from the receiver.
-- [ ] Exit codes 3 and 4.
-- [ ] Tests:
-      - receiver cancel mid-stream ends the sender with exit 4 over both carriers
-      - sender cancel mid-stream leaves no partial single file on the receiver
-      - a partial extraction is reported with its count
-      - Ctrl-C test on Unix: send SIGINT to a child `drop send` mid-transfer and
-        assert the receiver prints "The sender cancelled."
-- [ ] netlab: assert the `state=` sequence in the relayed and plain-LAN
-      topologies, so the lab checks the conversation as well as the carrier.
+- [x] Ctrl-C: first press cancels politely, second press or 2 s exits hard.
+- [~] `SenderEvent` channel, and the command-surface lines and
+      `drop-status: state=` lines from it. The lines are done; the channel is
+      not, see below.
+- [x] `finishing` from the receiver (landed with phase 3).
+- [x] Exit codes 3 and 4.
+- [~] Tests:
+      - [x] receiver cancel mid-stream ends the sender with exit 4, **over the
+        relay**; the direct path shares every line of the mechanism but has no
+        test of its own
+      - [x] sender cancel mid-stream leaves no partial single file on the receiver
+      - [ ] a partial extraction is reported with its count: implemented, not
+        tested
+      - [x] Ctrl-C test on Unix, against the real binaries, in the other
+        direction from the plan's wording: SIGINT to `drop recv`, which exits
+        130, while `drop send` exits 4 saying the receiver cancelled and prints
+        its states in order
+- [~] netlab: the `state=` sequence is asserted in the relayed topology, for
+      both peers. Not in plain LAN, which fails most runs on `main` with the
+      unexplained QUIC `authentication failed` error and would assert nothing.
+
+#### Done 2026-09-15 — what landed differently
+
+On `feat/cancel-and-status`, stacked on receiver consent.
+
+- **A transport wrapper, not a token threaded through every wait.**
+  `cancel::Cancellable<T>` wraps whatever carries the transfer. Once the cancel
+  fires, the next receive (interrupting one already waiting) or send tells the
+  peer `cancel {reason: "user"}` once, bounded by a second, closes, and fails with
+  `TransportError::Cancelled`. Every wait in both directions goes through a
+  transport, so this reached all of them without changing a transfer function's
+  signature. Sends are refused before they start, never interrupted, so no frame
+  is left half-written.
+- **No `SenderEvent` channel yet.** State lines come from `direct::state`, with
+  a process-wide switch set once by `run` from `--status`. The interface's
+  transfer screen (phase 5) is the first real consumer of a channel, and it
+  should be designed with that screen, not ahead of it.
+- **Found by the tests: a sender reported "Broken pipe" when the receiver
+  cancelled.** The relay forwards `cancel` and closes the socket. The sender is
+  usually mid-write then, so the write fails before the `cancel` is read. A
+  failed write now reads what already arrived, for half a second, and reports
+  the peer's reason if there is one (`explain_write_failure`).
+- **Found while building it: a dropped connection left a partial file.** Only
+  integrity failures removed one; any error returned through `?` left the first
+  N chunks looking like a whole file. `PartialFile` now deletes on drop unless
+  the transfer completed. A file is kept as soon as every byte has been verified
+  and flushed, even if telling the sender then fails. **Negative control:** with
+  the guard disabled, both mid-transfer cancel tests fail on the leftover file.
+- **A sender only sends `cancel {read_failed}` for its own failures.** Before,
+  any stream error sent it, including a peer's cancel coming back.
+- **A flaky test, fixed at the cause.** One run in eighteen, a 48 MiB transfer
+  finished between "first byte arrived" and the cancel landing. The cancel tests
+  now send a 1 GiB sparse file, which cannot finish in that window and costs no
+  disk. Ten consecutive runs passed afterwards.
+- Exit statuses are in `--help`: 0, 1, 3 declined or timed out, 4 cancelled by
+  the other side, 130 cancelled here. A decline or a cancel is printed as a
+  sentence, not as `error:`.
+- Tests: 248, up from 240. Cancel module unit tests (fire before wait, wait
+  interrupted and the peer told once, nothing sent after, exit codes); two
+  in-process mid-transfer cancels over a real relay; the SIGINT test.
 
 ### Phase 5 — the interface
 

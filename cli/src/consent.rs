@@ -215,7 +215,12 @@ where
                 Some(Frame::Control(payload)) => match payload["type"].as_str() {
                     Some("cancel") => {
                         eprintln!();
-                        return Err(peer_cancelled("sender", payload["reason"].as_str()).into());
+                        crate::direct::state("cancelled");
+                        return Err(crate::cancel::Ended::PeerCancelled(peer_cancelled(
+                            "sender",
+                            payload["reason"].as_str(),
+                        ))
+                        .into());
                     }
                     Some("error") => {
                         eprintln!();

@@ -53,6 +53,8 @@ pub enum TransportError {
     /// and is passed through verbatim, because it is more specific than
     /// anything this layer could say about it.
     Refused(String),
+    /// A person at this end stopped the transfer. See [`crate::cancel`].
+    Cancelled,
 }
 
 impl fmt::Display for TransportError {
@@ -62,6 +64,7 @@ impl fmt::Display for TransportError {
             | Self::Io(message)
             | Self::Malformed(message)
             | Self::Refused(message) => write!(formatter, "{message}"),
+            Self::Cancelled => formatter.write_str("cancelled"),
         }
     }
 }

@@ -5,8 +5,9 @@ use std::{error::Error, fmt, future::Future, io::IsTerminal, path::Path, time::D
 use serde_json::{Value, json};
 
 use crate::{
+    cancel::{Cancel, Cancellable, Ended},
     client, crypto, direct,
-    payload::{self, Payload},
+    payload::Payload,
     progress::Progress,
     transport::{Frame, Transport, relay},
 };
@@ -118,25 +119,27 @@ impl SendOptions {
     }
 }
 
-pub async fn run(
+pub async fn run(path: &Path, options: SendOptions) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // The first Ctrl-C tells the receiver and stops; a second, or a transfer
+    // that will not stop, exits at once. Exiting that way does not unwind, so
+    // it restores the terminal and deletes spool files itself. See
+    // `crate::cancel`.
+    let cancel = Cancel::default();
+    crate::cancel::exit_on_second_interrupt(cancel.clone());
+
+    run_cancellable(path, options, cancel).await
+}
+
+/// [`run`], stopped by `cancel` rather than by a signal handler it installs.
+/// For programs and tests that decide when to stop.
+pub async fn run_cancellable(
     path: &Path,
     mut options: SendOptions,
+    cancel: Cancel,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    // A signal terminates the process without unwinding, so the spool file's
-    // destructor never runs. Delete it here instead, or a cancelled compressed
-    // send would leave the user's bytes behind in the temporary directory.
-    tokio::spawn(async {
-        payload::wait_for_termination().await;
-
-        // The terminal first, and then the spool file. This exit does not
-        // unwind, so no destructor anywhere will give the terminal back, and a
-        // person left unable to see what they type cannot deal with whatever
-        // comes next either. Both are a handful of syscalls, so putting the
-        // one that cannot be recovered from first costs nothing.
-        crate::ui::terminal::restore();
-        payload::remove_spool_files();
-        std::process::exit(130);
-    });
+    if options.status {
+        direct::enable_state_lines();
+    }
 
     // Before the payload is read, compressed and spooled: being told the
     // relay is missing is worth nothing after a wait to compress a directory.
@@ -171,7 +174,7 @@ pub async fn run(
     // printed the path is fixed, because the two paths name their nameplates
     // differently and the code carries one of them.
     if options.path != direct::Path::Relay {
-        match try_direct(&mut options, payload, sealed_size).await {
+        match try_direct(&mut options, payload, sealed_size, &cancel).await {
             Ok(outcome) => return outcome,
             Err(failed) => {
                 direct::may_fall_back(
@@ -187,13 +190,21 @@ pub async fn run(
                     *failed.payload,
                     sealed_size,
                     direct::Fallback::Rendezvous,
+                    &cancel,
                 )
                 .await;
             }
         }
     }
 
-    send_over_relay(&mut options, payload, sealed_size, direct::Fallback::None).await
+    send_over_relay(
+        &mut options,
+        payload,
+        sealed_size,
+        direct::Fallback::None,
+        &cancel,
+    )
+    .await
 }
 
 /// A direct path that could not be set up, carrying the payload back.
@@ -214,6 +225,7 @@ async fn try_direct(
     options: &mut SendOptions,
     payload: Payload,
     sealed_size: u64,
+    cancel: &Cancel,
 ) -> Result<Result<(), Box<dyn Error + Send + Sync>>, Box<SetupFailed>> {
     eprintln!("Looking for a peer-to-peer path...");
 
@@ -241,7 +253,20 @@ async fn try_direct(
     // them to a nameplate nobody is listening on.
     let endpoint = published.endpoint;
     let result = send_policing_guesses(
-        || endpoint.accept_transfer(),
+        || {
+            let cancel = cancel.clone();
+            let accepting = endpoint.accept_transfer();
+            async move {
+                // Nobody has connected yet, so there is nobody to tell.
+                tokio::select! {
+                    biased;
+                    () = cancel.fired() => Err(crate::transport::TransportError::Cancelled),
+                    accepted = accepting => {
+                        accepted.map(|transport| Cancellable::new(transport, cancel))
+                    }
+                }
+            }
+        },
         &code,
         payload,
         sealed_size,
@@ -273,6 +298,7 @@ async fn send_over_relay(
     payload: Payload,
     sealed_size: u64,
     fallback: direct::Fallback,
+    cancel: &Cancel,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     // Session creation is a blocking HTTP call, so it runs on the blocking
     // pool rather than stalling a runtime worker.
@@ -298,7 +324,10 @@ async fn send_over_relay(
     direct::report(direct::Carrier::Relay, fallback, options.status);
     eprintln!("Waiting for the receiver to connect...");
 
-    let mut transport = relay::connect_sender(&origin, code.nameplate()).await?;
+    let mut transport = Cancellable::new(
+        relay::connect_sender(&origin, code.nameplate()).await?,
+        cancel.clone(),
+    );
 
     match send_transfer(&mut transport, &code, payload, sealed_size).await? {
         Attempt::Done => Ok(()),
@@ -340,6 +369,7 @@ pub(crate) async fn send_transfer<T: Transport>(
 ) -> Result<Attempt, Box<dyn Error + Send + Sync>> {
     transport.await_peer().await?;
     eprintln!("Receiver connected.");
+    direct::state("connected");
 
     let keys = exchange_keys(transport, code).await?;
     let mut sealer = crypto::Sealer::new(&keys, payload.size);
@@ -377,22 +407,32 @@ pub(crate) async fn send_transfer<T: Transport>(
     }
 
     // Nor until the receiver has seen what this is and agreed to it.
+    direct::state("code-ok");
     eprintln!("The receiver entered the code and is deciding whether to accept...");
     if let Err(ended) = await_consent(transport).await {
         transport.close().await;
         return Err(ended);
     }
     eprintln!("Accepted.");
+    direct::state("accepted");
 
     let total = payload.size;
     let result = stream_payload(transport, payload, &mut sealer, sealed_size).await;
 
     if let Err(error) = result {
-        // Tell the peer this transfer is over so the receiver is not left
-        // waiting on a session that will never finish.
-        let _ = transport
-            .send_control(json!({ "type": "cancel", "reason": "read_failed" }))
-            .await;
+        // A failure on this side, reading or sealing the payload, is news to
+        // the receiver, so tell it rather than leave it waiting on a session
+        // that will never finish. A failure that came from the other side, or
+        // from a person cancelling here, has already been said.
+        let already_said = error.downcast_ref::<Ended>().is_some()
+            || error
+                .downcast_ref::<crate::transport::TransportError>()
+                .is_some();
+        if !already_said {
+            let _ = transport
+                .send_control(json!({ "type": "cancel", "reason": "read_failed" }))
+                .await;
+        }
         transport.close().await;
         return Err(error);
     }
@@ -401,6 +441,7 @@ pub(crate) async fn send_transfer<T: Transport>(
     transport.close().await;
 
     eprintln!("Sent {}.", crate::progress::format_bytes(total));
+    direct::state("done");
     Ok(Attempt::Done)
 }
 
@@ -661,20 +702,22 @@ async fn await_consent<T: Transport>(
             match payload["type"].as_str() {
                 Some("accept") => return Ok(()),
                 Some("decline") => {
-                    return Err(match payload["reason"].as_str() {
+                    direct::state("declined");
+                    let why = match payload["reason"].as_str() {
                         Some("timed_out") => {
                             "the receiver did not answer within two minutes, so the transfer \
                              was declined"
                         }
                         _ => "the receiver declined the transfer",
-                    }
-                    .into());
+                    };
+                    return Err(Ended::Declined(why.to_string()).into());
                 }
                 Some("cancel") => {
-                    return Err(crate::consent::peer_cancelled(
+                    direct::state("cancelled");
+                    return Err(Ended::PeerCancelled(crate::consent::peer_cancelled(
                         "receiver",
                         payload["reason"].as_str(),
-                    )
+                    ))
                     .into());
                 }
                 Some("error") => return Err(relay_error(&payload).into()),
@@ -757,9 +800,20 @@ async fn stream_payload<T: Transport>(
             break;
         };
 
+        // Hear the peer between chunks, not only when the window is full. A
+        // receiver that cancels is followed by the relay closing the socket,
+        // and a sender that only writes never answers that close, so it ends
+        // in a reset. Windows discards unread data on a reset, the `cancel`
+        // with it, and the sender reported "connection aborted" instead of the
+        // receiver's reason. Looking first finds the `cancel` while it is still
+        // there.
+        acknowledged = hear_peer_while_streaming(transport, acknowledged).await?;
+
         let sealed = sealer.seal_chunk(&chunk?)?;
         sent += sealed.len() as u64;
-        transport.send_chunk(sealed).await?;
+        if let Err(error) = transport.send_chunk(sealed).await {
+            return Err(explain_write_failure(transport, error).await);
+        }
         progress.update(acknowledged);
     }
 
@@ -785,6 +839,95 @@ async fn stream_payload<T: Transport>(
     Ok(())
 }
 
+/// Reads whatever the peer has already said, without waiting for more.
+///
+/// Acknowledgements move the window forward. A `cancel` or an `error` ends the
+/// transfer with the peer's reason. Nothing arrived is the usual answer, and
+/// costs one poll. Safe to abandon because a receive must be cancel-safe.
+async fn hear_peer_while_streaming<T: Transport>(
+    transport: &mut T,
+    mut acknowledged: u64,
+) -> Result<u64, Box<dyn Error + Send + Sync>> {
+    loop {
+        // A zero timeout polls the receive once and gives up if nothing is
+        // ready.
+        let Ok(frame) = tokio::time::timeout(Duration::ZERO, transport.receive()).await else {
+            return Ok(acknowledged);
+        };
+
+        let Some(Frame::Control(payload)) = frame? else {
+            // `None` is the connection closing; the next write reports it with
+            // `explain_write_failure`, which has the better sentence.
+            return Ok(acknowledged);
+        };
+
+        match payload["type"].as_str() {
+            Some("ack") | Some("chunk_ack") => {
+                if let Some(bytes) = payload["bytes_received"].as_u64() {
+                    acknowledged = acknowledged.max(bytes);
+                }
+            }
+            Some("cancel") => {
+                direct::state("cancelled");
+                return Err(Ended::PeerCancelled(crate::consent::peer_cancelled(
+                    "receiver",
+                    payload["reason"].as_str(),
+                ))
+                .into());
+            }
+            Some("error") => return Err(relay_error(&payload).into()),
+            _ => {}
+        }
+    }
+}
+
+/// Turns a failed write into the reason the peer gave, if it gave one.
+///
+/// A peer that stops a transfer says so and the connection closes behind it.
+/// The sender is usually mid-write when that happens, so the write fails
+/// first, as a broken pipe or a reset, and the peer's explanation is still
+/// sitting unread. Reporting the broken pipe would describe the symptom and
+/// hide the cause. So before giving up, read what already arrived, briefly,
+/// and prefer the peer's words.
+async fn explain_write_failure<T: Transport>(
+    transport: &mut T,
+    error: crate::transport::TransportError,
+) -> Box<dyn Error + Send + Sync> {
+    if !matches!(error, crate::transport::TransportError::Io(_)) {
+        return error.into();
+    }
+
+    let explanation = tokio::time::timeout(Duration::from_millis(500), async {
+        while let Ok(Some(frame)) = transport.receive().await {
+            let Frame::Control(payload) = frame else {
+                continue;
+            };
+
+            match payload["type"].as_str() {
+                Some("cancel") => {
+                    direct::state("cancelled");
+                    return Some(
+                        Ended::PeerCancelled(crate::consent::peer_cancelled(
+                            "receiver",
+                            payload["reason"].as_str(),
+                        ))
+                        .into(),
+                    );
+                }
+                Some("error") => return Some(relay_error(&payload).into()),
+                // Acknowledgements and narration that were already on their
+                // way; the explanation, if there is one, is behind them.
+                _ => {}
+            }
+        }
+
+        None
+    })
+    .await;
+
+    explanation.ok().flatten().unwrap_or_else(|| error.into())
+}
+
 async fn next_acknowledgement<T: Transport>(
     transport: &mut T,
     current: u64,
@@ -804,9 +947,12 @@ async fn next_acknowledgement<T: Transport>(
                 }
             }
             Some("cancel") => {
-                return Err(
-                    crate::consent::peer_cancelled("receiver", payload["reason"].as_str()).into(),
-                );
+                direct::state("cancelled");
+                return Err(Ended::PeerCancelled(crate::consent::peer_cancelled(
+                    "receiver",
+                    payload["reason"].as_str(),
+                ))
+                .into());
             }
             Some("error") => return Err(relay_error(&payload).into()),
             _ => {}
@@ -858,11 +1004,15 @@ async fn await_completion<T: Transport>(
             },
             Some("finishing") => {
                 eprintln!("The receiver has everything and is finishing up...");
+                direct::state("finishing");
             }
             Some("cancel") => {
-                return Err(
-                    crate::consent::peer_cancelled("receiver", payload["reason"].as_str()).into(),
-                );
+                direct::state("cancelled");
+                return Err(Ended::PeerCancelled(crate::consent::peer_cancelled(
+                    "receiver",
+                    payload["reason"].as_str(),
+                ))
+                .into());
             }
             Some("error") => return Err(relay_error(&payload).into()),
             _ => {}

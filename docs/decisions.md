@@ -728,3 +728,32 @@ this order: the receiver's 120 seconds, the sender's 150, the relay's five-minut
 session. A test fails if they are reordered. A person cancelling mid-transfer
 from a key or Ctrl-C is not part of this entry; the frames exist, and wiring a
 person to them is the consent plan's phase 4.
+
+## 20. Cancelling is a message to the peer, and each ending has its own exit status
+
+**Decision.** The first Ctrl-C or SIGTERM cancels the transfer. The next thing
+the transfer waits on sends the peer `cancel {reason: "user"}` and stops; a
+second signal, or two seconds without stopping, exits at once as before. The
+mechanism is a wrapper around the transport (`cancel::Cancellable`), so every
+wait in both directions honours it. A receiver deletes a partially written file
+on every early exit, not only on integrity failures. The binary exits `3` when
+the receiver declined or did not answer, `4` when the other side cancelled, and
+`130` when cancelled here. Declines and cancels print as sentences, not errors.
+
+**Why.** Before, Ctrl-C exited without a word: the peer saw a dropped connection
+and the relay counted a failure. The user asked for cancel on both sides and for
+the other side to be told. A wrapper rather than a token passed into each
+function, because a transport is already the one thing every wait goes through,
+and a token threaded by hand is a token some later wait forgets. The second
+signal keeps the old guarantee that Ctrl-C always gets you out, even of a
+transfer stuck somewhere that will not notice.
+
+Distinct exit statuses, because a script deciding whether to retry needs to know
+whether the other person said no, stopped it, or whether something broke, and
+matching on English text is what `--status` was introduced to avoid.
+
+**Consequences.** A transfer in progress can take up to about a second longer to
+exit on Ctrl-C while it tells the peer. A script that treated any non-zero exit
+as a failure still does; one that checks for `1` specifically now misses
+declines and cancels, deliberately. The interface does not have a cancel key yet,
+because it closes before a transfer starts; that is the consent plan's phase 5.

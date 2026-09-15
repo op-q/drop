@@ -66,6 +66,16 @@ NOTES
     accepts or declines before anything is written. A question nobody answers
     is declined after two minutes.
 
+    Ctrl-C cancels a transfer on either side and tells the other side; press
+    it again to quit at once.
+
+EXIT STATUS
+    0    the transfer completed
+    1    it failed
+    3    the receiver declined, or did not answer in time (send)
+    4    the other side cancelled
+    130  cancelled here
+
     Both peers must be online at the same time: Drop never stores the file.
     A code is single use and expires after five idle minutes.
 
@@ -86,8 +96,19 @@ fn main() -> ExitCode {
     match run(arguments) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
-            ExitCode::FAILURE
+            let code = drop_cli::cancel::exit_code_for(error.as_ref());
+
+            // A decline, a peer cancelling and a person cancelling are
+            // endings, not errors, and are not introduced as errors. The exit
+            // code still tells a script which one it was: 3 declined, 4
+            // cancelled by the other side, 130 cancelled here.
+            match code {
+                3 | 4 => eprintln!("{error}."),
+                130 => eprintln!("Cancelled."),
+                _ => eprintln!("error: {error}"),
+            }
+
+            ExitCode::from(code)
         }
     }
 }
