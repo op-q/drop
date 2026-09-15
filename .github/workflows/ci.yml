@@ -88,6 +88,119 @@ jobs:
         if: success() || failure()
         run: cargo test --workspace --all-targets
 
+  # The installers, run for real against packages built from this commit.
+  # A release publishes install.sh and install.ps1 and nothing else tests
+  # either until somebody runs them, so this serves locally built packages
+  # the way a release lays them out and points DROP_RELEASE_BASE at them.
+  # A debug build stands in for the release binary: the installers only
+  # download, verify, unpack and place it.
+  installers:
+    name: Installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - windows-2025
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build the CLI
+        run: cargo build --locked --package drop-cli
+
+      - name: Run install.sh against a local release
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          release="$RUNNER_TEMP/release"
+          mkdir -p "$release/pkg" "$release/tampered"
+          cp target/debug/drop LICENSE README.md "$release/pkg/"
+          tar -czf "$release/drop-x86_64-unknown-linux-musl.tar.gz" -C "$release/pkg" drop LICENSE README.md
+          (cd "$release" && sha256sum drop-*.tar.gz > checksums.txt)
+          cp "$release/drop-x86_64-unknown-linux-musl.tar.gz" "$release/tampered/"
+          echo "0000000000000000000000000000000000000000000000000000000000000000  drop-x86_64-unknown-linux-musl.tar.gz" > "$release/tampered/checksums.txt"
+
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$release" >/dev/null 2>&1 &
+          server=$!
+          trap 'kill $server' EXIT
+          for attempt in $(seq 1 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:8765/checksums.txt && break
+            sleep 0.5
+          done
+
+          DROP_RELEASE_BASE=http://127.0.0.1:8765 DROP_INSTALL_DIR="$RUNNER_TEMP/bin" sh scripts/install.sh
+          "$RUNNER_TEMP/bin/drop" --version
+
+          if DROP_RELEASE_BASE=http://127.0.0.1:8765/tampered DROP_INSTALL_DIR="$RUNNER_TEMP/bin-tampered" sh scripts/install.sh; then
+            echo "::error::install.sh accepted a package whose checksum does not match"
+            exit 1
+          fi
+          test ! -e "$RUNNER_TEMP/bin-tampered/drop"
+
+      - name: Run install.ps1 against a local release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = Join-Path $env:RUNNER_TEMP 'release'
+          $pkg = Join-Path $release 'pkg'
+          $tampered = Join-Path $release 'tampered'
+          New-Item -ItemType Directory -Force -Path $pkg, $tampered | Out-Null
+          Copy-Item target/debug/drop.exe, LICENSE, README.md $pkg
+          $zip = Join-Path $release 'drop-x86_64-pc-windows-msvc.zip'
+          Compress-Archive -Force -Path (Join-Path $pkg '*') -DestinationPath $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          Set-Content -Path (Join-Path $release 'checksums.txt') -Value "$hash  drop-x86_64-pc-windows-msvc.zip"
+          Copy-Item $zip $tampered
+          Set-Content -Path (Join-Path $tampered 'checksums.txt') -Value ("0" * 64 + "  drop-x86_64-pc-windows-msvc.zip")
+
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $release -PassThru -WindowStyle Hidden
+          # Wait for the server to answer rather than for a fixed time: a cold
+          # Python start on a Windows runner once took longer than three
+          # seconds, and the installer failed to download from nothing.
+          $ready = $false
+          foreach ($attempt in 1..60) {
+            try {
+              Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8765/checksums.txt' | Out-Null
+              $ready = $true
+              break
+            } catch {
+              Start-Sleep -Milliseconds 500
+            }
+          }
+          if (-not $ready) { throw 'the local release server never answered' }
+          try {
+            $env:DROP_RELEASE_BASE = 'http://127.0.0.1:8765'
+
+            # Both PowerShells: pwsh 7, and the Windows PowerShell 5 that most
+            # machines open by default.
+            foreach ($shell in 'pwsh', 'powershell') {
+              $env:DROP_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "bin-$shell"
+              & $shell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
+              if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed under $shell" }
+              & (Join-Path $env:DROP_INSTALL_DIR 'drop.exe') --version
+              if ($LASTEXITCODE -ne 0) { throw "the drop.exe installed under $shell does not run" }
+            }
+
+            $env:DROP_RELEASE_BASE = 'http://127.0.0.1:8765/tampered'
+            $env:DROP_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'bin-tampered'
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
+            if ($LASTEXITCODE -eq 0) { throw 'install.ps1 accepted a package whose checksum does not match' }
+            if (Test-Path (Join-Path $env:DROP_INSTALL_DIR 'drop.exe')) { throw 'a tampered package was installed' }
+            Write-Host 'A tampered package was refused.'
+            # The runner ends a pwsh step with `exit $LASTEXITCODE`, and the
+            # last native command here failed on purpose.
+            $global:LASTEXITCODE = 0
+          } finally {
+            Stop-Process -Id $server.Id -ErrorAction SilentlyContinue
+          }
+
   kubernetes:
     name: Kubernetes manifests
     runs-on: ubuntu-24.04

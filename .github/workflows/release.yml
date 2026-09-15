@@ -47,7 +47,10 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: verify
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 40
+    # A target marked experimental may fail without stopping the release: the
+    # publish job's `needs` treats it as done, and its asset is simply absent.
+    continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -67,6 +70,16 @@ jobs:
             runner: macos-15-intel
           - target: aarch64-apple-darwin
             runner: macos-14
+          # Windows ships as a zip holding drop.exe. See
+          # docs/plans/cross-platform-plan-2026-09-14.md, phase 3.
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          # Experimental: ring has needed clang on Arm Windows before, and a
+          # toolchain problem on one runner must not hold back a release.
+          # Windows 11 on Arm runs the x86_64 build under emulation meanwhile.
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            experimental: true
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -88,15 +101,25 @@ jobs:
           echo "CC_$(echo ${{ matrix.target }} | tr '-' '_')=musl-gcc" >> "$GITHUB_ENV"
 
       - name: Build
+        shell: bash
+        # The C runtime linked statically on Windows, so drop.exe starts on a
+        # machine without the Visual C++ redistributable, for the same reason
+        # the Linux targets are musl. Set here rather than in a cargo config:
+        # with `--target`, RUSTFLAGS reach only the target's artifacts and not
+        # the build scripts and proc-macros compiled for the host.
+        env:
+          RUSTFLAGS: ${{ endsWith(matrix.target, 'windows-msvc') && '-C target-feature=+crt-static' || '' }}
         run: cargo build --release --locked --package drop-cli --target ${{ matrix.target }}
 
       - name: Verify the binary runs
         # A cross-built binary cannot be executed on the runner, but every
         # target here is native, so a binary that will not start is caught now
         # rather than by the first person to install it.
+        shell: bash
         run: ./target/${{ matrix.target }}/release/drop --version
 
-      - name: Package
+      - name: Package (tar.gz)
+        if: ${{ !endsWith(matrix.target, 'windows-msvc') }}
         run: |
           set -euo pipefail
           staging=$(mktemp -d)
@@ -104,11 +127,22 @@ jobs:
           cp LICENSE README.md "${staging}/"
           tar -czf "drop-${{ matrix.target }}.tar.gz" -C "${staging}" drop LICENSE README.md
 
+      - name: Package (zip)
+        if: ${{ endsWith(matrix.target, 'windows-msvc') }}
+        shell: pwsh
+        run: |
+          $staging = Join-Path $env:RUNNER_TEMP 'drop-package'
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/drop.exe", LICENSE, README.md $staging
+          Compress-Archive -Force -Path (Join-Path $staging '*') -DestinationPath "drop-${{ matrix.target }}.zip"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
           name: drop-${{ matrix.target }}
-          path: drop-${{ matrix.target }}.tar.gz
+          path: |
+            drop-${{ matrix.target }}.tar.gz
+            drop-${{ matrix.target }}.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -120,14 +154,16 @@ jobs:
     permissions:
       contents: write
     steps:
-      # Only for scripts/install.sh below; the binaries and checksums come
+      # Only for the two installers below; the binaries and checksums come
       # from the build job's artifacts, not from this checkout.
       - name: Check out source
         uses: actions/checkout@v7
         with:
           persist-credentials: false
           ref: ${{ inputs.tag || github.ref }}
-          sparse-checkout: scripts/install.sh
+          sparse-checkout: |
+            scripts/install.sh
+            scripts/install.ps1
           sparse-checkout-cone-mode: false
 
       - name: Download build artifacts
@@ -140,7 +176,7 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts
-          sha256sum drop-*.tar.gz > checksums.txt
+          sha256sum drop-*.tar.gz drop-*.zip > checksums.txt
           cat checksums.txt
 
       - name: Publish to the release
@@ -149,6 +185,8 @@ jobs:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             artifacts/drop-*.tar.gz
+            artifacts/drop-*.zip
             artifacts/checksums.txt
             scripts/install.sh
+            scripts/install.ps1
           fail_on_unmatched_files: true

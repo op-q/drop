@@ -36,6 +36,9 @@ detect_target() {
     case "${kernel}" in
         Linux) printf '%s-unknown-linux-musl' "${arch}" ;;
         Darwin) printf '%s-apple-darwin' "${arch}" ;;
+        MINGW* | MSYS* | CYGWIN*)
+            die "this is Windows. Install with PowerShell instead: irm https://github.com/${REPO}/releases/latest/download/install.ps1 | iex"
+            ;;
         *)
             die "unsupported operating system: ${kernel}. Build from source with: cargo install --git https://github.com/${REPO} drop-cli"
             ;;
