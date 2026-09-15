@@ -326,11 +326,19 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
             // Set when the sender completes normally, so teardown knows this
             // socket is owed a closing handshake rather than being abandoned.
             let mut sender_completed = false;
+            // Cleared when the peer closed the socket or it failed. While it is
+            // still set, the loop below ended for the relay's own reasons (a
+            // decline, a cancel from the receiver, a failure) and the peer may
+            // still be writing, so teardown drains before dropping the socket.
+            let mut socket_open = true;
 
             loop {
                 let result = match timeout(idle_timeout, ws_receiver.next()).await {
                     Ok(Some(result)) => result,
-                    Ok(None) => break,
+                    Ok(None) => {
+                        socket_open = false;
+                        break;
+                    }
                     Err(_) => {
                         TransferService::fail_session(
                             &state_for_recv,
@@ -766,6 +774,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                     }
 
                     Ok(Message::Close(_)) => {
+                        socket_open = false;
                         TransferService::fail_session(
                             &state_for_recv,
                             &code_for_recv,
@@ -780,6 +789,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                     Ok(_) => {}
 
                     Err(err) => {
+                        socket_open = false;
                         warn!("sender socket error for {}: {}", code_for_recv, err);
                         TransferService::fail_session(
                             &state_for_recv,
@@ -809,7 +819,15 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
             // then give the peer a brief window to answer. Both stages are
             // bounded, so a peer that goes quiet cannot hold this task and its
             // per-IP connection slot open.
-            if sender_completed {
+            //
+            // The same applies to every other ending while the socket is still
+            // open, not only a completion. A receiver that cancels or declines
+            // mid-stream leaves the sender writing chunks; the send task writes
+            // `cancel` and `Close`, and if nothing reads the sender's chunks
+            // after that, the close is a reset. Linux keeps the `cancel` readable
+            // after a reset, but Windows discards unread data, so a Windows
+            // sender saw "connection aborted" instead of the receiver's reason.
+            if sender_completed || socket_open {
                 if timeout(
                     Duration::from_secs(WS_IDLE_TIMEOUT_SECS),
                     sender_tx_for_recv.closed(),

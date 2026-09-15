@@ -17,8 +17,8 @@ use crate::{
     app_state::AppState,
     config::{
         DOWNLOAD_EVENT_CHANNEL_CAPACITY, MAX_OPAQUE_FIELD_BYTES, RECEIVER_SEND_TIMEOUT_SECS,
-        WS_HEARTBEAT_INTERVAL_SECS, WS_IDLE_TIMEOUT_SECS, WS_MAX_MESSAGE_BYTES,
-        client_ip_from_request,
+        WS_CLOSE_DRAIN_TIMEOUT_SECS, WS_HEARTBEAT_INTERVAL_SECS, WS_IDLE_TIMEOUT_SECS,
+        WS_MAX_MESSAGE_BYTES, client_ip_from_request,
     },
     domain::{
         messages::{ReceiverMessage, cancel_reason, decline_reason},
@@ -115,8 +115,13 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
     let state_for_send = state.clone();
     let code_for_send = code.clone();
 
+    // Dropped when the send task ends, so the receive task can wait for the
+    // last frame, a `Close` among them, to have been written before it drains.
+    let (send_finished, send_task_done) = tokio::sync::oneshot::channel::<()>();
+
     let send_task = tokio::spawn(
         async move {
+            let _send_finished = send_finished;
             let mut total_bytes = None;
             let mut heartbeat = interval(Duration::from_secs(WS_HEARTBEAT_INTERVAL_SECS));
             let send_timeout = Duration::from_secs(RECEIVER_SEND_TIMEOUT_SECS);
@@ -313,11 +318,17 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
     let recv_task = tokio::spawn(
         async move {
             let idle_timeout = Duration::from_secs(WS_IDLE_TIMEOUT_SECS);
+            // See the matching flag in `upload_ws`: set while the loop may end
+            // for the relay's reasons with the receiver still writing.
+            let mut socket_open = true;
 
             loop {
                 let result = match timeout(idle_timeout, ws_receiver.next()).await {
                     Ok(Some(result)) => result,
-                    Ok(None) => break,
+                    Ok(None) => {
+                        socket_open = false;
+                        break;
+                    }
                     Err(_) => {
                         TransferService::fail_session(
                             &state_for_recv,
@@ -555,6 +566,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                         }
                     }
                     Ok(Message::Close(_)) => {
+                        socket_open = false;
                         TransferService::fail_session(
                             &state_for_recv,
                             &code_for_recv,
@@ -567,6 +579,7 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                     }
                     Ok(_) => {}
                     Err(err) => {
+                        socket_open = false;
                         warn!("receiver socket error for {}: {}", code_for_recv, err);
                         TransferService::fail_session(
                             &state_for_recv,
@@ -579,6 +592,25 @@ async fn handle_socket(socket: WebSocket, code: String, state: AppState, client_
                         break;
                     }
                 }
+            }
+
+            // The upload socket's teardown, for the same reason: a sender that
+            // cancels while the receiver is still sending acknowledgements must
+            // not have the receiver's socket closed with those unread, or the
+            // close becomes a reset and a Windows receiver loses the `cancel`
+            // that preceded it. Wait for the send task to write its last frame,
+            // then read until the receiver answers the `Close`. Both bounded.
+            if socket_open {
+                let _ = timeout(Duration::from_secs(WS_IDLE_TIMEOUT_SECS), send_task_done).await;
+
+                let _ = timeout(Duration::from_secs(WS_CLOSE_DRAIN_TIMEOUT_SECS), async {
+                    while let Some(Ok(message)) = ws_receiver.next().await {
+                        if matches!(message, Message::Close(_)) {
+                            return;
+                        }
+                    }
+                })
+                .await;
             }
         }
         .instrument(span),
