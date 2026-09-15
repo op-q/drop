@@ -56,7 +56,9 @@ pub enum Attempt {
         /// counts them the same: from this side the honest mistyper and the
         /// silent attacker are indistinguishable, and should be.
         what_happened: &'static str,
-        payload: Payload,
+        /// Boxed because a payload is large, and an `Attempt` is returned
+        /// through every layer of the send path.
+        payload: Box<Payload>,
     },
 }
 
@@ -370,7 +372,7 @@ pub(crate) async fn send_transfer<T: Transport>(
 
         return Ok(Attempt::FailedTheCode {
             what_happened,
-            payload,
+            payload: Box::new(payload),
         });
     }
 
@@ -528,7 +530,7 @@ where
             } => {
                 // Handed back rather than re-read: nothing was streamed, so a
                 // retry costs a connection and not the file.
-                payload = returned;
+                payload = *returned;
 
                 if !approver.allow(attempt, what_happened).await {
                     return Err(format!(
