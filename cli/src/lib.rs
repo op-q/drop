@@ -3,6 +3,7 @@
 //! The binary is a thin shell over these modules so the archive format, path
 //! safety rules, and transport can be exercised directly by tests.
 
+pub mod cancel;
 pub mod client;
 pub mod consent;
 pub mod direct;

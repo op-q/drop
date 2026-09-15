@@ -296,6 +296,21 @@ class Half:
     def fallback(self) -> str | None:
         return self._status("fallback")
 
+    @property
+    def states(self) -> list[str]:
+        """The `drop-status: state=` lines, in the order they were printed.
+
+        What a peer went through, in the stable vocabulary: `connected`,
+        `code-ok`, `accepted`, `finishing`, `done` for a sender that got all the
+        way, and `declined` or `cancelled` for one that did not.
+        """
+        prefix = "drop-status: state="
+        return [
+            line.strip()[len(prefix):]
+            for line in self.stderr.splitlines()
+            if line.strip().startswith(prefix)
+        ]
+
     def _status(self, field: str) -> str | None:
         for line in self.stderr.splitlines():
             match = STATUS.match(line.strip())

@@ -1,8 +1,8 @@
 # Implementation checklist
 
 Status: **active**
-Current work: **cancel and live status** (item 11, phase 4). Receiver consent landed 2026-09-14 under protocol version 2 with `meta_ok` key confirmation. Browser removal (item 8) is done; CI is green on Windows and macOS, and the Windows receiver is fixed (item 10, phases 0–1). Priorities set 2026-09-14; the order is in [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law)
-Last updated: **2026-09-14**
+Current work: **the Windows sender, build and installer** (item 10, phases 2–3), then the interface screens for consent and cancel (item 11 phase 5 with item 7 phase 3). Consent, cancel and live status (item 11, phases 0–4) are done on stacked PRs awaiting review. Open and unexplained: the direct path's intermittent QUIC `authentication failed` in netlab, which fails 4 runs in 5 on `main` (item 5). Priorities set 2026-09-14; the order is in [`plans/README.md`](plans/README.md#suggested-order-dependencies-not-law)
+Last updated: **2026-09-15**
 
 The tactical view of what is being built and what state it is in. The detailed
 reasoning, risks, and validation for each item live in its plan under
@@ -514,7 +514,7 @@ manual checklist recorded.
 ## 11. Receiver consent, cancel, and live status
 
 Plan: [`receiver-consent-and-status-plan-2026-09-14.md`](plans/receiver-consent-and-status-plan-2026-09-14.md)
-Status: **active** — phases 0–3 done 2026-09-14 (decisions entry 19); phase 4, a person cancelling and the sender's state lines, next
+Status: **active** — phases 0–4 done (decisions entries 19 and 20); phase 5, the interface screens, next
 
 The receiver sees name, type, size and where it will be saved, and accepts
 before a byte is written. Either side can cancel and the other is told in words.
@@ -536,8 +536,12 @@ receive, finish.
 - [x] Phase 3 — receiver consent in the CLI: destination planned but not
       created, preview with a receiver-derived type and a program warning,
       120 s deadline, refusal without a terminal before connecting.
-- [ ] Phase 4 — cancel through both transfer paths, two-stage Ctrl-C, sender
-      state lines and `drop-status: state=`, exit codes 3 and 4.
+- [x] Phase 4 — cancel through both transfer paths, two-stage Ctrl-C, sender
+      state lines and `drop-status: state=`, exit codes 3 and 4. Done
+      2026-09-15. Also fixed: a dropped connection left a partial file behind,
+      and a sender reported a broken pipe instead of the receiver's cancel.
+      Not tested: a cancel over the direct path, and the kept-files count of a
+      cancelled extraction.
 - [ ] Phase 5 — review and transfer screens with Accept/Decline and Cancel,
       with item 7 phase 3.
 - [ ] Phase 6 — documentation; release notes lead with `--yes`.

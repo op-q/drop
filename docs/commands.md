@@ -113,6 +113,25 @@ asks before allowing another ([`decisions.md`](decisions.md) entries 13 and 18).
 A receiver is shown the transfer and asked before anything is written. In a
 script, pass `--yes`: without a terminal, `drop recv` refuses to start.
 
+For a script, the exit status says how a transfer ended: `0` completed, `1`
+failed, `3` declined or not answered (sender), `4` the other side cancelled, and
+`130` cancelled here. With `--status` or `DROP_STATUS`, each side also prints
+the states it reached, one line each, in a vocabulary that will not be
+reworded:
+
+```text
+drop-status: state=connected    # sender: the receiver joined
+drop-status: state=code-ok      # sender: the receiver proved the code
+drop-status: state=accepted     # both
+drop-status: state=finishing    # sender: the receiver has every byte
+drop-status: state=done         # both
+drop-status: state=declined     # instead of the rest
+drop-status: state=cancelled    # instead of the rest
+```
+
+Ctrl-C cancels on either side and tells the other side. A second Ctrl-C quits
+at once.
+
 ```text
 $ drop recv A1B2C3-zone-zoo-zebra --server http://127.0.0.1:8080 < /dev/null
 error: there is no terminal to ask whether to accept this transfer. Pass --yes to accept whatever the sender sends without asking

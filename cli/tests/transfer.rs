@@ -1109,6 +1109,7 @@ async fn declining_writes_nothing_and_tells_the_sender() {
             acceptance: drop_cli::consent::Acceptance::Ask,
         },
         &mut prompt,
+        drop_cli::cancel::Cancel::default(),
     )
     .await;
 
@@ -1208,5 +1209,332 @@ async fn a_receiver_with_no_terminal_and_no_yes_refuses_before_connecting() {
     assert!(
         contacted.is_err(),
         "the receiver contacted the relay before refusing"
+    );
+}
+
+/// Starts a relayed send of `size` bytes that can be cancelled, and returns
+/// the code with the sender's task.
+async fn cancellable_send(
+    origin: &str,
+    source: &Path,
+    cancel: drop_cli::cancel::Cancel,
+) -> (
+    String,
+    tokio::task::JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+) {
+    let (code_tx, code_rx) = oneshot::channel();
+    let mut code_tx = Some(code_tx);
+    let sender = tokio::spawn({
+        let origin = origin.to_string();
+        let source = source.to_path_buf();
+        async move {
+            send::run_cancellable(
+                &source,
+                SendOptions {
+                    origin: Some(origin),
+                    compress: None,
+                    path: drop_cli::direct::Path::Relay,
+                    status: false,
+                    rendezvous: drop_cli::direct::Rendezvous::default(),
+                    on_code: Box::new(move |code| {
+                        if let Some(sender) = code_tx.take() {
+                            let _ = sender.send(code.to_string());
+                        }
+                    }),
+                },
+                cancel,
+            )
+            .await
+        }
+    });
+
+    let code = tokio::time::timeout(Duration::from_secs(10), code_rx)
+        .await
+        .expect("a code in time")
+        .expect("a code at all");
+
+    (code, sender)
+}
+
+fn relayed_receive(origin: &str, destination: &Path) -> ReceiveOptions {
+    ReceiveOptions {
+        path: drop_cli::direct::Path::Relay,
+        status: false,
+        rendezvous: drop_cli::direct::Rendezvous::default(),
+        origin: Some(origin.to_string()),
+        out_dir: destination.to_path_buf(),
+        extract: true,
+        force: false,
+        acceptance: drop_cli::consent::Acceptance::Yes,
+    }
+}
+
+/// A file of `len` zero bytes that takes no disk space.
+///
+/// The cancel tests need a transfer that is certainly still running when the
+/// cancel lands. A real 48 MiB file moves in a few hundred milliseconds here,
+/// which once let the last byte arrive before the cancel did. A gibibyte cannot,
+/// and a sparse one costs nothing to create.
+fn sparse_file(path: &Path, len: u64) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("parent directory");
+    }
+    fs::File::create(path)
+        .and_then(|file| file.set_len(len))
+        .expect("sparse fixture");
+}
+
+/// Waits until a file has started arriving, so a cancel lands mid-transfer
+/// rather than before it or after it.
+async fn wait_until_partly_written(path: &Path) {
+    for _ in 0..500 {
+        if fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{} never started arriving", path.display());
+}
+
+/// A receiver that stops half-way tells the sender, which ends saying the
+/// receiver cancelled rather than that a connection dropped. The half-written
+/// file does not survive to be mistaken for the whole one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_receiver_cancelling_mid_transfer_tells_the_sender_and_keeps_nothing() {
+    let (origin, relay) = spawn_relay_with_state().await;
+    let base = scratch("receiver-cancels");
+    let source = base.join("large.bin");
+    let destination = base.join("received");
+    fs::create_dir_all(&destination).expect("destination");
+    sparse_file(&source, 1024 * 1024 * 1024);
+
+    let (code, sender) =
+        cancellable_send(&origin, &source, drop_cli::cancel::Cancel::default()).await;
+
+    let receiver_cancel = drop_cli::cancel::Cancel::default();
+    let receiver = tokio::spawn({
+        let origin = origin.clone();
+        let destination = destination.clone();
+        let cancel = receiver_cancel.clone();
+        async move {
+            recv::run_deciding(
+                &code,
+                &relayed_receive(&origin, &destination),
+                &mut drop_cli::consent::Acceptance::Yes,
+                cancel,
+            )
+            .await
+            .map_err(|error| drop_cli::cancel::exit_code_for(error.as_ref()))
+        }
+    });
+
+    wait_until_partly_written(&destination.join("large.bin")).await;
+    receiver_cancel.fire();
+
+    let received = tokio::time::timeout(Duration::from_secs(10), receiver)
+        .await
+        .expect("the receiver stopped promptly")
+        .expect("the receiver task ran");
+    assert_eq!(received, Err(130), "cancelled here");
+
+    let sent = tokio::time::timeout(Duration::from_secs(10), sender)
+        .await
+        .expect("the sender stopped promptly")
+        .expect("the sender task ran");
+    let error = sent.expect_err("a cancelled transfer did not complete");
+    assert_eq!(
+        drop_cli::cancel::exit_code_for(error.as_ref()),
+        4,
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("receiver cancelled"),
+        "the sender should say who stopped it: {error}"
+    );
+
+    assert!(
+        !destination.join("large.bin").exists(),
+        "a half-written file was left behind"
+    );
+
+    for _ in 0..100 {
+        if relay.metrics.snapshot().total_transfers_cancelled == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(relay.metrics.snapshot().total_transfers_cancelled, 1);
+    assert_eq!(relay.metrics.snapshot().total_transfer_failures, 0);
+}
+
+/// The same from the other side: a sender that stops half-way is reported to
+/// the receiver as the sender cancelling, and the receiver keeps nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sender_cancelling_mid_transfer_tells_the_receiver_and_it_keeps_nothing() {
+    let origin = spawn_relay().await;
+    let base = scratch("sender-cancels");
+    let source = base.join("large.bin");
+    let destination = base.join("received");
+    fs::create_dir_all(&destination).expect("destination");
+    sparse_file(&source, 1024 * 1024 * 1024);
+
+    let sender_cancel = drop_cli::cancel::Cancel::default();
+    let (code, sender) = cancellable_send(&origin, &source, sender_cancel.clone()).await;
+
+    let receiver = tokio::spawn({
+        let origin = origin.clone();
+        let destination = destination.clone();
+        async move {
+            recv::run_deciding(
+                &code,
+                &relayed_receive(&origin, &destination),
+                &mut drop_cli::consent::Acceptance::Yes,
+                drop_cli::cancel::Cancel::default(),
+            )
+            .await
+        }
+    });
+
+    wait_until_partly_written(&destination.join("large.bin")).await;
+    sender_cancel.fire();
+
+    let sent = tokio::time::timeout(Duration::from_secs(10), sender)
+        .await
+        .expect("the sender stopped promptly")
+        .expect("the sender task ran");
+    let error = sent.expect_err("cancelled");
+    assert_eq!(drop_cli::cancel::exit_code_for(error.as_ref()), 130);
+
+    let received = tokio::time::timeout(Duration::from_secs(10), receiver)
+        .await
+        .expect("the receiver stopped promptly")
+        .expect("the receiver task ran");
+    let error = received.expect_err("a cancelled transfer did not complete");
+    assert_eq!(
+        drop_cli::cancel::exit_code_for(error.as_ref()),
+        4,
+        "{error}"
+    );
+    assert!(error.to_string().contains("sender cancelled"), "{error}");
+
+    assert!(
+        !destination.join("large.bin").exists(),
+        "a half-written file was left behind"
+    );
+}
+
+/// Ctrl-C, for real: a signal to a running `drop recv` makes it tell the
+/// sender and exit 130, and the sender exits 4 saying the receiver cancelled.
+/// Before this, the receiver died without a word and the sender reported a
+/// dropped connection.
+///
+/// Unix only, because it sends SIGINT with `kill`. On Windows the same code
+/// path is reached by `tokio::signal::ctrl_c`, which cannot be delivered to one
+/// child process from a test.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_interrupt_cancels_politely_and_both_sides_say_so() {
+    let origin = spawn_relay().await;
+    let base = scratch("interrupt");
+    let source = base.join("large.bin");
+    let destination = base.join("received");
+    fs::create_dir_all(&destination).expect("destination");
+    sparse_file(&source, 1024 * 1024 * 1024);
+
+    let mut sender = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .arg("send")
+        .arg(&source)
+        .args(["--server", &origin, "--transport", "relay", "--status"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the sender");
+
+    let mut announced = BufReader::new(sender.stdout.take().expect("stdout")).lines();
+    let code = tokio::time::timeout(Duration::from_secs(30), announced.next_line())
+        .await
+        .expect("a code in time")
+        .expect("stdout readable")
+        .expect("a code at all");
+
+    let mut receiver = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .args([
+            "recv",
+            &code,
+            "--yes",
+            "--status",
+            "--server",
+            &origin,
+            "--transport",
+            "relay",
+        ])
+        .arg("--out")
+        .arg(&destination)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the receiver");
+
+    // Collected as it arrives, so the signal goes in once the transfer is
+    // genuinely under way and the full output is still there to assert on.
+    let mut receiver_lines = BufReader::new(receiver.stderr.take().expect("stderr")).lines();
+    let mut received_text = String::new();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(line) = receiver_lines.next_line().await.expect("stderr readable") {
+            received_text.push_str(&line);
+            received_text.push('\n');
+            if line.starts_with("drop-status: state=accepted") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the receiver accepted in time");
+    wait_until_partly_written(&destination.join("large.bin")).await;
+
+    let pid = receiver.id().expect("a running receiver").to_string();
+    let killed = std::process::Command::new("kill")
+        .args(["-INT", &pid])
+        .status()
+        .expect("kill ran");
+    assert!(killed.success());
+
+    let receiver_status = tokio::time::timeout(Duration::from_secs(10), receiver.wait())
+        .await
+        .expect("the receiver exited promptly")
+        .expect("the receiver ran");
+    while let Ok(Some(line)) = receiver_lines.next_line().await {
+        received_text.push_str(&line);
+        received_text.push('\n');
+    }
+
+    let sender = tokio::time::timeout(Duration::from_secs(10), sender.wait_with_output())
+        .await
+        .expect("the sender exited promptly")
+        .expect("the sender ran");
+    let sent_text = String::from_utf8_lossy(&sender.stderr);
+
+    assert_eq!(receiver_status.code(), Some(130), "{received_text}");
+    assert!(received_text.contains("Cancelled."), "{received_text}");
+
+    assert_eq!(sender.status.code(), Some(4), "{sent_text}");
+    assert!(
+        sent_text.contains("the receiver cancelled the transfer"),
+        "{sent_text}"
+    );
+
+    let states: Vec<&str> = sent_text
+        .lines()
+        .filter_map(|line| line.strip_prefix("drop-status: state="))
+        .collect();
+    assert_eq!(
+        states,
+        vec!["connected", "code-ok", "accepted", "cancelled"],
+        "the sender's states, in order:\n{sent_text}"
+    );
+
+    assert!(
+        !destination.join("large.bin").exists(),
+        "a half-written file was left behind"
     );
 }

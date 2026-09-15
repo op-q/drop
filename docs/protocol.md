@@ -568,8 +568,8 @@ wants the file. So a second question follows, on both carriers:
 Not implemented. Tracked in
 [`implementation-checklist.md`](implementation-checklist.md).
 
-- **Cancel from a person, on both sides**, in
+- **The interface's consent and transfer screens**, in
   [`plans/receiver-consent-and-status-plan-2026-09-14.md`](plans/receiver-consent-and-status-plan-2026-09-14.md)
-  phase 4. The frames above exist and are honoured; what is missing is a
-  way for a person to send `cancel` (a key in the interface, a first Ctrl-C at
-  a command) and the sender's per-state status lines.
+  phase 5. No wire change: the frames above are complete. Today a person
+  cancels with Ctrl-C at a command; the interface closes before a transfer
+  starts.

@@ -49,6 +49,14 @@ def test_a_relayed_transfer_crosses_a_routed_network(lab, binaries, workspace):
     assert arrived.is_file(), f"nothing arrived: {sorted(destination.iterdir())}"
     assert runner.sha256(arrived) == runner.sha256(source)
 
+    # The conversation, not only the carrier: each state the sender can see
+    # the receiver reach, in order. `finishing` is optional on the wire, but a
+    # receiver of this build always sends it.
+    assert result.sender.states == ["connected", "code-ok", "accepted", "finishing", "done"], (
+        result.sender.stderr
+    )
+    assert result.receiver.states == ["accepted", "done"], result.receiver.stderr
+
 
 def test_a_udp_blocked_network_falls_back_to_the_relay_and_says_so(
     lab, binaries, workspace

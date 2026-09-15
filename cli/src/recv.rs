@@ -10,6 +10,7 @@ use std::{
 use serde_json::json;
 
 use crate::{
+    cancel::{Cancel, Cancellable, Ended},
     client,
     consent::{self, ConsentPrompt, Outcome},
     crypto, direct, display, names,
@@ -129,6 +130,54 @@ enum PlannedTarget {
     },
 }
 
+/// A received file that is deleted unless the transfer finishes.
+///
+/// Every way a receive can end early (an integrity failure, a dropped
+/// connection, the sender cancelling, a person pressing Ctrl-C) leaves the
+/// first N chunks on disk, and they look exactly like a whole file. Deleting
+/// on drop covers all of them, including the ones a `?` returns through, which
+/// the old explicit cleanup did not.
+struct PartialFile {
+    path: PathBuf,
+    file: Option<fs::File>,
+    complete: bool,
+}
+
+impl PartialFile {
+    fn new(path: PathBuf, file: fs::File) -> Self {
+        Self {
+            path,
+            file: Some(file),
+            complete: false,
+        }
+    }
+
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        match self.file.as_mut() {
+            Some(file) => file.write_all(data),
+            None => Err(io::Error::other("the received file was already closed")),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.as_mut().map_or(Ok(()), fs::File::flush)
+    }
+
+    /// The transfer finished and was confirmed: this is a real file now.
+    fn keep(&mut self) {
+        self.complete = true;
+    }
+}
+
+impl Drop for PartialFile {
+    fn drop(&mut self) {
+        if !self.complete {
+            drop(self.file.take());
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 impl ConsentPrompt for consent::Acceptance {
     async fn decide(&mut self, preview: &consent::Preview) -> consent::Consent {
         match self {
@@ -143,7 +192,7 @@ impl ConsentPrompt for consent::Acceptance {
 enum Target {
     File {
         path: PathBuf,
-        file: fs::File,
+        file: PartialFile,
     },
     Archive {
         root: PathBuf,
@@ -156,18 +205,30 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
     // burn the sender's code for a question nobody can answer.
     options.acceptance.check_answerable()?;
 
+    // The first Ctrl-C tells the sender and stops; a second exits at once. The
+    // exit restores the terminal first, which matters since the interface
+    // may have left it raw. See `crate::cancel`.
+    let cancel = Cancel::default();
+    crate::cancel::exit_on_second_interrupt(cancel.clone());
+
     let mut acceptance = options.acceptance;
-    run_deciding(code, &options, &mut acceptance).await
+    run_deciding(code, &options, &mut acceptance, cancel).await
 }
 
 /// [`run`], with the consent question put to `prompt` instead of to the
-/// terminal, so `options.acceptance` is not consulted. For programs and tests
-/// that decide for themselves.
+/// terminal, so `options.acceptance` is not consulted, and stopped by `cancel`
+/// rather than by a signal handler it installs. For programs and tests that
+/// decide for themselves.
 pub async fn run_deciding<P: ConsentPrompt + Send>(
     code: &str,
     options: &ReceiveOptions,
     prompt: &mut P,
+    cancel: Cancel,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if options.status {
+        direct::enable_state_lines();
+    }
+
     if options.path == direct::Path::Relay && options.origin.is_none() {
         return Err(format!(
             "--transport relay receives through a relay, and none is configured: {}.",
@@ -175,16 +236,6 @@ pub async fn run_deciding<P: ConsentPrompt + Send>(
         )
         .into());
     }
-
-    // The receiver has no spool file to clean up, so it had no termination
-    // handler at all and a signal simply killed it. That was harmless until the
-    // interface put the terminal in raw mode: the default SIGINT disposition
-    // runs no Rust code, so nothing would hand it back.
-    tokio::spawn(async {
-        crate::payload::wait_for_termination().await;
-        crate::ui::terminal::restore();
-        std::process::exit(130);
-    });
 
     let code = crypto::TransferCode::parse(code)?;
 
@@ -198,7 +249,7 @@ pub async fn run_deciding<P: ConsentPrompt + Send>(
     // the sender fell back. A missing record is not a wrong code — a wrong code
     // is not detectable here at all, and surfaces at the sealed metadata.
     if options.path != direct::Path::Relay {
-        match try_direct(&code, options, prompt).await {
+        match try_direct(&code, options, prompt, &cancel).await {
             Ok(Some(outcome)) => return outcome,
             Ok(None) => {
                 direct::may_fall_back(options.path, options.origin.as_deref(), &*missing_record())?;
@@ -224,7 +275,10 @@ pub async fn run_deciding<P: ConsentPrompt + Send>(
     eprintln!("Connecting to {origin}...");
     direct::report(direct::Carrier::Relay, fallback, options.status);
 
-    let mut transport = relay::connect_receiver(&origin, code.nameplate()).await?;
+    let mut transport = Cancellable::new(
+        relay::connect_receiver(&origin, code.nameplate()).await?,
+        cancel,
+    );
 
     receive_transfer(&mut transport, &code, options, prompt).await
 }
@@ -251,15 +305,20 @@ async fn try_direct<P: ConsentPrompt + Send>(
     code: &crypto::TransferCode,
     options: &ReceiveOptions,
     prompt: &mut P,
+    cancel: &Cancel,
 ) -> Result<Option<Result<(), Box<dyn Error + Send + Sync>>>, Box<dyn Error + Send + Sync>> {
     eprintln!("Looking for the sender...");
 
     let directory = options.rendezvous.directory()?;
 
-    let Some(mut dialled) = direct::dial_sender(&directory, code, &options.rendezvous).await?
-    else {
+    let Some(dialled) = direct::dial_sender(&directory, code, &options.rendezvous).await? else {
         return Ok(None);
     };
+    let direct::Dialled {
+        transport,
+        endpoint,
+    } = dialled;
+    let mut transport = Cancellable::new(transport, cancel.clone());
 
     direct::report(
         direct::Carrier::Direct,
@@ -271,9 +330,9 @@ async fn try_direct<P: ConsentPrompt + Send>(
     // driver, so dropping it early kills a transfer that had just started —
     // which is exactly what happened the first time this ran over a real
     // network, and what the loopback tests could not see.
-    let outcome = receive_transfer(&mut dialled.transport, code, options, prompt).await;
+    let outcome = receive_transfer(&mut transport, code, options, prompt).await;
 
-    dialled.endpoint.shutdown().await;
+    endpoint.shutdown().await;
 
     Ok(Some(outcome))
 }
@@ -361,6 +420,7 @@ pub(crate) async fn receive_transfer<T: Transport, P: ConsentPrompt>(
     match consent::ask(transport, prompt, &preview, consent::ACCEPT_DEADLINE).await? {
         Outcome::Accepted => {
             transport.send_control(json!({ "type": "accept" })).await?;
+            direct::state("accepted");
         }
         declined => {
             let reason = if declined == Outcome::TimedOut {
@@ -376,6 +436,7 @@ pub(crate) async fn receive_transfer<T: Transport, P: ConsentPrompt>(
                 .await;
             transport.close().await;
             eprintln!("Nothing was saved.");
+            direct::state("declined");
             return Ok(());
         }
     }
@@ -466,6 +527,13 @@ pub(crate) async fn receive_transfer<T: Transport, P: ConsentPrompt>(
                     let _ = transport.send_control(json!({ "type": "finishing" })).await;
 
                     finish(&mut target, decoder, &mut expansion)?;
+
+                    // Every byte arrived, authenticated and counted, and the
+                    // file is flushed. It is a whole file from here, whether
+                    // or not the sender hears that below.
+                    if let Target::File { file, .. } = &mut target {
+                        file.keep();
+                    }
                     progress.finish(written);
 
                     transport
@@ -474,6 +542,7 @@ pub(crate) async fn receive_transfer<T: Transport, P: ConsentPrompt>(
 
                     report(&target, written);
                     transport.close().await;
+                    direct::state("done");
                     return Ok(());
                 }
                 Some("cancel") => {
@@ -493,9 +562,12 @@ pub(crate) async fn receive_transfer<T: Transport, P: ConsentPrompt>(
                         );
                     }
 
-                    return Err(
-                        consent::peer_cancelled("sender", payload["reason"].as_str()).into(),
-                    );
+                    direct::state("cancelled");
+                    return Err(Ended::PeerCancelled(consent::peer_cancelled(
+                        "sender",
+                        payload["reason"].as_str(),
+                    ))
+                    .into());
                 }
                 Some("error") => {
                     return Err(peer_error(&payload, "the relay reported an error").into());
@@ -566,10 +638,8 @@ async fn exchange_keys<T: Transport>(
 /// individually authentic, and deleting a tree the receiver may already have
 /// had files in is a worse failure than reporting the stop.
 fn discard_partial(target: Target) {
-    if let Target::File { path, file } = target {
-        drop(file);
-        let _ = fs::remove_file(&path);
-    }
+    // `PartialFile` removes an incomplete file when dropped.
+    drop(target);
 }
 
 async fn wait_for_meta<T: Transport>(
@@ -711,8 +781,8 @@ fn create_target(
             if options.force {
                 let file = fs::File::create(&expected)?;
                 return Ok(Target::File {
+                    file: PartialFile::new(expected.clone(), file),
                     path: expected,
-                    file,
                 });
             }
 
@@ -726,7 +796,10 @@ fn create_target(
                 );
             }
 
-            Ok(Target::File { path, file })
+            Ok(Target::File {
+                file: PartialFile::new(path.clone(), file),
+                path,
+            })
         }
     }
 }
