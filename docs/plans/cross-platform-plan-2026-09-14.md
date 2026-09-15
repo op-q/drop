@@ -1,6 +1,6 @@
 # Cross-platform plan: Windows, macOS and Linux, and transfers between them
 
-Status: **active** — phases 0–2 done (2 on 2026-09-15)
+Status: **active** — phases 0–3 done (2 and 3 on 2026-09-15); 4 and 5 next
 Created: **2026-09-14**
 Last updated: **2026-09-15**
 
@@ -325,33 +325,63 @@ Done 2026-09-15 on `feat/windows-sender`. Notes:
 
 ### Phase 3 — build, package and install for Windows
 
-- [ ] `release.yml`: add `x86_64-pc-windows-msvc` on `windows-2025`, and
+- [x] `release.yml`: add `x86_64-pc-windows-msvc` on `windows-2025`, and
       `aarch64-pc-windows-msvc` on `windows-11-arm` (see risks). Package as
       `drop-<target>.zip` holding `drop.exe`, `LICENSE` and `README.md`, since
       `Expand-Archive` is built in and `tar.gz` is not a Windows habit. The
       checksum step covers `drop-*.zip` as well as `drop-*.tar.gz`.
-- [ ] Static CRT for both Windows targets through
+- [x] Static CRT for both Windows targets through
       `[target.'cfg(all(windows, target_env = "msvc"))'] rustflags`. **Note for
       the browser removal plan's phase 2:** that phase deletes
       `.cargo/config.toml`, and must keep this section if phase 3 has landed.
-- [ ] The "Verify the binary runs" step works unchanged on a Windows runner
+- [x] The "Verify the binary runs" step works unchanged on a Windows runner
       with `shell: bash`. Confirm it, and confirm the binary does not depend on
       `VCRUNTIME140.dll` (`dumpbin /dependents`).
-- [ ] `scripts/install.ps1`: detect the architecture, download the zip and
+- [x] `scripts/install.ps1`: detect the architecture, download the zip and
       `checksums.txt`, check with `Get-FileHash -Algorithm SHA256`, install to
       `%LOCALAPPDATA%\Programs\drop\drop.exe`, and add that directory to the
       **user** `PATH` only if it is absent. Honour `DROP_VERSION`,
       `DROP_INSTALL_DIR` and `DROP_RELEASE_BASE` to match `install.sh`. Publish
       it as a release asset beside `install.sh`.
-- [ ] `install.sh` on `MINGW*`/`MSYS*`/`CYGWIN*`: point at the PowerShell
+- [x] `install.sh` on `MINGW*`/`MSYS*`/`CYGWIN*`: point at the PowerShell
       installer by name rather than printing "unsupported operating system".
-- [ ] `README.md`: a Windows install line,
+- [x] `README.md`: a Windows install line,
       `irm https://github.com/op-q/drop/releases/latest/download/install.ps1 | iex`,
       and a platform table that matches phase 0's CI rather than intent.
 
 **Gate:** a release built from a `workflow_dispatch` on an existing tag's
 successor publishes both zips and `install.ps1`, and `install.ps1` installs a
 binary that runs `drop --version` on the Windows runner.
+
+Done 2026-09-15 on `feat/windows-release`, as far as it can be without tagging a
+release. Notes, where they differ from the list above:
+
+- **Static CRT through `RUSTFLAGS` on the release build step, not a cargo
+  config.** Without `--target`, config `rustflags` also reach the build scripts
+  and proc-macros compiled for the host. With `--target`, which the release
+  build uses, the environment variable reaches the target's artifacts only. The
+  note to the browser removal plan about keeping `.cargo/config.toml` is moot:
+  there is no config file.
+- **`aarch64-pc-windows-msvc` is `continue-on-error`** (open question 2 answered
+  as it leaned). If `ring` needs a toolchain the runner lacks, the release still
+  publishes, without that zip.
+- **Not checked:** that `drop.exe` imports no `VCRUNTIME140.dll`. `dumpbin` is
+  not on the runner's bash `PATH`, and a guessed-at path to it would be the
+  fragile part of the release. Phase 5's clean-machine install is where a
+  missing runtime would show.
+- **A new `Installer` CI job runs both installers for real** on every pull
+  request. It builds the CLI, lays out a package, `checksums.txt` and a tampered
+  copy the way a release does, serves them on loopback, and points
+  `DROP_RELEASE_BASE` at them. It checks that the installed binary runs, and that a
+  checksum mismatch is refused and installs nothing. On Windows it runs
+  `install.ps1` under both `pwsh` 7 and Windows PowerShell 5. The Linux half was
+  run locally, and passes. The Windows half has only CI to run it.
+- `install.ps1` runs inside a script block and fails with `throw`, not `exit`.
+  Run through `irm | iex`, a bare `exit` would close the user's PowerShell
+  window, and preference variables set at the top level would leak into their
+  session.
+- An existing `drop.exe` is renamed aside before the new one is copied, so an
+  upgrade works while an old `drop` is still running a transfer.
 
 ### Phase 4 — archives produced on one OS, extracted on the others, in CI
 

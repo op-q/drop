@@ -72,7 +72,11 @@ Failure paths:
 - [ ] The tag matches the version in `Cargo.toml`.
 - [ ] `release.yml` built every target on its native runner and all jobs
       succeeded.
-- [ ] The checksums file lists every published binary.
+- [ ] The checksums file lists every published binary, including both
+      `drop-*.zip` Windows packages, or notes that the experimental
+      `aarch64-pc-windows-msvc` build failed and was not published.
+- [ ] `install.ps1` is published beside `install.sh`, and the `Installer`
+      CI jobs were green on the release commit.
 - [ ] `install.sh` installs the tagged version on a clean machine and its
       checksum verification passes.
 - [ ] `DROP_VERSION` pins the previous release correctly, so an install can be

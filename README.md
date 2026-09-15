@@ -16,9 +16,39 @@ the direct path is the only path.
 
 ## Install
 
+Linux and macOS:
+
 ```bash
 curl -fsSL https://github.com/op-q/drop/releases/latest/download/install.sh | sh
 ```
+
+Windows, in PowerShell:
+
+```powershell
+irm https://github.com/op-q/drop/releases/latest/download/install.ps1 | iex
+```
+
+Both verify the download against the release's checksums. The Windows installer
+puts `drop.exe` in `%LOCALAPPDATA%\Programs\drop` and adds that to your own PATH;
+it needs no administrator rights.
+
+| Platform | Prebuilt | Tested in CI |
+| --- | --- | --- |
+| Linux, x86_64 and aarch64 | yes | yes |
+| macOS, Intel and Apple silicon | yes | yes |
+| Windows, x86_64 | yes | yes |
+| Windows, Arm | when it builds, see below | no |
+
+A transfer between any two of them works the same way. On Windows, a name that
+Windows cannot store as sent (`notes:v2.txt`, `CON`, a trailing dot) is saved with
+`_` in place of what it could not keep, and the receiver is told. A symbolic link
+in a folder sent to Windows is skipped with a warning. Windows has no executable
+bit, so a script sent from Windows to Linux or macOS arrives not executable.
+
+The Windows on Arm build is marked experimental in the release workflow and is
+published only if it builds. Windows 11 on Arm runs the x86_64 build meanwhile.
+The first time `drop` runs on Windows, the firewall may ask whether to allow it on
+the network; a transfer usually still works if you decline.
 
 ## Use
 
