@@ -81,7 +81,9 @@ Failure paths:
       checksum verification passes.
 - [ ] `DROP_VERSION` pins the previous release correctly, so an install can be
       rolled back.
-- [ ] Release notes state what changed and any breaking protocol change.
+- [ ] `docs/releases/vX.Y.Z.md` exists, follows the release notes rules in
+      [`AGENTS.md`](../AGENTS.md), and names any breaking protocol change under
+      "Before you upgrade". The published release shows it.
 
 ## Documentation claims
 

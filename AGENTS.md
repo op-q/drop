@@ -67,6 +67,28 @@ this repository.
 - Record a costly or hard-to-reverse choice in
   [`docs/decisions.md`](docs/decisions.md) rather than only in a commit message.
 
+## Release notes
+
+Each release has one file, `docs/releases/vX.Y.Z.md`, written on the release
+branch and reviewed in its pull request. The release workflow refuses a tag
+without one and publishes it as the GitHub release text.
+[`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md) is the model.
+
+- Use only these headings, in this order, and leave out any with nothing
+  under it: `## Before you upgrade`, `## Added`, `## Fixed`.
+- **Before you upgrade** is for anything that stops working or needs action:
+  a protocol break, a changed default, a removed flag or feature.
+- One bullet per change, one or two short sentences, written for someone who
+  uses `drop`, not someone who reads its code. Say what they can do now, or what
+  no longer goes wrong.
+- Leave out what a user never notices: refactors, tests, CI, documentation,
+  dependency bumps, and plan or decision numbers. No PR numbers, commit hashes,
+  or credits.
+- A security fix goes under **Fixed** and says plainly what was possible
+  before.
+- Claim only what is tested. Twelve bullets is a lot; merge small related
+  changes into one.
+
 ## Development workflow
 
 - Keep changes focused and include tests for behavior changes.
