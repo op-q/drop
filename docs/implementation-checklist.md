@@ -381,11 +381,16 @@ or is cancelled. The flags stay and become the program-facing surface.
       showing a URL field, warns when the relay carrier is chosen without one,
       and shows a relay already in `DROP_SERVER` as in effect — nothing added
       means no relay, per [`decisions.md`](decisions.md) entry 16.
+- [ ] Later release, asked for 2026-09-16: in the file browser `enter` and `→`
+      open a folder and `space` marks a choice with a radio button.
 - [ ] Phase 3 — progress routed through the interface, and closing. The
       receiver has no cancel path today: the sender sends `{"type":"cancel"}`
       on a stream failure and acts on a `cancelled` status, but nothing in
       `recv.rs` sends one, so "closes for both sides when cancelled" is
       currently only true in one direction.
+- [ ] Phase 3 also, asked for 2026-09-16: show the route in use — direct,
+      through n0's relay, or through a Drop relay. Today both of the first two
+      print `peer-to-peer`.
 - [ ] Phase 4 — [`decisions.md`](decisions.md) entry 13's approval prompt as a
       screen, counter intact, unattended behaviour unchanged.
 - [ ] Phase 5 — help and docs.
