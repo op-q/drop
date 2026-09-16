@@ -2,7 +2,7 @@
 
 Status: **active** — phases 0–4 done (4 on 2026-09-15); phase 5, the interface, next
 Created: **2026-09-14**
-Last updated: **2026-09-14**
+Last updated: **2026-09-16**
 
 Supersedes [`receiver-confirmation-plan-2026-08-19.md`](receiver-confirmation-plan-2026-08-19.md).
 That plan was written against cleartext metadata and a browser client, and the
@@ -521,12 +521,16 @@ fills in.
 
 ### Phase 6 — documentation
 
-- [ ] `README.md`: consent, `--yes`, cancelling, exit codes; release notes say
-      scripts piping `drop recv` must add `--yes`.
-- [ ] `docs/commands.md`: the preview and the status lines.
-- [ ] `security.md`: display sanitisation, the receiver-owned type label, and
+Done 2026-09-16; the documents landed with phases 1–4 and were ticked here with
+the 0.4.0 release notes.
+
+- [x] `README.md`: consent, `--yes`, cancelling, exit codes; release notes say
+      scripts piping `drop recv` must add `--yes` (`docs/releases/v0.4.0.md`,
+      "Before you upgrade").
+- [x] `docs/commands.md`: the preview and the status lines.
+- [x] `security.md`: display sanitisation, the receiver-owned type label, and
       the relay's new ordering enforcement.
-- [ ] Mark [`receiver-confirmation-plan-2026-08-19.md`](receiver-confirmation-plan-2026-08-19.md)
+- [x] Mark [`receiver-confirmation-plan-2026-08-19.md`](receiver-confirmation-plan-2026-08-19.md)
       superseded, pointing here.
 
 ## Files

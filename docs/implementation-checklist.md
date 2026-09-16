@@ -544,7 +544,8 @@ receive, finish.
       cancelled extraction.
 - [ ] Phase 5 — review and transfer screens with Accept/Decline and Cancel,
       with item 7 phase 3.
-- [ ] Phase 6 — documentation; release notes lead with `--yes`.
+- [x] Phase 6 — documentation. Done 2026-09-16; `docs/releases/v0.4.0.md` names `--yes`
+      under "Before you upgrade".
 
 Gate: declining leaves the destination unchanged and the sender exits 3; a
 hostile filename renders inert everywhere; either side's cancel reaches the other
@@ -577,11 +578,7 @@ Recorded so they are not rediscovered as new ideas. None are committed work.
   it overlaps with the decline path in
   [`plans/receiver-confirmation-plan-2026-08-19.md`](plans/receiver-confirmation-plan-2026-08-19.md),
   which also needs the sender to distinguish outcomes it currently cannot.
-- **The published binary reports the wrong version.** `v0.1.1` shipped while
-  `version` in `Cargo.toml` still reads `0.1.0`, so `drop --version` disagrees
-  with the tag it was built from. Worth a version bump plus a release-workflow
-  check that the tag and the manifest match, since this recurs every release.
 - **Prometheus text** from `/metrics`, which currently returns a JSON snapshot.
 - **A first transfer shakeout run** using
   [`validation/transfer-shakeout-template.md`](validation/transfer-shakeout-template.md).
-  Worth doing before the next release regardless of the three items above.
+  Worth doing before the next release regardless of the items above.

@@ -34,8 +34,10 @@ it needs no administrator rights.
 
 | Platform | Prebuilt | Tested in CI |
 | --- | --- | --- |
-| Linux, x86_64 and aarch64 | yes | yes |
-| macOS, Intel and Apple silicon | yes | yes |
+| Linux, x86_64 | yes | yes |
+| Linux, aarch64 | yes | the release build starts |
+| macOS, Apple silicon | yes | yes |
+| macOS, Intel | yes | the release build starts |
 | Windows, x86_64 | yes | yes |
 | Windows, Arm | when it builds, see below | no |
 
