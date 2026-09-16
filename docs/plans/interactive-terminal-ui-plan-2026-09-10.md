@@ -1,7 +1,7 @@
 # Interactive terminal UI plan
 
 Status: active
-Last updated: 2026-09-10 (phases 0 and 1 done, phase 2 partly)
+Last updated: 2026-09-16 (two tasks added for a later release: browser keys, route shown)
 
 ## Goal
 
@@ -222,6 +222,12 @@ runs after the interface has closed.
 - [ ] Both: the code shown large and copyable on the sender, and the same
       `drop recv <CODE>` line the CLI prints today. Waiting on phase 3, which
       is what puts the sender's own screen up during a transfer.
+- [ ] **Browser keys, for a later release** (asked for 2026-09-16). `enter` and
+      `→` both open a folder; `space` marks the highlighted file or folder with
+      a radio button, one choice at a time. Still to settle: which key goes on
+      once something is marked, and the hint line has to say `space select`
+      plainly, because the first finding below is what happened the last time
+      `enter` opened folders.
 
 #### Findings
 
@@ -259,6 +265,13 @@ clears the most recent one. Settings already toggled survive it.
 - [ ] Give `Progress` a sink (Finding 2) and route it to the transfer screen.
 - [ ] Carrier reporting (`Path    peer-to-peer (no Drop server)`) becomes a
       line on that screen; `--status` output still goes to stderr untouched.
+- [ ] **Show the route actually in use** (asked for 2026-09-16): direct,
+      through n0's relay, or through a Drop relay, updated when iroh moves a
+      connection from the relay to a punched direct path mid-transfer. Today
+      `peer-to-peer` is printed for a direct connection and an n0-relayed one
+      alike, because nothing asks iroh which route it took. The plain CLI
+      output should say the same, and every real-network test then records
+      whether hole punching worked.
 - [ ] Both sides close themselves on completion.
 - [ ] Receiver-side cancel (Finding 4): send `cancel`, and teach the sender to
       end cleanly on it.
