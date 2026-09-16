@@ -34,11 +34,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.37.9
+        uses: github/codeql-action/init@v4.38.0
         with:
           languages: rust
           # Rust is analysed from source, without a build. Faster, and it
           # needs no toolchain setup in this job.
           build-mode: none
       - name: Analyze
-        uses: github/codeql-action/analyze@v4.37.9
+        uses: github/codeql-action/analyze@v4.38.0
