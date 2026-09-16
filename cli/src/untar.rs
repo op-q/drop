@@ -14,7 +14,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::tar::{safe_relative_path, symlink_target_stays_inside, traverses_only_real_dirs};
+use crate::{
+    names::Naming,
+    tar::{resolve_archive_path, symlink_target_stays_inside, traverses_only_real_dirs},
+};
 
 const BLOCK: usize = 512;
 
@@ -56,6 +59,8 @@ pub struct TarExtractor {
     files_written: u64,
     /// Whether an entry may replace a file that is already on disk.
     overwrite: bool,
+    /// How entry names become names on this disk.
+    naming: Naming,
     warnings: Vec<String>,
 }
 
@@ -69,8 +74,19 @@ impl TarExtractor {
             long_link: None,
             files_written: 0,
             overwrite: false,
+            naming: Naming::for_this_platform(),
             warnings: Vec::new(),
         }
+    }
+
+    /// Stores entry names under `naming` instead of this platform's.
+    ///
+    /// For tests: the Windows rewriting is pure logic and is exercised on every
+    /// platform through this, while the real filesystem behaviour it guards
+    /// against is tested on Windows itself.
+    pub fn naming(mut self, naming: Naming) -> Self {
+        self.naming = naming;
+        self
     }
 
     /// Allows entries to replace files that already exist in the destination.
@@ -222,7 +238,7 @@ impl TarExtractor {
             .take()
             .unwrap_or_else(|| read_str(&block[157..257]));
 
-        let Some(path) = safe_relative_path(&self.destination, &name) else {
+        let Some(resolved) = resolve_archive_path(&self.destination, &name, self.naming) else {
             self.warnings.push(format!(
                 "refused {name}: the archive entry points outside the destination"
             ));
@@ -233,6 +249,15 @@ impl TarExtractor {
             };
             return Ok(());
         };
+
+        if resolved.renamed {
+            self.warnings.push(format!(
+                "renamed {name} to {}: this system cannot store that name as it is",
+                resolved.stored_as
+            ));
+        }
+
+        let path = resolved.path;
 
         // A lexically safe path can still resolve outside once an earlier entry
         // has planted a symlink among its parents, so the path is checked
@@ -253,7 +278,9 @@ impl TarExtractor {
 
         match typeflag {
             b'5' => {
-                fs::create_dir_all(&path)?;
+                if let Err(error) = fs::create_dir_all(&path) {
+                    self.skip_uncreatable(&name, error)?;
+                }
                 self.state = self.skip_content(size, padding);
             }
             b'2' => {
@@ -267,10 +294,34 @@ impl TarExtractor {
                     self.warnings.push(format!(
                         "skipped symlink {name}: it already exists; pass --force to replace it"
                     ));
-                } else {
-                    fs::create_dir_all(parent)?;
+                } else if !cfg!(unix) {
+                    // Windows can only create a link with Developer Mode or
+                    // elevation, so it is not attempted. Checked before
+                    // anything on disk is touched: with `--force`, trying would
+                    // delete the file already at this path and then fail to put
+                    // a link in its place.
+                    self.warnings.push(format!(
+                        "skipped symlink {name}: this system cannot create symbolic links"
+                    ));
+                } else if let Err(error) = fs::create_dir_all(parent).and_then(|()| {
                     let _ = fs::remove_file(&path);
-                    create_symlink(&link_target, &path)?;
+                    create_symlink(&link_target, &path)
+                }) {
+                    // A filesystem such as exFAT or FAT cannot store a link at
+                    // all, and says so with a permission error. One link the
+                    // receiver cannot make is not a reason to abandon every
+                    // file after it. A destination that really is read-only
+                    // still ends the extraction, at the next file.
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied
+                    ) {
+                        self.warnings.push(format!(
+                            "skipped symlink {name}: this system cannot create symbolic links here"
+                        ));
+                    } else {
+                        self.skip_uncreatable(&name, error)?;
+                    }
                 }
 
                 self.state = self.skip_content(size, padding);
@@ -284,16 +335,25 @@ impl TarExtractor {
                     return Ok(());
                 }
 
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-
                 // Remove first rather than truncating in place: an existing
                 // entry here may be a symlink, and `File::create` would follow
                 // it and write through to wherever it points.
-                let _ = fs::remove_file(&path);
+                let created = path
+                    .parent()
+                    .map_or(Ok(()), fs::create_dir_all)
+                    .and_then(|()| {
+                        let _ = fs::remove_file(&path);
+                        File::create(&path)
+                    });
 
-                let file = File::create(&path)?;
+                let file = match created {
+                    Ok(file) => file,
+                    Err(error) => {
+                        self.skip_uncreatable(&name, error)?;
+                        self.state = self.skip_content(size, padding);
+                        return Ok(());
+                    }
+                };
                 apply_mode(&file, mode)?;
                 self.files_written += 1;
 
@@ -325,6 +385,29 @@ impl TarExtractor {
 }
 
 impl TarExtractor {
+    /// Decides whether a failure to create one entry ends the extraction.
+    ///
+    /// A name the filesystem will not accept is about that one entry: an exFAT
+    /// drive refusing `a:b`, or a character this platform's rewriting does not
+    /// know about. That becomes a warning and extraction goes on, so the
+    /// receiver gets every file that can be stored. Anything else, such as a
+    /// full disk, a lost permission on the destination or an I/O error, would
+    /// only fail again on the next entry, so it ends the extraction as it
+    /// always has.
+    fn skip_uncreatable(&mut self, name: &str, error: io::Error) -> io::Result<()> {
+        if matches!(
+            error.kind(),
+            io::ErrorKind::InvalidFilename | io::ErrorKind::InvalidInput
+        ) {
+            self.warnings.push(format!(
+                "skipped {name}: this system refused the name ({error})"
+            ));
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
     /// State that consumes `size` content bytes without storing them.
     ///
     /// An entry type that creates no file can still declare a size, and the

@@ -39,7 +39,7 @@ pub async fn create_session(
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, time::Instant};
+    use std::net::SocketAddr;
 
     use axum::extract::{ConnectInfo, State};
 
@@ -108,21 +108,7 @@ mod tests {
         let sessions = InMemorySessionStore::new();
         for index in 0..MAX_CONCURRENT_SESSIONS {
             sessions
-                .insert(
-                    format!("CODE{:03}", index),
-                    Session {
-                        ciphertext_size: 1,
-                        created_at: Instant::now(),
-                        last_activity: Instant::now(),
-                        sender_tx: None,
-                        download_tx: None,
-                        sender_connected: false,
-                        receiver_connected: false,
-                        bytes_relayed: 0,
-                        receiver_acknowledged_bytes: 0,
-                        sender_finished: false,
-                    },
-                )
+                .insert(format!("CODE{:03}", index), Session::new(1))
                 .await;
         }
 

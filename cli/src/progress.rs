@@ -13,7 +13,28 @@ pub struct Progress {
     started: Instant,
     last_drawn: Instant,
     interactive: bool,
+    /// Whether the terminal understands escape sequences. See [`escapes_work`].
+    escapes: bool,
+    /// How wide the last line drawn was, so a line drawn without escapes can
+    /// cover it.
+    last_width: usize,
     finished: bool,
+}
+
+/// Whether this terminal interprets `\x1b[2K`.
+///
+/// Every Unix terminal and Windows Terminal do. The older console that
+/// `cmd.exe` and PowerShell 5 still open on many machines does only once a
+/// program turns on its VT processing, and until then prints `←[2K` before
+/// every update. crossterm turns it on here and says whether that worked.
+#[cfg(windows)]
+fn escapes_work() -> bool {
+    crossterm::ansi_support::supports_ansi()
+}
+
+#[cfg(not(windows))]
+fn escapes_work() -> bool {
+    true
 }
 
 impl Progress {
@@ -27,6 +48,8 @@ impl Progress {
             // Draw the first update immediately rather than after one refresh.
             last_drawn: now - REFRESH,
             interactive: std::io::stderr().is_terminal(),
+            escapes: escapes_work(),
+            last_width: 0,
             finished: false,
         }
     }
@@ -60,7 +83,7 @@ impl Progress {
         }
     }
 
-    fn draw(&self, transferred: u64) {
+    fn draw(&mut self, transferred: u64) {
         let elapsed = self.started.elapsed().as_secs_f64();
         let rate = if elapsed > 0.0 {
             transferred as f64 / elapsed
@@ -82,10 +105,8 @@ impl Progress {
             "--".to_string()
         };
 
-        let mut stderr = std::io::stderr();
-        let _ = write!(
-            stderr,
-            "\r\x1b[2K{} {:>5.1}%  {} / {}  {}/s  ETA {}",
+        let line = format!(
+            "{} {:>5.1}%  {} / {}  {}/s  ETA {}",
             self.label,
             percent,
             format_bytes(transferred),
@@ -93,7 +114,27 @@ impl Progress {
             format_bytes(rate as u64),
             eta
         );
+
+        let mut stderr = std::io::stderr();
+        let _ = write!(stderr, "{}", redraw(&line, self.escapes, self.last_width));
         let _ = stderr.flush();
+        self.last_width = line.chars().count();
+    }
+}
+
+/// What to write to replace the previous progress line with `line`.
+///
+/// With escapes, clear the line and write. Without them, return to the start
+/// and pad with spaces over whatever the previous, possibly longer, line left.
+fn redraw(line: &str, escapes: bool, previous_width: usize) -> String {
+    if escapes {
+        format!("\r\x1b[2K{line}")
+    } else {
+        let width = line.chars().count();
+        format!(
+            "\r{line}{}",
+            " ".repeat(previous_width.saturating_sub(width))
+        )
     }
 }
 
@@ -129,6 +170,18 @@ pub fn format_duration(duration: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn without_escapes_a_shorter_line_covers_a_longer_one() {
+        let drawn = super::redraw("short", false, 12);
+        assert_eq!(drawn, "\rshort       ");
+        assert!(!drawn.contains('\x1b'));
+    }
+
+    #[test]
+    fn with_escapes_the_line_is_cleared_first() {
+        assert_eq!(super::redraw("line", true, 40), "\r\x1b[2Kline");
+    }
+
     use std::time::Duration;
 
     use super::{format_bytes, format_duration};

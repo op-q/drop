@@ -1,6 +1,6 @@
 # Receiver confirmation plan
 
-Status: **proposed**
+Status: **abandoned** — superseded 2026-09-14 by [`receiver-consent-and-status-plan-2026-09-14.md`](receiver-consent-and-status-plan-2026-09-14.md), which redesigns it for sealed metadata, both carriers and no browser
 Created: **2026-08-19**
 Last updated: **2026-08-19**
 

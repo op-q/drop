@@ -39,7 +39,7 @@ pub fn log_incoming_sender_message(code: &str, message: &SenderMessage) {
                 "received sender control message"
             );
         }
-        SenderMessage::Cancel => {
+        SenderMessage::Cancel { .. } => {
             debug!(
                 session_code = %code,
                 event = "sender_cancel",
@@ -102,6 +102,30 @@ pub fn log_sender_event(code: &str, event: &SenderEvent) {
                 "dispatching sender event"
             );
         }
+        // The value is not logged. It reveals nothing about the key, but
+        // nothing opaque a peer sent belongs in operational logs.
+        SenderEvent::Accepted | SenderEvent::Finishing => {
+            debug!(
+                session_code = %code,
+                event = "receiver_progression_forwarded",
+                "dispatching sender event"
+            );
+        }
+        SenderEvent::Declined(reason) | SenderEvent::Cancelled(reason) => {
+            debug!(
+                session_code = %code,
+                event = "receiver_ended_transfer",
+                reason,
+                "dispatching sender event"
+            );
+        }
+        SenderEvent::MetaOk(_) => {
+            debug!(
+                session_code = %code,
+                event = "receiver_key_confirmation_forwarded",
+                "dispatching sender event"
+            );
+        }
         SenderEvent::Error(message) => {
             debug!(
                 session_code = %code,
@@ -146,6 +170,14 @@ pub fn log_download_event(code: &str, event: &DownloadEvent) {
                 version,
                 ciphertext_size,
                 "dispatching receiver event"
+            );
+        }
+        DownloadEvent::Cancelled(reason) => {
+            debug!(
+                session_code = %code,
+                event = "sender_cancelled",
+                reason,
+                "dispatching download event"
             );
         }
         DownloadEvent::KeyExchange(_) => {

@@ -15,10 +15,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CryptoError, handshake::SessionKeys};
 
-/// Bumped when the framing changes in a way an older build cannot read. A
+/// The protocol version: the sealing *and* the conversation around it.
+///
+/// Bumped when either changes in a way an older build cannot follow. Version 2
+/// added the key confirmation in `meta_ok`, carried on both paths; a version 1
+/// peer would not send it and would otherwise be charged a failed guess. A
 /// mismatch is a hard failure: a version that is negotiated downward is a
 /// version a hostile relay can negotiate to plaintext.
-pub const ENVELOPE_VERSION: u8 = 1;
+pub const ENVELOPE_VERSION: u8 = 2;
 
 /// AES-GCM authentication tag, appended to every sealed chunk.
 pub const TAG_BYTES: u64 = 16;
@@ -44,6 +48,15 @@ pub struct Metadata {
     /// expansion guard, and the check that the file that landed is the size
     /// the sender meant to send.
     pub plaintext_size: u64,
+    /// Files in a folder, as the sender counted them. A claim for the
+    /// receiver's preview, not a bound: what is written is bounded by the
+    /// extractor, whatever this says. Sealed, so it tells the relay nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_count: Option<u64>,
+    /// Bytes before archiving or compression, as the sender measured them.
+    /// A claim, like `entry_count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpacked_size: Option<u64>,
 }
 
 /// Chunks needed for a payload of this many plaintext bytes.
@@ -270,6 +283,8 @@ mod tests {
             filename: "project.tar".to_string(),
             mime_type: "application/x-tar".to_string(),
             plaintext_size: 3000,
+            entry_count: Some(12),
+            unpacked_size: Some(9000),
         }
     }
 

@@ -16,9 +16,41 @@ the direct path is the only path.
 
 ## Install
 
+Linux and macOS:
+
 ```bash
 curl -fsSL https://github.com/op-q/drop/releases/latest/download/install.sh | sh
 ```
+
+Windows, in PowerShell:
+
+```powershell
+irm https://github.com/op-q/drop/releases/latest/download/install.ps1 | iex
+```
+
+Both verify the download against the release's checksums. The Windows installer
+puts `drop.exe` in `%LOCALAPPDATA%\Programs\drop` and adds that to your own PATH;
+it needs no administrator rights.
+
+| Platform | Prebuilt | Tested in CI |
+| --- | --- | --- |
+| Linux, x86_64 | yes | yes |
+| Linux, aarch64 | yes | the release build starts |
+| macOS, Apple silicon | yes | yes |
+| macOS, Intel | yes | the release build starts |
+| Windows, x86_64 | yes | yes |
+| Windows, Arm | when it builds, see below | no |
+
+A transfer between any two of them works the same way. On Windows, a name that
+Windows cannot store as sent (`notes:v2.txt`, `CON`, a trailing dot) is saved with
+`_` in place of what it could not keep, and the receiver is told. A symbolic link
+in a folder sent to Windows is skipped with a warning. Windows has no executable
+bit, so a script sent from Windows to Linux or macOS arrives not executable.
+
+The Windows on Arm build is marked experimental in the release workflow and is
+published only if it builds. Windows 11 on Arm runs the x86_64 build meanwhile.
+The first time `drop` runs on Windows, the firewall may ask whether to allow it on
+the network; a transfer usually still works if you decline.
 
 ## Use
 
@@ -53,9 +85,26 @@ Waiting for the receiver to connect...
 ```bash
 $ drop recv 7F2A91-crossover-clockwork-ridge
 Path    peer-to-peer (no Drop server)
+
+Incoming transfer
+  Folder   project   128 files, 1.1 GiB unpacked
+  Size     412.7 MiB to download
+  Into     .
+Accept? [y/N] y
 Receiving  100.0%  412.7 MiB / 412.7 MiB  86.4 MiB/s  ETA --
 Extracted 128 files into .
 ```
+
+The receiver is shown what is coming, with its name, type, size and where it
+will be saved, and nothing is written until they accept. The sender sees each
+step: the receiver entering the code, deciding, accepting, finishing. A
+question nobody answers is declined after two minutes. In a script, where
+there is nobody to ask, pass `--yes`; without a terminal `drop recv` refuses to
+start rather than accept silently.
+
+Ctrl-C on either side cancels the transfer and tells the other side, and a
+half-received file is not left behind. `drop --help` lists the exit statuses a
+script can act on.
 
 That's the default, `auto`: direct, falling back to a relay only if you have
 configured one with `--server` or `DROP_SERVER`. Every transfer is encrypted

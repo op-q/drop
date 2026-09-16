@@ -11,36 +11,14 @@ scripts/check-secrets.sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets
-npm --prefix web ci
-npm --prefix web run build
-npm --prefix web run typecheck
-npm --prefix web test
-npm --prefix web audit --audit-level=high
 ```
 
-The repository is a Cargo workspace with four members — `api`, `drop-cli`,
-`drop-crypto`, and `drop-crypto-wasm`. A root-package-only run misses all but
-the relay, which is why every Rust command here is workspace-wide.
+The repository is a Cargo workspace with three members — `api`, `drop-cli`,
+and `drop-crypto`. A root-package-only run misses all but the relay, which is
+why every Rust command here is workspace-wide.
 
-## The web build is not a pure Node build
-
-`npm run build` compiles `crypto-wasm/` before it runs Vite, because the
-browser runs the same envelope the CLI runs rather than a second
-implementation of it ([`decisions.md`](decisions.md) entry 11). That needs a
-Rust toolchain, the wasm32 target, and `wasm-pack`:
-
-```bash
-rustup target add wasm32-unknown-unknown
-cargo install wasm-pack        # or a release binary from rustwasm/wasm-pack
-```
-
-Without them `npm run build`, `npm test`, and `npm run dev` all fail at the
-`build:wasm` step rather than at anything that mentions the browser.
-
-`npm test` runs the envelope tests and, when `target/debug/api` and
-`target/debug/drop` exist, the CLI-to-browser interoperation tests against a
-real relay. It skips those rather than failing when the binaries are absent, so
-run `cargo build --workspace --bins` first if you mean to exercise them.
+CI runs Clippy and the tests on Linux, macOS and Windows. Passing locally on one
+of them says nothing about the other two.
 
 ## Secret scan
 
@@ -62,27 +40,13 @@ cargo test -p drop-cli --test transfer        # CLI transfer tests
 ## Run the relay locally
 
 ```bash
-npm --prefix web ci
-npm --prefix web run build
 cargo run
 ```
 
-Then `http://127.0.0.1:8080/`, with `/health`, `/ready`, and `/metrics`
-alongside it.
+Then `/health`, `/ready`, and `/metrics` on `http://127.0.0.1:8080`. The root
+answers 404 with a line saying what the host is; there is no web page.
 
 Bind elsewhere with `DROP_BIND_ADDR=127.0.0.1:8080 cargo run`.
-
-## Frontend development
-
-```bash
-cd web && VITE_BACKEND_ORIGIN=http://127.0.0.1:8080 npm run dev
-```
-
-The backend must allow the Vite origin:
-
-```bash
-DROP_ALLOWED_ORIGINS=http://127.0.0.1:5173 cargo run
-```
 
 ## Local transfer
 
@@ -141,10 +105,37 @@ $ drop recv A1B2C3-zone-zoo-zebra --server http://127.0.0.1:8080
 error: could not decrypt the transfer details — check the code and try again
 ```
 
-The sender's session is consumed by that attempt and it exits `receiver
-disconnected`. That is the relay refusing a second claim, and it is the
-one-guess enforcement [`decisions.md`](decisions.md) entry 13 has to reproduce
-on the direct path, where there is no relay to do it.
+The sender's session is consumed by that attempt, and it exits saying the
+receiver could not open the transfer. Over the relay that is the relay refusing
+a second claim; on the direct path the sender counts the attempt itself and
+asks before allowing another ([`decisions.md`](decisions.md) entries 13 and 18).
+
+A receiver is shown the transfer and asked before anything is written. In a
+script, pass `--yes`: without a terminal, `drop recv` refuses to start.
+
+For a script, the exit status says how a transfer ended: `0` completed, `1`
+failed, `3` declined or not answered (sender), `4` the other side cancelled, and
+`130` cancelled here. With `--status` or `DROP_STATUS`, each side also prints
+the states it reached, one line each, in a vocabulary that will not be
+reworded:
+
+```text
+drop-status: state=connected    # sender: the receiver joined
+drop-status: state=code-ok      # sender: the receiver proved the code
+drop-status: state=accepted     # both
+drop-status: state=finishing    # sender: the receiver has every byte
+drop-status: state=done         # both
+drop-status: state=declined     # instead of the rest
+drop-status: state=cancelled    # instead of the rest
+```
+
+Ctrl-C cancels on either side and tells the other side. A second Ctrl-C quits
+at once.
+
+```text
+$ drop recv A1B2C3-zone-zoo-zebra --server http://127.0.0.1:8080 < /dev/null
+error: there is no terminal to ask whether to accept this transfer. Pass --yes to accept whatever the sender sends without asking
+```
 
 Use synthetic files. Never point a test at the public instance.
 
@@ -169,9 +160,7 @@ development machine".
 docker compose up --build
 ```
 
-[`Dockerfile.fullstack`](../Dockerfile.fullstack) builds the web client and the
-relay; [`Dockerfile`](../Dockerfile) builds the backend only, for split
-deployments.
+[`Dockerfile`](../Dockerfile) builds the relay. There is no other image.
 
 ## Kubernetes
 

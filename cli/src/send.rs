@@ -5,8 +5,9 @@ use std::{error::Error, fmt, future::Future, io::IsTerminal, path::Path, time::D
 use serde_json::{Value, json};
 
 use crate::{
+    cancel::{Cancel, Cancellable, Ended},
     client, crypto, direct,
-    payload::{self, Payload},
+    payload::Payload,
     progress::Progress,
     transport::{Frame, Transport, relay},
 };
@@ -25,6 +26,15 @@ const WINDOW_BYTES: u64 = 16 * 1024 * 1024;
 /// already holds, so this is generous rather than tight — it bounds a peer
 /// that has stopped talking, not a slow one.
 const META_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long the sender waits for the receiver to accept.
+///
+/// The receiver's own question closes after
+/// [`crate::consent::ACCEPT_DEADLINE`] and answers `decline` then, so this only
+/// bounds a receiver that has stopped talking altogether. Longer than that
+/// deadline, so a slow link cannot make the sender give up on a receiver that
+/// is still deciding.
+pub const CONSENT_TIMEOUT: Duration = Duration::from_secs(150);
 
 /// How one attempt at a transfer ended.
 ///
@@ -47,7 +57,9 @@ pub enum Attempt {
         /// counts them the same: from this side the honest mistyper and the
         /// silent attacker are indistinguishable, and should be.
         what_happened: &'static str,
-        payload: Payload,
+        /// Boxed because a payload is large, and an `Attempt` is returned
+        /// through every layer of the send path.
+        payload: Box<Payload>,
     },
 }
 
@@ -107,25 +119,27 @@ impl SendOptions {
     }
 }
 
-pub async fn run(
+pub async fn run(path: &Path, options: SendOptions) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // The first Ctrl-C tells the receiver and stops; a second, or a transfer
+    // that will not stop, exits at once. Exiting that way does not unwind, so
+    // it restores the terminal and deletes spool files itself. See
+    // `crate::cancel`.
+    let cancel = Cancel::default();
+    crate::cancel::exit_on_second_interrupt(cancel.clone());
+
+    run_cancellable(path, options, cancel).await
+}
+
+/// [`run`], stopped by `cancel` rather than by a signal handler it installs.
+/// For programs and tests that decide when to stop.
+pub async fn run_cancellable(
     path: &Path,
     mut options: SendOptions,
+    cancel: Cancel,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    // A signal terminates the process without unwinding, so the spool file's
-    // destructor never runs. Delete it here instead, or a cancelled compressed
-    // send would leave the user's bytes behind in the temporary directory.
-    tokio::spawn(async {
-        payload::wait_for_termination().await;
-
-        // The terminal first, and then the spool file. This exit does not
-        // unwind, so no destructor anywhere will give the terminal back, and a
-        // person left unable to see what they type cannot deal with whatever
-        // comes next either. Both are a handful of syscalls, so putting the
-        // one that cannot be recovered from first costs nothing.
-        crate::ui::terminal::restore();
-        payload::remove_spool_files();
-        std::process::exit(130);
-    });
+    if options.status {
+        direct::enable_state_lines();
+    }
 
     // Before the payload is read, compressed and spooled: being told the
     // relay is missing is worth nothing after a wait to compress a directory.
@@ -140,14 +154,16 @@ pub async fn run(
     let payload = Payload::prepare(path, options.compress)?;
 
     for warning in &payload.warnings {
-        eprintln!("warning: {warning}");
+        // Names from the tree being sent. They are local, but a hostile name
+        // can already be sitting on a shared disk.
+        eprintln!("warning: {}", crate::display::for_terminal(warning));
     }
 
     if payload.size == 0 {
         return Err("there is nothing to send: the payload is empty".into());
     }
 
-    eprintln!("Sending {}", payload.summary);
+    eprintln!("Sending {}", crate::display::for_terminal(&payload.summary));
     eprintln!("Size    {}", crate::progress::format_bytes(payload.size));
 
     // The relay bounds and accounts for what actually crosses it, which is
@@ -158,7 +174,7 @@ pub async fn run(
     // printed the path is fixed, because the two paths name their nameplates
     // differently and the code carries one of them.
     if options.path != direct::Path::Relay {
-        match try_direct(&mut options, payload, sealed_size).await {
+        match try_direct(&mut options, payload, sealed_size, &cancel).await {
             Ok(outcome) => return outcome,
             Err(failed) => {
                 direct::may_fall_back(
@@ -174,13 +190,21 @@ pub async fn run(
                     *failed.payload,
                     sealed_size,
                     direct::Fallback::Rendezvous,
+                    &cancel,
                 )
                 .await;
             }
         }
     }
 
-    send_over_relay(&mut options, payload, sealed_size, direct::Fallback::None).await
+    send_over_relay(
+        &mut options,
+        payload,
+        sealed_size,
+        direct::Fallback::None,
+        &cancel,
+    )
+    .await
 }
 
 /// A direct path that could not be set up, carrying the payload back.
@@ -201,6 +225,7 @@ async fn try_direct(
     options: &mut SendOptions,
     payload: Payload,
     sealed_size: u64,
+    cancel: &Cancel,
 ) -> Result<Result<(), Box<dyn Error + Send + Sync>>, Box<SetupFailed>> {
     eprintln!("Looking for a peer-to-peer path...");
 
@@ -228,7 +253,20 @@ async fn try_direct(
     // them to a nameplate nobody is listening on.
     let endpoint = published.endpoint;
     let result = send_policing_guesses(
-        || endpoint.accept_transfer(),
+        || {
+            let cancel = cancel.clone();
+            let accepting = endpoint.accept_transfer();
+            async move {
+                // Nobody has connected yet, so there is nobody to tell.
+                tokio::select! {
+                    biased;
+                    () = cancel.fired() => Err(crate::transport::TransportError::Cancelled),
+                    accepted = accepting => {
+                        accepted.map(|transport| Cancellable::new(transport, cancel))
+                    }
+                }
+            }
+        },
         &code,
         payload,
         sealed_size,
@@ -260,6 +298,7 @@ async fn send_over_relay(
     payload: Payload,
     sealed_size: u64,
     fallback: direct::Fallback,
+    cancel: &Cancel,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     // Session creation is a blocking HTTP call, so it runs on the blocking
     // pool rather than stalling a runtime worker.
@@ -285,14 +324,16 @@ async fn send_over_relay(
     direct::report(direct::Carrier::Relay, fallback, options.status);
     eprintln!("Waiting for the receiver to connect...");
 
-    let mut transport = relay::connect_sender(&origin, code.nameplate()).await?;
+    let mut transport = Cancellable::new(
+        relay::connect_sender(&origin, code.nameplate()).await?,
+        cancel.clone(),
+    );
 
     match send_transfer(&mut transport, &code, payload, sealed_size).await? {
         Attempt::Done => Ok(()),
-        // Unreachable over the relay, which enforces one guess itself and so
-        // never asks this side for a checkpoint. Stated rather than dismissed:
-        // if it ever does arrive, the sender must not silently continue as
-        // though the transfer had happened.
+        // A wrong code over the relay. The relay has already burned the
+        // session, so there is no second attempt to offer and nobody to ask:
+        // the transfer ends here and says why.
         Attempt::FailedTheCode { what_happened, .. } => {
             Err(format!("the receiver could not open this transfer: {what_happened}").into())
         }
@@ -328,6 +369,7 @@ pub(crate) async fn send_transfer<T: Transport>(
 ) -> Result<Attempt, Box<dyn Error + Send + Sync>> {
     transport.await_peer().await?;
     eprintln!("Receiver connected.");
+    direct::state("connected");
 
     let keys = exchange_keys(transport, code).await?;
     let mut sealer = crypto::Sealer::new(&keys, payload.size);
@@ -339,6 +381,8 @@ pub(crate) async fn send_transfer<T: Transport>(
             filename: payload.filename.clone(),
             mime_type: payload.mime_type.clone(),
             plaintext_size: payload.size,
+            entry_count: payload.entry_count,
+            unpacked_size: payload.unpacked_size,
         },
     )?;
 
@@ -351,26 +395,44 @@ pub(crate) async fn send_transfer<T: Transport>(
         }))
         .await?;
 
-    // Nothing has been streamed yet, and on the direct path nothing will be
-    // until the peer proves it opened what was just sent.
-    if transport.peers_enforce_one_guess()
-        && let Some(what_happened) = await_meta_checkpoint(transport).await?
-    {
+    // Nothing has been streamed yet, and nothing will be until the peer proves
+    // it opened what was just sent.
+    if let Some(what_happened) = await_meta_checkpoint(transport, &keys).await? {
         transport.close().await;
 
         return Ok(Attempt::FailedTheCode {
             what_happened,
-            payload,
+            payload: Box::new(payload),
         });
     }
+
+    // Nor until the receiver has seen what this is and agreed to it.
+    direct::state("code-ok");
+    eprintln!("The receiver entered the code and is deciding whether to accept...");
+    if let Err(ended) = await_consent(transport).await {
+        transport.close().await;
+        return Err(ended);
+    }
+    eprintln!("Accepted.");
+    direct::state("accepted");
 
     let total = payload.size;
     let result = stream_payload(transport, payload, &mut sealer, sealed_size).await;
 
     if let Err(error) = result {
-        // Tell the peer this transfer is over so the receiver is not left
-        // waiting on a session that will never finish.
-        let _ = transport.send_control(json!({ "type": "cancel" })).await;
+        // A failure on this side, reading or sealing the payload, is news to
+        // the receiver, so tell it rather than leave it waiting on a session
+        // that will never finish. A failure that came from the other side, or
+        // from a person cancelling here, has already been said.
+        let already_said = error.downcast_ref::<Ended>().is_some()
+            || error
+                .downcast_ref::<crate::transport::TransportError>()
+                .is_some();
+        if !already_said {
+            let _ = transport
+                .send_control(json!({ "type": "cancel", "reason": "read_failed" }))
+                .await;
+        }
         transport.close().await;
         return Err(error);
     }
@@ -379,6 +441,7 @@ pub(crate) async fn send_transfer<T: Transport>(
     transport.close().await;
 
     eprintln!("Sent {}.", crate::progress::format_bytes(total));
+    direct::state("done");
     Ok(Attempt::Done)
 }
 
@@ -508,7 +571,7 @@ where
             } => {
                 // Handed back rather than re-read: nothing was streamed, so a
                 // retry costs a connection and not the file.
-                payload = returned;
+                payload = *returned;
 
                 if !approver.allow(attempt, what_happened).await {
                     return Err(format!(
@@ -525,17 +588,33 @@ where
     }
 }
 
-/// Waits for the peer to say it opened the metadata, on a carrier where
-/// nobody else is limiting guesses.
+/// Waits for the peer to prove it opened the metadata.
 ///
-/// This is the moment the direct path adds to the protocol, and the reason it
-/// has to exist: without it the sender streams an entire payload before
-/// learning anything about the peer, so a wrong guess costs an attacker one
-/// connection and reveals one bit — an unlimited online oracle against a
-/// 33-bit password.
+/// This is the moment the protocol puts between a code and a payload. On the
+/// direct path it is the whole of the one-guess enforcement: without it the
+/// sender streams an entire payload before learning anything about the peer, so
+/// a wrong guess costs an attacker one connection and reveals one bit, which is
+/// an unlimited online oracle against a 33-bit password. Over the relay the
+/// relay enforces one guess itself, and this is what lets the sender know the
+/// code was right before a byte moves.
 ///
-/// Every way of not hearing `meta_ok` is the same outcome. See
-/// [`FailedTheCode`].
+/// The peer's `meta_ok` must carry a key confirmation these keys accept. A bare
+/// `meta_ok` is a claim, and the party making it is the party being
+/// rate-limited: a wrong guesser could send it anyway, the attempt counter
+/// would never climb, and nobody would be asked. See
+/// `docs/plans/meta-ok-key-confirmation-plan-2026-08-31.md`.
+///
+/// Every way of not hearing a valid `meta_ok` is the same outcome. See
+/// [`Attempt::FailedTheCode`].
+///
+/// # What is skipped, and only where
+///
+/// Over the relay, the relay narrates between `meta` and the peer's answer: it
+/// reports `sending` once it accepts `meta`, and throttled `progress`. Those
+/// are the relay's words, not the peer's, so they are read past. On the direct
+/// path there is no narrator, and any frame but `meta_ok` is the peer not
+/// answering the question. The deadline covers the whole wait either way, so
+/// nothing a peer sends can hold it open.
 ///
 /// # On cancelling a read
 ///
@@ -549,20 +628,47 @@ where
 /// having been left mid-frame.
 async fn await_meta_checkpoint<T: Transport>(
     transport: &mut T,
+    keys: &crypto::SessionKeys,
 ) -> Result<Option<&'static str>, Box<dyn Error + Send + Sync>> {
-    // Exactly one frame, deliberately. The peer has one thing to say here and
-    // a loop that tolerated anything else would be a loop an attacker could
-    // hold open, which is the shape this checkpoint exists to close.
-    let deadline = tokio::time::timeout(META_CHECKPOINT_TIMEOUT, transport.receive()).await;
+    let relay_narrates = !transport.peers_enforce_one_guess();
 
-    let outcome: Result<Option<&'static str>, Box<dyn Error + Send + Sync>> = match deadline {
+    let answer = tokio::time::timeout(META_CHECKPOINT_TIMEOUT, async {
+        loop {
+            match transport.receive().await? {
+                Some(Frame::Control(payload))
+                    if relay_narrates
+                        && matches!(payload["type"].as_str(), Some("status" | "progress")) =>
+                {
+                    continue;
+                }
+                other => return Ok::<_, crate::transport::TransportError>(other),
+            }
+        }
+    })
+    .await;
+
+    let outcome: Result<Option<&'static str>, Box<dyn Error + Send + Sync>> = match answer {
         Err(_) => Ok(Some("it stopped responding")),
         Ok(Err(error)) => Err(error.into()),
         Ok(Ok(None)) => Ok(Some("it disconnected without answering")),
         // A peer that sends payload here is not answering the question.
         Ok(Ok(Some(Frame::Chunk(_)))) => Ok(Some("it sent data instead of answering")),
         Ok(Ok(Some(Frame::Control(payload)))) => Ok(match payload["type"].as_str() {
-            Some("meta_ok") => None,
+            Some("meta_ok") => {
+                let proven = payload["confirmation"]
+                    .as_str()
+                    .and_then(|hex| crypto::from_hex(hex).ok())
+                    .is_some_and(|offered| keys.confirms(&offered));
+
+                // Counted exactly like every other failure: one attempt. The
+                // words say what was observed, as the other outcomes' do, and
+                // not whether the peer was honest, which cannot be known.
+                if proven {
+                    None
+                } else {
+                    Some("it could not prove it opened the transfer")
+                }
+            }
             Some("error") => Some("it reported that the code did not open it"),
             // Anything else is a peer not following the protocol, which is what
             // a peer probing the code looks like.
@@ -571,6 +677,60 @@ async fn await_meta_checkpoint<T: Transport>(
     };
 
     outcome
+}
+
+/// Waits for the receiver to accept the transfer it has been shown.
+///
+/// Anything other than `accept` ends the transfer, and says how in the
+/// receiver's terms: declined, did not answer in time, or cancelled. The
+/// relay's narration is read past; a peer never sends it.
+async fn await_consent<T: Transport>(
+    transport: &mut T,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let answer = tokio::time::timeout(CONSENT_TIMEOUT, async {
+        loop {
+            let Some(frame) = transport.receive().await? else {
+                return Err::<(), Box<dyn Error + Send + Sync>>(
+                    "the receiver went away without answering".into(),
+                );
+            };
+
+            let Frame::Control(payload) = frame else {
+                return Err("the receiver sent data instead of answering".into());
+            };
+
+            match payload["type"].as_str() {
+                Some("accept") => return Ok(()),
+                Some("decline") => {
+                    direct::state("declined");
+                    let why = match payload["reason"].as_str() {
+                        Some("timed_out") => {
+                            "the receiver did not answer within two minutes, so the transfer \
+                             was declined"
+                        }
+                        _ => "the receiver declined the transfer",
+                    };
+                    return Err(Ended::Declined(why.to_string()).into());
+                }
+                Some("cancel") => {
+                    direct::state("cancelled");
+                    return Err(Ended::PeerCancelled(crate::consent::peer_cancelled(
+                        "receiver",
+                        payload["reason"].as_str(),
+                    ))
+                    .into());
+                }
+                Some("error") => return Err(relay_error(&payload).into()),
+                _ => {}
+            }
+        }
+    })
+    .await;
+
+    match answer {
+        Ok(result) => result,
+        Err(_) => Err("the receiver stopped responding before accepting".into()),
+    }
 }
 
 /// Runs the key exchange and returns the derived session keys.
@@ -640,9 +800,20 @@ async fn stream_payload<T: Transport>(
             break;
         };
 
+        // Hear the peer between chunks, not only when the window is full. A
+        // receiver that cancels is followed by the relay closing the socket,
+        // and a sender that only writes never answers that close, so it ends
+        // in a reset. Windows discards unread data on a reset, the `cancel`
+        // with it, and the sender reported "connection aborted" instead of the
+        // receiver's reason. Looking first finds the `cancel` while it is still
+        // there.
+        acknowledged = hear_peer_while_streaming(transport, acknowledged).await?;
+
         let sealed = sealer.seal_chunk(&chunk?)?;
         sent += sealed.len() as u64;
-        transport.send_chunk(sealed).await?;
+        if let Err(error) = transport.send_chunk(sealed).await {
+            return Err(explain_write_failure(transport, error).await);
+        }
         progress.update(acknowledged);
     }
 
@@ -668,6 +839,95 @@ async fn stream_payload<T: Transport>(
     Ok(())
 }
 
+/// Reads whatever the peer has already said, without waiting for more.
+///
+/// Acknowledgements move the window forward. A `cancel` or an `error` ends the
+/// transfer with the peer's reason. Nothing arrived is the usual answer, and
+/// costs one poll. Safe to abandon because a receive must be cancel-safe.
+async fn hear_peer_while_streaming<T: Transport>(
+    transport: &mut T,
+    mut acknowledged: u64,
+) -> Result<u64, Box<dyn Error + Send + Sync>> {
+    loop {
+        // A zero timeout polls the receive once and gives up if nothing is
+        // ready.
+        let Ok(frame) = tokio::time::timeout(Duration::ZERO, transport.receive()).await else {
+            return Ok(acknowledged);
+        };
+
+        let Some(Frame::Control(payload)) = frame? else {
+            // `None` is the connection closing; the next write reports it with
+            // `explain_write_failure`, which has the better sentence.
+            return Ok(acknowledged);
+        };
+
+        match payload["type"].as_str() {
+            Some("ack") | Some("chunk_ack") => {
+                if let Some(bytes) = payload["bytes_received"].as_u64() {
+                    acknowledged = acknowledged.max(bytes);
+                }
+            }
+            Some("cancel") => {
+                direct::state("cancelled");
+                return Err(Ended::PeerCancelled(crate::consent::peer_cancelled(
+                    "receiver",
+                    payload["reason"].as_str(),
+                ))
+                .into());
+            }
+            Some("error") => return Err(relay_error(&payload).into()),
+            _ => {}
+        }
+    }
+}
+
+/// Turns a failed write into the reason the peer gave, if it gave one.
+///
+/// A peer that stops a transfer says so and the connection closes behind it.
+/// The sender is usually mid-write when that happens, so the write fails
+/// first, as a broken pipe or a reset, and the peer's explanation is still
+/// sitting unread. Reporting the broken pipe would describe the symptom and
+/// hide the cause. So before giving up, read what already arrived, briefly,
+/// and prefer the peer's words.
+async fn explain_write_failure<T: Transport>(
+    transport: &mut T,
+    error: crate::transport::TransportError,
+) -> Box<dyn Error + Send + Sync> {
+    if !matches!(error, crate::transport::TransportError::Io(_)) {
+        return error.into();
+    }
+
+    let explanation = tokio::time::timeout(Duration::from_millis(500), async {
+        while let Ok(Some(frame)) = transport.receive().await {
+            let Frame::Control(payload) = frame else {
+                continue;
+            };
+
+            match payload["type"].as_str() {
+                Some("cancel") => {
+                    direct::state("cancelled");
+                    return Some(
+                        Ended::PeerCancelled(crate::consent::peer_cancelled(
+                            "receiver",
+                            payload["reason"].as_str(),
+                        ))
+                        .into(),
+                    );
+                }
+                Some("error") => return Some(relay_error(&payload).into()),
+                // Acknowledgements and narration that were already on their
+                // way; the explanation, if there is one, is behind them.
+                _ => {}
+            }
+        }
+
+        None
+    })
+    .await;
+
+    explanation.ok().flatten().unwrap_or_else(|| error.into())
+}
+
 async fn next_acknowledgement<T: Transport>(
     transport: &mut T,
     current: u64,
@@ -685,6 +945,14 @@ async fn next_acknowledgement<T: Transport>(
                 if let Some(bytes) = payload["bytes_received"].as_u64() {
                     return Ok(bytes.max(current));
                 }
+            }
+            Some("cancel") => {
+                direct::state("cancelled");
+                return Err(Ended::PeerCancelled(crate::consent::peer_cancelled(
+                    "receiver",
+                    payload["reason"].as_str(),
+                ))
+                .into());
             }
             Some("error") => return Err(relay_error(&payload).into()),
             _ => {}
@@ -734,6 +1002,18 @@ async fn await_completion<T: Transport>(
                 }
                 _ => {}
             },
+            Some("finishing") => {
+                eprintln!("The receiver has everything and is finishing up...");
+                direct::state("finishing");
+            }
+            Some("cancel") => {
+                direct::state("cancelled");
+                return Err(Ended::PeerCancelled(crate::consent::peer_cancelled(
+                    "receiver",
+                    payload["reason"].as_str(),
+                ))
+                .into());
+            }
             Some("error") => return Err(relay_error(&payload).into()),
             _ => {}
         }
@@ -742,11 +1022,16 @@ async fn await_completion<T: Transport>(
     Err("the transfer connection closed before the receiver confirmed the file".into())
 }
 
+/// The message in an `error` frame, made safe to print.
+///
+/// The relay wrote it, or on the direct path the receiver did. Neither is
+/// trusted to put bytes on this terminal.
 fn relay_error(payload: &Value) -> String {
-    payload["message"]
-        .as_str()
-        .unwrap_or("the relay reported an error")
-        .to_string()
+    crate::display::peer_message(
+        payload["message"]
+            .as_str()
+            .unwrap_or("the relay reported an error"),
+    )
 }
 
 #[cfg(test)]
@@ -759,24 +1044,99 @@ mod tests {
     use serde_json::{Value, json};
     use std::{collections::VecDeque, path::PathBuf};
 
-    /// The happy path of the checkpoint: the peer opened the metadata, so the
-    /// payload may follow.
-    #[tokio::test]
-    async fn a_peer_that_opened_the_metadata_passes_the_checkpoint() {
-        let mut transport = ScriptedTransport::saying(vec![json!({ "type": "meta_ok" })]).direct();
+    use crate::{crypto, transport::Frame};
 
-        let outcome = await_meta_checkpoint(&mut transport)
+    /// Keys two peers agree on when both typed `code`, sender's first.
+    fn agreed_keys(
+        sender_code: &str,
+        receiver_code: &str,
+    ) -> (crypto::SessionKeys, crypto::SessionKeys) {
+        let sender_code = crypto::TransferCode::parse(sender_code).expect("a code");
+        let receiver_code = crypto::TransferCode::parse(receiver_code).expect("a code");
+        let (sender, sender_half) = crypto::Handshake::start(&sender_code);
+        let (receiver, receiver_half) = crypto::Handshake::start(&receiver_code);
+
+        (
+            sender.finish(&receiver_half).expect("well formed"),
+            receiver.finish(&sender_half).expect("well formed"),
+        )
+    }
+
+    const CODE: &str = "A1B2C3-abandon-ability-able";
+
+    fn meta_ok_from(keys: &crypto::SessionKeys) -> Value {
+        json!({ "type": "meta_ok", "confirmation": crypto::to_hex(&keys.confirmation()) })
+    }
+
+    /// The happy path of the checkpoint: the peer proved it opened the
+    /// metadata, so the payload may follow.
+    #[tokio::test]
+    async fn a_peer_that_proves_it_opened_the_metadata_passes_the_checkpoint() {
+        let (sender, receiver) = agreed_keys(CODE, CODE);
+        let mut transport = ScriptedTransport::saying(vec![meta_ok_from(&receiver)]).direct();
+
+        let outcome = await_meta_checkpoint(&mut transport, &sender)
             .await
             .expect("the peer answered");
 
         assert!(outcome.is_none(), "unexpected failure: {outcome:?}");
     }
 
-    /// Every way of not hearing `meta_ok` is one consumed attempt, and the
-    /// caller has to be able to tell that apart from a broken network without
-    /// reading the message. `docs/decisions.md` entry 13.
+    /// The gap the confirmation closes. A peer that guessed wrong cannot open
+    /// the metadata, but nothing stopped it saying it had, and before version 2
+    /// that was enough: the attempt counter never climbed and nobody was asked.
+    #[tokio::test]
+    async fn claiming_success_without_proving_it_is_a_failed_guess() {
+        let (sender, _) = agreed_keys(CODE, CODE);
+        let (_, wrong) = agreed_keys(CODE, "A1B2C3-abandon-ability-above");
+
+        let claims = [
+            (
+                "a bare meta_ok, as version 1 sent",
+                json!({ "type": "meta_ok" }),
+            ),
+            ("a confirmation from the wrong keys", meta_ok_from(&wrong)),
+            (
+                "a confirmation that is not hex",
+                json!({ "type": "meta_ok", "confirmation": "not hex at all" }),
+            ),
+            (
+                "a confirmation of the wrong length",
+                json!({ "type": "meta_ok", "confirmation": "00ff" }),
+            ),
+            (
+                "a confirmation that is not a string",
+                json!({ "type": "meta_ok", "confirmation": 42 }),
+            ),
+        ];
+
+        for (what, claim) in claims {
+            for direct in [true, false] {
+                let transport = ScriptedTransport::saying(vec![claim.clone()]);
+                let mut transport = if direct {
+                    transport.direct()
+                } else {
+                    transport
+                };
+
+                let outcome = await_meta_checkpoint(&mut transport, &sender)
+                    .await
+                    .expect("an unproven claim is not a transport failure");
+
+                assert!(
+                    outcome.is_some(),
+                    "{what} passed the checkpoint (direct: {direct})"
+                );
+            }
+        }
+    }
+
+    /// Every way of not hearing a proven `meta_ok` is one consumed attempt,
+    /// and the caller has to be able to tell that apart from a broken network
+    /// without reading the message. `docs/decisions.md` entry 13.
     #[tokio::test]
     async fn every_way_of_not_answering_is_the_same_failed_guess() {
+        let (sender, _) = agreed_keys(CODE, CODE);
         let scripts = [
             ("an explicit refusal", vec![json!({ "type": "error" })]),
             ("silence, then a hang-up", vec![]),
@@ -789,7 +1149,7 @@ mod tests {
         for (what, script) in scripts {
             let mut transport = ScriptedTransport::saying(script).direct();
 
-            let outcome = await_meta_checkpoint(&mut transport)
+            let outcome = await_meta_checkpoint(&mut transport, &sender)
                 .await
                 .expect("a peer that will not answer is not a transport failure");
 
@@ -800,31 +1160,94 @@ mod tests {
         }
     }
 
-    /// A peer that says the right things, in the order the sender asks for
-    /// them.
-    ///
-    /// The key exchange half has to be real: SPAKE2 succeeds for anyone, which
-    /// is exactly why a wrong password surfaces at the metadata instead, and a
-    /// fabricated half would fail earlier than the protocol does and test the
-    /// wrong thing.
-    fn a_peer_that_completes(code: &crate::crypto::TransferCode, sealed_size: u64) -> Vec<Value> {
-        let (_, half) = crate::crypto::Handshake::start(code);
+    /// Over the relay, the relay speaks between `meta` and the peer's answer,
+    /// and those are its words rather than the peer's. On the direct path
+    /// nobody narrates, so the same frame is a peer not answering.
+    #[tokio::test]
+    async fn the_relays_narration_is_read_past_and_a_direct_peers_is_not() {
+        let (sender, receiver) = agreed_keys(CODE, CODE);
+        let script = || {
+            vec![
+                json!({ "type": "status", "status": "sending" }),
+                json!({ "type": "progress", "bytes_transferred": 0, "total_bytes": 10 }),
+                meta_ok_from(&receiver),
+            ]
+        };
 
-        vec![
-            json!({ "type": "key_exchange", "message": crate::crypto::to_hex(&half) }),
-            json!({ "type": "meta_ok" }),
-            json!({ "type": "ack", "bytes_received": sealed_size }),
-            json!({ "type": "complete", "bytes_received": sealed_size }),
-        ]
+        let mut relayed = ScriptedTransport::saying(script());
+        let outcome = await_meta_checkpoint(&mut relayed, &sender)
+            .await
+            .expect("answered");
+        assert!(
+            outcome.is_none(),
+            "the relay's narration was taken for an answer"
+        );
+
+        let mut direct = ScriptedTransport::saying(script()).direct();
+        let outcome = await_meta_checkpoint(&mut direct, &sender)
+            .await
+            .expect("answered");
+        assert!(
+            outcome.is_some(),
+            "a direct peer sent something other than meta_ok first and passed anyway"
+        );
+    }
+
+    /// A receiver that knows the code, and runs a real handshake to prove it.
+    ///
+    /// It has to react rather than replay. Its confirmation depends on the
+    /// sender's handshake half, which is fresh every run, so no fixed script
+    /// could hold it.
+    fn a_peer_that_completes(code: &crypto::TransferCode, sealed_size: u64) -> ScriptedTransport {
+        let (handshake, half) = crypto::Handshake::start(code);
+        let mut handshake = Some(handshake);
+        let mut keys = None;
+        let mut received = 0_u64;
+
+        ScriptedTransport::responding(move |frame| match frame {
+            Frame::Control(sent) if sent["type"] == "key_exchange" => {
+                let sender_half =
+                    crypto::from_hex(sent["message"].as_str().expect("a half")).expect("hex");
+                keys = Some(
+                    handshake
+                        .take()
+                        .expect("one key exchange")
+                        .finish(&sender_half)
+                        .expect("well formed"),
+                );
+                vec![Frame::Control(
+                    json!({ "type": "key_exchange", "message": crypto::to_hex(&half) }),
+                )]
+            }
+            Frame::Control(sent) if sent["type"] == "meta" => vec![
+                Frame::Control(meta_ok_from(keys.as_ref().expect("keys first"))),
+                Frame::Control(json!({ "type": "accept" })),
+            ],
+            Frame::Chunk(chunk) => {
+                received += chunk.len() as u64;
+                if received == sealed_size {
+                    vec![Frame::Control(
+                        json!({ "type": "chunk_ack", "bytes_received": received }),
+                    )]
+                } else {
+                    vec![]
+                }
+            }
+            Frame::Control(sent) if sent["type"] == "complete" => vec![Frame::Control(
+                json!({ "type": "complete", "bytes_received": received }),
+            )],
+            Frame::Control(_) => vec![],
+        })
+        .direct()
     }
 
     /// A peer that gets through the handshake and then cannot open what it was
     /// sent — a mistype, or a guess. They look identical from here.
-    fn a_peer_that_fails_the_code(code: &crate::crypto::TransferCode) -> Vec<Value> {
-        let (_, half) = crate::crypto::Handshake::start(code);
+    fn a_peer_that_fails_the_code(code: &crypto::TransferCode) -> Vec<Value> {
+        let (_, half) = crypto::Handshake::start(code);
 
         vec![
-            json!({ "type": "key_exchange", "message": crate::crypto::to_hex(&half) }),
+            json!({ "type": "key_exchange", "message": crypto::to_hex(&half) }),
             json!({ "type": "error", "message": "the code did not open this transfer" }),
         ]
     }
@@ -873,7 +1296,7 @@ mod tests {
 
         let mut attempts = VecDeque::from(vec![
             ScriptedTransport::saying(a_peer_that_fails_the_code(&code)).direct(),
-            ScriptedTransport::saying(a_peer_that_completes(&code, sealed_size)).direct(),
+            a_peer_that_completes(&code, sealed_size),
         ]);
         let accept = move || {
             let next = attempts.pop_front().expect("an attempt was prepared");
@@ -909,7 +1332,7 @@ mod tests {
         // would be a second guess nobody approved.
         let mut attempts = VecDeque::from(vec![
             ScriptedTransport::saying(a_peer_that_fails_the_code(&code)).direct(),
-            ScriptedTransport::saying(a_peer_that_completes(&code, sealed_size)).direct(),
+            a_peer_that_completes(&code, sealed_size),
         ]);
         let mut accepted = 0;
         let accept = move || {
@@ -979,20 +1402,6 @@ mod tests {
         assert!(
             !approver.allow(1, "it stopped responding").await,
             "a sender with no terminal must be strict"
-        );
-    }
-
-    /// The security-critical half of the carrier split, stated from the
-    /// sender's side: over the relay this checkpoint is not merely unnecessary,
-    /// it must not happen. A relay receiver sends no `meta_ok`, so a sender
-    /// that waited for one would hang on every relay transfer.
-    #[tokio::test]
-    async fn the_relay_path_is_not_asked_to_pass_a_checkpoint() {
-        let transport = ScriptedTransport::saying(vec![]);
-
-        assert!(
-            !crate::transport::Transport::peers_enforce_one_guess(&transport),
-            "the relay enforces one guess itself, so the peers must not"
         );
     }
 

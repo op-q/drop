@@ -20,10 +20,11 @@ use super::{Frame, Transport, TransportError, framed::FramedTransport};
 
 /// Names this protocol and its framing on the wire.
 ///
-/// Bump the integer whenever the framing changes. A peer speaking a different
-/// version is refused by iroh before either side allocates anything, which is
-/// cheaper and clearer than discovering the mismatch in a frame header.
-pub const DROP_ALPN: &[u8] = b"drop/transfer/1";
+/// Bumped with [`crate::crypto::ENVELOPE_VERSION`], and whenever the framing
+/// changes. A peer speaking a different version is refused by iroh before
+/// either side allocates anything, which is cheaper and clearer than
+/// discovering the mismatch in a frame header.
+pub const DROP_ALPN: &[u8] = b"drop/transfer/2";
 
 /// How long to wait for a home relay before giving up on being reachable.
 ///
@@ -148,14 +149,28 @@ impl QuicEndpoint {
     /// the transfer with nothing to explain why. What replaces it is not a
     /// looser rule but a differently enforced one: the caller may come back for
     /// another attempt, and entry 13 requires it to ask a human first.
+    ///
+    /// **A connection attempt that fails its handshake is ignored**, and the
+    /// wait goes on. It is not the receiver: the receiver's endpoint completes
+    /// the handshake, or it could not have dialled this one by its id. It is not
+    /// a guess either, since a guess is only made after a completed handshake,
+    /// over the transfer's own key exchange, so it costs nothing against the
+    /// one-guess rule. It used to end the whole send. A stray packet was
+    /// enough, and the network lab caught one: a late reply from a relay's
+    /// address-discovery port arrived on the sender's socket, failed with
+    /// `authentication failed`, and killed the direct path in most runs. On a
+    /// public address anyone could do the same on purpose.
     pub async fn accept_transfer(&self) -> Result<QuicTransport, TransportError> {
-        let incoming = self.endpoint.accept().await.ok_or_else(|| {
-            TransportError::Connect("the endpoint closed before a peer connected".into())
-        })?;
+        let connection = loop {
+            let incoming = self.endpoint.accept().await.ok_or_else(|| {
+                TransportError::Connect("the endpoint closed before a peer connected".into())
+            })?;
 
-        let connection = incoming.await.map_err(|error| {
-            TransportError::Connect(format!("a peer failed to complete the handshake: {error}"))
-        })?;
+            match incoming.await {
+                Ok(connection) => break connection,
+                Err(_) => continue,
+            }
+        };
 
         let (send, recv) = connection.open_bi().await.map_err(|error| {
             TransportError::Io(format!("could not open a transfer stream: {error}"))
@@ -421,14 +436,17 @@ mod tests {
         sender.shutdown().await;
     }
 
-    /// The ALPN is the version gate. Two builds whose framing disagrees must
-    /// fail to connect rather than meet and misparse each other.
+    /// The ALPN is the version gate on the direct path. Two builds whose
+    /// protocol disagrees must fail to connect rather than meet and misparse
+    /// each other, so it carries the same number the envelope does, and a bump
+    /// to one without the other fails here.
     #[test]
-    fn the_alpn_names_a_version() {
-        assert!(
-            DROP_ALPN.ends_with(b"/1"),
-            "the ALPN must carry a version to bump: {}",
-            String::from_utf8_lossy(DROP_ALPN)
+    fn the_alpn_carries_the_protocol_version() {
+        let expected = format!("drop/transfer/{}", crate::crypto::ENVELOPE_VERSION);
+        assert_eq!(
+            String::from_utf8_lossy(DROP_ALPN),
+            expected,
+            "the ALPN and the envelope version must move together"
         );
     }
 
@@ -515,7 +533,9 @@ mod tests {
                         out_dir: destination,
                         extract: true,
                         force: true,
+                        acceptance: crate::consent::Acceptance::Yes,
                     },
+                    &mut crate::consent::Acceptance::Yes,
                 )
                 .await
                 .map_err(|error| error.to_string())
@@ -541,5 +561,86 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A connection attempt that fails its handshake must not end the wait
+    /// for the real receiver.
+    ///
+    /// The shape the network lab caught: something that is not the receiver
+    /// reaches the sender's socket first with a QUIC Initial that cannot be
+    /// authenticated (there, a late reply from a relay's address-discovery
+    /// port). Here it is sent on purpose, as anyone on the network could, and
+    /// then the real receiver connects. **Negative control:** with
+    /// `accept_transfer` returning the handshake error, as it did, this fails
+    /// with "a peer failed to complete the handshake".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stray_handshake_does_not_end_the_wait_for_the_receiver() {
+        let sender = QuicEndpoint::bind_without_relays()
+            .await
+            .expect("a sender endpoint");
+        let receiver = QuicEndpoint::bind_without_relays()
+            .await
+            .expect("a receiver endpoint");
+        let address = sender.addr();
+
+        let target = *address
+            .ip_addrs()
+            .find(|addr| addr.is_ipv4())
+            .expect("an IPv4 address to aim at");
+        let target = std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), target.port());
+
+        // Holds the accepted connection and speaks first, as a real sender
+        // does, so the receiver's side resolves on a live stream rather than
+        // racing a connection being dropped.
+        let accepting = tokio::spawn(async move {
+            let mut transport = sender.accept_transfer().await?;
+            transport
+                .send_control(serde_json::json!({ "type": "hello" }))
+                .await?;
+            Ok::<_, crate::transport::TransportError>((sender, transport))
+        });
+
+        // A QUIC v1 Initial that parses as one and cannot be decrypted: a
+        // long header, random connection ids, and a payload of noise, padded
+        // to the 1200 bytes an Initial must be.
+        let mut packet = vec![0xC3_u8, 0x00, 0x00, 0x00, 0x01, 8];
+        packet.extend_from_slice(&[0x5A; 8]);
+        packet.push(8);
+        packet.extend_from_slice(&[0xA5; 8]);
+        packet.push(0x00);
+        let remaining = 1200 - packet.len() - 2;
+        packet.extend_from_slice(&[0x40 | ((remaining >> 8) as u8), remaining as u8]);
+        packet.extend((0..remaining).map(|index| (index * 131 % 251) as u8));
+
+        let stray = std::net::UdpSocket::bind("127.0.0.1:0").expect("a stray socket");
+        for _ in 0..3 {
+            stray
+                .send_to(&packet, target)
+                .expect("the stray packet was sent");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let mut connected =
+            tokio::time::timeout(Duration::from_secs(10), receiver.connect_transfer(address))
+                .await
+                .expect("the receiver connected in time")
+                .expect("the receiver could not connect");
+
+        let (sender, mut accepted) = tokio::time::timeout(Duration::from_secs(10), accepting)
+            .await
+            .expect("the sender accepted in time")
+            .expect("the accepting task ran")
+            .unwrap_or_else(|error| {
+                panic!("a stray handshake ended the wait for the real receiver: {error}")
+            });
+
+        let Some(Frame::Control(frame)) = connected.receive().await.expect("a frame") else {
+            panic!("the real receiver should hear the sender over a live stream");
+        };
+        assert_eq!(frame["type"], "hello");
+
+        accepted.close().await;
+        sender.shutdown().await;
+        receiver.shutdown().await;
     }
 }

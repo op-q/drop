@@ -29,7 +29,7 @@ body:
     id: tradeoffs
     attributes:
       label: Security, privacy, and operational tradeoffs
-      description: Note persistence, encryption, resource, browser, protocol, or deployment implications.
+      description: Note persistence, encryption, resource, platform, protocol, or deployment implications.
 
   - type: checkboxes
     id: fit

@@ -21,30 +21,30 @@ the secret half of the transfer code by SPAKE2, and that half never reaches the
 relay; what crosses it is ciphertext, a byte count, and a nameplate that routes
 the two peers together. See [`decisions.md`](decisions.md) entry 7.
 
-**The CLI case and the browser case are not the same, and must never be
-described in wording that blurs them.**
+**CLI to CLI is end-to-end encrypted.** The binary is fetched once, out of
+band, and the relay has no part in delivering it.
 
-- **CLI to CLI is end-to-end encrypted.** The binary is fetched once, out of
-  band, and the relay has no part in delivering it.
-- **Browser transfers are encrypted in the browser, and are only as strong as
-  the code the site delivered.** The page fetches its JavaScript and the
-  WebAssembly envelope from the same origin as the relay, so an operator
-  willing to serve modified client code can capture a transfer at the point
-  where it is still plaintext. Compiling the envelope from the same Rust the
-  CLI uses (entry 11) removes a class of implementation bugs; it does not
-  remove this. What browser encryption does defeat is a passive operator, a
-  compromised store of relayed traffic, and anyone who obtains the ciphertext
-  later.
+**No browser client ships** since 0.4.0 ([`decisions.md`](decisions.md) entry
+17). The rule it lived under still binds any future one, and is kept here so it
+is not rediscovered the hard way: **a browser transfer is encrypted in the
+browser, and is only as strong as the code the site delivered.** A page that
+fetches its JavaScript and envelope from an operator's origin lets that
+operator, if willing to serve modified client code, capture a transfer where it
+is still plaintext. Compiling the envelope from the same Rust the CLI uses
+(entry 11) removes a class of implementation bugs; it does not remove this. What
+browser encryption does defeat is a passive operator, a compromised store of
+relayed traffic, and anyone who obtains the ciphertext later. Never describe the
+two cases in wording that blurs them.
 
-Do not describe Drop as peer-to-peer.
+Do not describe Drop as a whole as peer-to-peer. The direct path is; a transfer
+that falls back to the relay is not.
 
 ## What the relay does not do
 
 - It does not write transferred file bytes to application storage.
 - It does not retain a session after completion, cancellation, disconnect, or
   five minutes without activity.
-- It does not send telemetry, upload anything externally, or make third-party
-  browser requests.
+- It does not send telemetry or upload anything externally.
 
 The no-storage property is an application guarantee. Operating-system, proxy,
 and infrastructure behavior is outside it — a kernel buffer, a swap file, or an
@@ -105,8 +105,9 @@ not, and confusing the two is how a path ships without either.
 Over the relay this is server-side and invisible to both peers. Over a direct
 connection there is no server, so the sender does it: it sends nothing until
 the peer proves it opened the sealed metadata, and a peer that fails — by
-saying so, by timing out, or by vanishing, which count the same — consumes the
-transfer. The sender then asks the person in front of it:
+saying so, by timing out, by vanishing, or by claiming success it cannot prove,
+which all count the same — consumes the transfer. The sender then asks the
+person in front of it:
 
 ```text
 A peer connected and failed the code.
@@ -120,6 +121,25 @@ human speed and — the part that matters more than the bits — *makes it
 visible*: the attempt counter climbs where the sender's owner can see it. A
 sender with no terminal allows nothing, so unattended use gets the strict
 behaviour.
+
+**The proof is what makes the prompt mean something.** Until protocol version
+2 the peer's answer was a bare `meta_ok`, an assertion made by the party being
+limited. A wrong guesser could send it anyway: the transfer was still consumed
+and nothing readable leaked, but the attempt counter never climbed and nobody
+was asked, so being probed was invisible. Since version 2 `meta_ok` carries a
+32-byte key confirmation, a fourth HKDF output only a peer holding the same
+keys can produce, and the sender checks it in constant time
+(`SessionKeys::confirms`, in `crypto/`, so a later `==` cannot creep in at a
+call site). Sending it reveals nothing: it does not lead back to the secret or
+to the other keys, and the sender never sends its own copy, so there is
+nothing to replay. It proves the receiver to the sender, not the other way
+round, and needs no reverse proof: a sender without the keys could not have
+sealed the metadata the receiver just opened. Recorded as
+[`decisions.md`](decisions.md) entry 18.
+
+Over the relay the same checkpoint runs, and a failure ends the transfer rather
+than prompting, since the relay has already burned the session. There it is
+what lets a sender know the code was right before a byte moves.
 
 The denial of service above is unchanged by this and applies to both paths:
 someone who guesses a nameplate can burn a transfer without learning anything.
@@ -140,6 +160,18 @@ path inside it:
 - a symlink is refused if its target leaves the destination, evaluated against
   what is on disk rather than against the target's text;
 - existing files are kept unless `--force` is given;
+- on Windows, a name component Windows would interpret is rewritten, never
+  refused: `:` (which names an alternate data stream, or a drive), the other
+  forbidden characters and control characters become `_`, trailing dots and
+  spaces (which Windows strips) become `_`, and a device name such as `CON` or
+  `nul.txt` gets `_` after its stem. A rewrite changes one component's spelling
+  and cannot introduce a separator, so it cannot move an entry to a different
+  directory. The existence and link checks run on the rewritten path, which is
+  the one written. Every rewrite is reported. `cli/src/names.rs`;
+- a component containing `\` is refused on every platform, because on Windows
+  it would be a separator;
+- an entry whose name the filesystem refuses, or a symlink the system cannot
+  create, is skipped with a warning and extraction continues;
 - permission bits are masked to ownership bits, so an archive cannot set setuid,
   setgid, or sticky;
 - a compressed payload that expands more than a hundredfold is abandoned, which
@@ -152,8 +184,47 @@ entry created.
 A filename is also hostile input for *display*. It is chosen by the sender and
 may contain control characters, ANSI escape sequences, or bidirectional
 overrides. Any surface that renders it — especially a confirmation prompt, where
-misleading the reader is the whole payoff — must render it inert first. The web
-client escapes by default; a terminal does not.
+misleading the reader is the whole payoff — must render it inert first. A
+terminal does not do this for you.
+
+The CLI does this in `cli/src/display.rs`. Every name a peer chose, every
+archive warning that quotes one, and every error message a peer or the relay
+sent passes through it before reaching the terminal. The relay is untrusted, so
+its messages count as peer text too. Control characters, including the bytes
+that begin every escape sequence, and bidirectional and invisible formatting
+characters are **replaced** with `U+FFFD`, not removed, so a doctored name looks
+doctored. Whitespace runs collapse, so padding cannot push an extension out of
+sight. Long names are shortened in the middle, keeping the extension. Only
+display changes: a received file keeps the name its bytes arrived with, subject
+to the path rules above. Until 2026-09-14 the receiver printed the sender's
+filename verbatim in its `Receiving` line.
+
+## Consent before bytes
+
+A receiver used to learn what it was getting only as it arrived. Since protocol
+version 2 it is shown the transfer first, and nothing is created until it
+accepts:
+
+- **The preview is built to be hard to lie with.** The name is sanitised (see
+  above). The type label comes from the extension the file will actually have,
+  not from the MIME type the sender chose, so `invoice.pdf` followed by padding
+  and `.exe` shows as a program. A program extension on any of the three
+  platforms adds a warning line. A folder's file count and unpacked size are the
+  sender's claims and are labelled as such. The extractor's expansion limit,
+  not the claim, bounds what is written.
+- **Declining changes nothing on disk.** The destination is planned by looking,
+  not creating, so no empty file and no reserved numbered name is left behind.
+  A test compares the directory before and after.
+- **The relay cannot accept on the receiver's behalf**, because `accept` is a
+  receiver frame. It can refuse to forward one, which is denial of service, the
+  same power it always had. It can also refuse to carry chunks before `accept`,
+  and does.
+- **Unattended use must be explicit.** Without a terminal, `drop recv` refuses to
+  start unless given `--yes`. Scripts that piped `drop recv` before 0.4.0 need
+  that flag, and the refusal names it.
+- **Reasons are enumerated.** `decline` and `cancel` carry a word from a fixed
+  set. The relay normalises them and each client maps them to its own sentence,
+  so neither the relay nor a peer can put text on the other terminal that way.
 
 ## Resource bounds
 
@@ -220,14 +291,11 @@ publishes the relay and still withholds every private address of the sender's.
 
 Recorded honestly rather than fixed:
 
-- browser transfers are bounded by the code the site delivered, as above;
 - 24-bit session codes, as discussed above;
 - no resume or retry, so a disconnect loses the transfer;
 - release binaries are verified against checksums published in the same release,
   which detects corruption and truncation but not a compromised release. The
-  trust anchor is GitHub; artifacts are not signed;
-- browsers without direct-to-disk download support buffer the whole file in
-  memory, capped at 256 MiB by the web client.
+  trust anchor is GitHub; artifacts are not signed.
 
 ## Reporting
 

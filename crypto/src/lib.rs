@@ -21,15 +21,13 @@ pub use envelope::{
     CHUNK_PLAINTEXT_BYTES, ENVELOPE_VERSION, Metadata, Opener, Sealer, TAG_BYTES, ciphertext_len,
     open_metadata, seal_metadata, total_chunks,
 };
-pub use handshake::{Handshake, SessionKeys};
+pub use handshake::{CONFIRMATION_BYTES, Handshake, SessionKeys};
 pub use rendezvous::{RENDEZVOUS_SECRET_BYTES, rendezvous_secret};
 
 /// The largest payload a transfer may carry, matching the relay's
 /// `MAX_UPLOAD_SIZE_BYTES`. It lives here as well as in the relay because the
 /// envelope reasons about it — it is what keeps chunk indices far below the
-/// metadata counter — and because the browser bindings validate against it
-/// before touching a file. `cli/tests/protocol.rs` holds the two copies
-/// together.
+/// metadata counter. `cli/tests/protocol.rs` holds the two copies together.
 pub const MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Renders opaque bytes for a JSON control frame.

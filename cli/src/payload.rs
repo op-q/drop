@@ -32,6 +32,10 @@ pub struct Payload {
     pub filename: String,
     pub mime_type: String,
     pub size: u64,
+    /// Files in a folder, for the receiver's preview.
+    pub entry_count: Option<u64>,
+    /// Bytes before archiving or compression, for the receiver's preview.
+    pub unpacked_size: Option<u64>,
     pub source: Source,
     /// Present only for a compressed payload: the spool file is deleted when
     /// the payload is dropped, whether the transfer succeeded or not.
@@ -82,7 +86,32 @@ pub async fn wait_for_termination() {
         }
     }
 
-    #[cfg(not(unix))]
+    // On Windows, closing the console window, logging off and shutting down
+    // are events of their own, not Ctrl-C. Unhandled, each killed the process
+    // outright and a compressed send's spool file, a copy of the user's data,
+    // stayed in %TEMP%. Windows allows a few seconds after these events, which
+    // is enough to clean up. Ctrl-Break is the console's other interrupt.
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_logoff, ctrl_shutdown};
+
+        let (Ok(mut close), Ok(mut logoff), Ok(mut shutdown), Ok(mut interrupt)) =
+            (ctrl_close(), ctrl_logoff(), ctrl_shutdown(), ctrl_break())
+        else {
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        };
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = close.recv() => {}
+            _ = logoff.recv() => {}
+            _ = shutdown.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = tokio::signal::ctrl_c().await;
     }
@@ -190,13 +219,21 @@ impl Payload {
             let warnings = plan
                 .skipped()
                 .iter()
-                .map(|entry| format!("skipped {entry}: unsupported file type"))
+                .map(|entry| format!("skipped {entry}"))
                 .collect();
 
             Self {
                 filename: format!("{base_name}.tar"),
                 mime_type: TAR_MIME.to_string(),
                 size: plan.total_bytes(),
+                entry_count: Some(plan.file_count() as u64),
+                unpacked_size: Some(
+                    plan.entries()
+                        .iter()
+                        .filter(|entry| entry.kind == crate::tar::EntryKind::File)
+                        .map(|entry| entry.size)
+                        .sum(),
+                ),
                 summary: format!(
                     "{} ({} files, archived as {}.tar)",
                     path.display(),
@@ -212,6 +249,8 @@ impl Payload {
                 filename: base_name.clone(),
                 mime_type: guess_mime(&base_name).to_string(),
                 size: metadata.len(),
+                entry_count: None,
+                unpacked_size: None,
                 summary: path.display().to_string(),
                 source: Source::File(path.to_path_buf()),
                 spool: None,
@@ -260,6 +299,9 @@ impl Payload {
         } else {
             GZIP_MIME.to_string()
         };
+        // What the receiver will end up with is what went into the
+        // compressor, so a single compressed file reports that too.
+        self.unpacked_size.get_or_insert(self.size);
         self.size = compressed_size;
         self.source = Source::File(spool.path.clone());
         self.spool = Some(spool);
@@ -426,6 +468,68 @@ mod spool_tests {
         );
 
         drop(payload);
+        fs::remove_dir_all(&directory).ok();
+    }
+
+    /// The spool file can be deleted while it is being read.
+    ///
+    /// The case that matters: a person closes the window, or presses Ctrl-C
+    /// twice, part-way through a compressed send, when the chunk reader has
+    /// the spool file open. On Unix deleting an open file is ordinary. On
+    /// Windows it succeeds only if the file was opened allowing it, which Rust's
+    /// standard library does by default, and this pins that rather than
+    /// trusting it. Runs on all three platforms in CI.
+    #[tokio::test]
+    // The lock only serialises tests that share the spool registry, and this
+    // test's runtime is single-threaded, so holding it across an await blocks
+    // nothing that could release it.
+    #[allow(clippy::await_holding_lock)]
+    async fn removes_the_spool_file_while_it_is_being_read() {
+        let _guard = EXCLUSIVE.lock().unwrap_or_else(|error| error.into_inner());
+
+        let directory = fixture("open-spool");
+        // Incompressible and several chunks long, so the reader is still
+        // holding the file open, parked on a full channel, when it is deleted.
+        let mut noise = vec![0_u8; 12 * super::CHUNK_BYTES];
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for byte in &mut noise {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *byte = state as u8;
+        }
+        fs::write(directory.join("noise.bin"), &noise).expect("fixture");
+
+        let payload = Payload::prepare(&directory, Some(1)).expect("compressed payload");
+        let Source::File(path) = &payload.source else {
+            panic!("a compressed payload streams from its spool file");
+        };
+        let path = path.clone();
+
+        let mut chunks = payload.into_chunks();
+        chunks
+            .recv()
+            .await
+            .expect("a first chunk")
+            .expect("readable");
+
+        remove_spool_files();
+        drop(chunks);
+
+        let mut gone = false;
+        for _ in 0..200 {
+            if !path.exists() {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            gone,
+            "the spool file survived being deleted while open: {}",
+            path.display()
+        );
+
         fs::remove_dir_all(&directory).ok();
     }
 

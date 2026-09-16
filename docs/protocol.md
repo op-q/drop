@@ -82,11 +82,35 @@ sender connects  /ws/upload/{code}
 receiver connects /ws/download/{code}
 both send key_exchange        -> relay forwards each to the other, opaquely
 sender sends meta             -> relay forwards meta to receiver
+receiver sends meta_ok        -> relay forwards it, and its proof, to the sender
+receiver shows what is coming and asks
+receiver sends accept         -> relay forwards it, and only now carries chunks
+  (or decline {reason}        -> relay forwards it and ends the session, not as a failure)
 sender streams binary chunks  -> relay forwards chunks to receiver
 receiver acknowledges bytes   -> relay releases the sender's window
 sender sends complete         -> relay tells receiver the stream ended
+receiver sends finishing      -> relay forwards it while the receiver closes the file
 receiver confirms byte count  -> relay reports success and destroys the session
+
+at any point after meta, either peer:
+  cancel {reason}             -> relay forwards it to the other and ends the session, not as a failure
 ```
+
+**Consent before bytes.** Since protocol version 2 the relay carries no chunk
+until it has forwarded the receiver's `accept`, and refuses `accept` before it
+has forwarded `meta`. A sender that streams early fails the session with
+`the sender streamed before the receiver accepted`. The receiver enforces the
+same thing itself. The relay's check is there so its memory budget is never spent
+on bytes nobody agreed to.
+
+**Reasons are words from a fixed set, never free text.** `decline.reason` is
+`declined` or `timed_out`. `cancel.reason` is `user`, `write_failed`,
+`read_failed`, `integrity` or `too_large`. The relay replaces anything else with
+`declined` or `user` before forwarding, and each client maps a reason to its own
+sentence, so a peer never gets its own words onto the other peer's terminal.
+
+`/metrics` counts `total_transfers_declined` and `total_transfers_cancelled`
+separately from `total_transfer_failures`.
 
 Exactly one sender and one receiver may join a session. A second sender is
 refused with `sender already connected`; a second receiver with
@@ -133,7 +157,7 @@ nothing below is mistaken for something a peer said.
 | `status: waiting_for_sender` / `waiting_for_receiver` | **the relay** | Invented |
 | `status: sending` | **the relay** | Invented |
 | `progress` | **the relay** | Invented; advisory, and safe to ignore |
-| `meta_ok` | the receiver | **Direct path only.** Never sent over the relay |
+| `meta_ok` (with `confirmation`) | the receiver | Forwarded verbatim. Both carriers since protocol version 2 |
 
 A sender must accept the receiver's `chunk_ack` and `complete` as well as the
 relay's `ack` and `status: transfer_complete`, because which one arrives says
@@ -146,12 +170,10 @@ A sender must **not** require `status: receiver_connected`. Whether the peer
 has to be waited for at all is a property of the carrier, not of the protocol.
 Recorded as entry 12 in [`decisions.md`](decisions.md).
 
-`meta_ok` is the one frame that is not common to both carriers, and a client
-must get that right in both directions. It is described under
-[the metadata checkpoint](#the-metadata-checkpoint) below. Sending it over the
-relay is not merely redundant: the relay parses receiver frames into a closed
-set and fails the session on anything outside it, so a receiver that sends
-`meta_ok` unconditionally breaks every relay transfer.
+`meta_ok` is described under [the metadata checkpoint](#the-metadata-checkpoint)
+below. Until protocol version 2 it was the one frame not common to both
+carriers: version 1 sent it on the direct path only, without proof, and a
+version 1 relay refuses it outright.
 
 ## Sender to relay
 
@@ -162,10 +184,11 @@ Text frames, tagged JSON:
 | `key_exchange` | `message` | One half of the SPAKE2 exchange, hex-encoded |
 | `meta` | `version`, `ciphertext_size`, `metadata` | Describes the payload; must precede any binary frame |
 | `complete` | — | All declared bytes have been sent |
-| `cancel` | — | Abandon the transfer |
+| `cancel` | `reason` | Abandon the transfer. Forwarded to the receiver as `cancel` |
 
 Binary frames carry sealed chunk bytes. A binary frame before `meta` is answered
-with an error and ignored.
+with an error and ignored. A binary frame before the receiver's `accept` fails
+the session.
 
 `meta.ciphertext_size` must equal the `ciphertext_size` given at session
 creation. A mismatch fails the session. This is what stops a sender from
@@ -190,6 +213,11 @@ Text frames, tagged JSON:
 | `status` | `status` |
 | `key_exchange` | `message` — the receiver's half, forwarded verbatim |
 | `progress` | `bytes_transferred`, `total_bytes` |
+| `meta_ok` | `confirmation` — the receiver's, forwarded verbatim |
+| `accept` | — the receiver agreed; start streaming |
+| `decline` | `reason` — terminal, followed by Close |
+| `cancel` | `reason` — the receiver stopped; terminal, followed by Close |
+| `finishing` | — the receiver has every byte and is closing the file |
 | `ack` | `bytes_received` |
 | `error` | `message` |
 
@@ -199,7 +227,7 @@ Status values, in the order a successful transfer sees them:
 | --- | --- |
 | `waiting_for_receiver` | Sender connected first |
 | `receiver_connected` | Both peers are present; clients treat this as the signal to start sending |
-| `sending` | The relay accepted `meta` and is relaying |
+| `sending` | The relay accepted `meta` and forwarded it. Chunks still wait for the receiver's `accept` |
 | `awaiting_receiver` | The sender finished; the receiver is still writing |
 | `transfer_complete` | The receiver confirmed the full byte count |
 | `cancelled` | The transfer was abandoned |
@@ -218,6 +246,7 @@ Text frames, tagged JSON, plus binary frames carrying file bytes:
 | `meta` | `version`, `ciphertext_size`, `metadata` |
 | `progress` | `bytes_transferred`, `total_bytes` |
 | `complete` | — |
+| `cancel` | `reason` — the sender stopped; terminal, followed by Close |
 | `error` | `message` |
 
 `meta` always precedes the first binary frame. A receiver that sees bytes first
@@ -230,9 +259,14 @@ Text frames, tagged JSON:
 | Message | Fields | Meaning |
 | --- | --- | --- |
 | `key_exchange` | `message` | The receiver's half of the SPAKE2 exchange, hex-encoded |
+| `meta_ok` | `confirmation` | The receiver opened the metadata; hex of the 32-byte key confirmation. Bounded by `MAX_OPAQUE_FIELD_BYTES` |
 | `chunk_ack` | `bytes_received` | Cumulative sealed bytes received |
+| `accept` | — | The receiver saw the transfer and agreed. Refused before `meta` |
+| `decline` | `reason` | The receiver refused, or did not answer in time |
+| `cancel` | `reason` | The receiver stops a transfer it had accepted |
+| `finishing` | — | Every byte has arrived; closing the file or finishing extraction |
 | `complete` | `bytes_received` | Final byte count after closing the file |
-| `error` | — | The receiver is abandoning the transfer |
+| `error` | — | The receiver failed, for example its sealed data did not open |
 
 `bytes_received` is cumulative, not per chunk, and is counted in **sealed**
 bytes — the relay meters what crosses it, and what crosses it is ciphertext. A
@@ -259,11 +293,15 @@ identity = "drop/v1/transfer/" + nameplate
 SPAKE2 (Ed25519 group, symmetric mode, password, identity)
    └─ both peers exchange one message and agree on a shared secret
 
-HKDF-SHA256 over that secret, no salt, three expansions:
-   info "drop/v1/chunk" -> chunk_key  32 bytes
-   info "drop/v1/meta"  -> meta_key   32 bytes
-   info "drop/v1/salt"  -> salt        4 bytes
+HKDF-SHA256 over that secret, no salt, four expansions:
+   info "drop/v1/chunk"   -> chunk_key     32 bytes
+   info "drop/v1/meta"    -> meta_key      32 bytes
+   info "drop/v1/salt"    -> salt           4 bytes
+   info "drop/v1/confirm" -> confirmation  32 bytes   (protocol version 2)
 ```
+
+The `v1` in the info strings names the key schedule, which version 2 extended
+and did not change. The first three outputs are what they were.
 
 Symmetric mode is used because either peer may connect first and the protocol
 has no natural A/B assignment. The identity binds a handshake to one session:
@@ -322,7 +360,7 @@ the counter on reconnect.
 | --- | --- |
 | Plaintext chunk | 1 MiB, the last one shorter |
 | Sealed chunk | plaintext + 16 tag bytes |
-| Metadata plaintext | JSON of `{filename, mime_type, plaintext_size}` |
+| Metadata plaintext | JSON of `{filename, mime_type, plaintext_size, entry_count?, unpacked_size?}` |
 | Metadata on the wire | hex of the sealed blob, inside `meta.metadata` |
 
 `meta.ciphertext_size` is the total sealed size and is what the relay meters,
@@ -337,7 +375,7 @@ finishing.
 | Recommended chunk size | 1 MiB plaintext | `RECOMMENDED_CHUNK_BYTES` |
 | Sealed chunk overhead | 16 bytes per chunk | `TAG_BYTES` |
 | Opaque field ceiling | 8 KiB | `MAX_OPAQUE_FIELD_BYTES` |
-| Envelope version | 1 | `ENVELOPE_VERSION` |
+| Protocol version | 2 | `ENVELOPE_VERSION` |
 | Maximum accepted frame | 1 MiB + 64 KiB | `WS_MAX_MESSAGE_BYTES` |
 | Transfer size limit | 4 GiB | `MAX_UPLOAD_SIZE_BYTES` |
 | Concurrent sessions | 100 | `MAX_CONCURRENT_SESSIONS` |
@@ -372,10 +410,10 @@ Everything above describes a transfer carried by the relay. A CLI-to-CLI
 transfer carries the **same envelope and the same vocabulary** over a QUIC
 stream instead, and this section is only the difference.
 
-Implemented in `cli/src/transport/framed.rs` and `cli/src/transport/quic.rs`.
-Not yet reachable from the `drop` binary — see
-[`plans/peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md)
-phases 3 and 4.
+Implemented in `cli/src/transport/framed.rs` and `cli/src/transport/quic.rs`,
+and the default path since v0.2.0. How two peers find each other is in
+`cli/src/transport/rendezvous.rs` and [`decisions.md`](decisions.md) entries 10,
+14 and 15.
 
 ### Why framing is needed at all
 
@@ -395,7 +433,7 @@ bytes and nothing more. So the direct transport declares both.
 
 | Property | Value | Source |
 | --- | --- | --- |
-| ALPN | `drop/transfer/1` | `DROP_ALPN` |
+| ALPN | `drop/transfer/2` | `DROP_ALPN` |
 | Header | 5 bytes | `HEADER_BYTES` |
 | Maximum accepted frame | 1 MiB + 16 B | `MAX_FRAME_BYTES` |
 | Streams per transfer | 1, bidirectional | — |
@@ -435,16 +473,18 @@ to be closed.
 
 ### The metadata checkpoint
 
-One frame the relay path does not have, and the reason the direct path needs
-it. Recorded as entry 13 in [`decisions.md`](decisions.md).
+The frame between a code and a payload. Recorded as entry 13 in
+[`decisions.md`](decisions.md), with its proof as entry 18. Both carriers run it
+since protocol version 2; the reason it first existed is the direct path's.
 
 ```text
 sender                                    receiver
   │  meta (version, size, sealed blob)         │
   ├───────────────────────────────────────────▶│
   │                                            │ opens the metadata
-  │                     meta_ok                │
+  │           meta_ok { confirmation }         │
   │◀───────────────────────────────────────────┤
+  │ checks the confirmation, in constant time  │
   │  first chunk — and not one byte before it  │
   ├───────────────────────────────────────────▶│
 ```
@@ -461,17 +501,54 @@ is 33 bits of work at network speed.
   before it creates anything on disk. Opening it is what proves the peer knew
   the code; a receiver that then fails to write a file has still guessed
   correctly.
+- `meta_ok` carries `confirmation`: hex of the 32-byte `drop/v1/confirm` HKDF
+  output. **A bare `meta_ok` is a claim, and the party making it is the party
+  being limited.** A wrong guesser cannot open the metadata but could say it
+  had, and before version 2 that suppressed the failed attempt and the prompt.
+  The sender compares the confirmation with its own in constant time.
 - A receiver that cannot open the metadata sends `error` and stops.
-- The sender sends no chunk until `meta_ok` arrives, and waits at most 30
-  seconds for it.
-- **An explicit `error`, a timeout, a disconnect and any other frame are one
-  outcome**: one consumed attempt. From the sender's side an honest mistyper
-  and a silent attacker are indistinguishable, and treating them differently
-  would tell an attacker which it had been taken for.
+- The sender sends no chunk until a valid `meta_ok` arrives, and waits at most
+  30 seconds for it.
+- **An explicit `error`, a timeout, a disconnect, a missing, malformed or wrong
+  confirmation, and any other frame are one outcome**: one consumed attempt.
+  From the sender's side an honest mistyper and a silent attacker are
+  indistinguishable, and treating them differently would tell an attacker which
+  it had been taken for.
+- Over the relay the relay narrates in between (`status: sending`, `progress`),
+  and the sender reads past those. On the direct path there is no narrator, so
+  anything but `meta_ok` is the peer not answering.
 
 What the sender does with a consumed attempt is policy rather than protocol,
-and a receiver cannot observe it: the sender asks the human in front of it
-whether to allow another, and a sender with no terminal allows none.
+and a receiver cannot observe it. On the direct path the sender asks the human in
+front of it whether to allow another, and a sender with no terminal allows none.
+Over the relay the relay has already burned the session, so the transfer ends.
+
+### Consent, after the checkpoint
+
+A receiver that passed the checkpoint has proved it knows the code, not that it
+wants the file. So a second question follows, on both carriers:
+
+- The receiver works out where the transfer would land **without creating
+  anything**: the name after platform rewriting and numbering past what is
+  already there, or the directory an archive unpacks into. It shows that with
+  the name, a type label taken from the real extension (never the sender's MIME
+  type), the size, and for a folder the sender's `entry_count` and
+  `unpacked_size`. A program's extension gets a warning line.
+- It asks. `accept` sends the sender streaming. `decline` ends the transfer, and
+  nothing on disk has changed. A question unanswered for 120 seconds is sent as
+  `decline {reason: "timed_out"}`.
+- While asking, it keeps reading: a relay drops a WebSocket that stops answering
+  pings, and a sender may `cancel`. That read is abandoned when the person
+  answers, which is why every carrier's receive must be cancel-safe. The QUIC
+  framing keeps partial frames in the transport for that reason.
+- A chunk before `accept` is a protocol violation: the receiver sends
+  `cancel {reason: "integrity"}` and stops.
+- The sender waits up to 150 seconds for the answer, longer than the receiver's
+  question, and shorter than the relay's five-minute session lifetime. A test
+  holds the three in that order.
+- A receiver with no terminal and no `--yes` refuses before contacting anyone,
+  rather than accepting silently or burning the code on a question nobody can
+  answer.
 
 ### What is unchanged
 
@@ -491,13 +568,8 @@ whether to allow another, and a sender with no terminal allows none.
 Not implemented. Tracked in
 [`implementation-checklist.md`](implementation-checklist.md).
 
-- **Receiver confirmation** adds `accept` and `decline` receiver messages and a
-  `receiver_accepted` status, and moves the start trigger off
-  `receiver_connected`.
-- **Rendezvous and fallback for the direct path.** The transport above exists
-  and carries whole transfers in test, but nothing in the `drop` binary reaches
-  it: two peers still have no way to find each other without the relay, and
-  there is no selection between the paths. See
-  [`plans/peer-to-peer-transport-plan-2026-08-20.md`](plans/peer-to-peer-transport-plan-2026-08-20.md)
-  phases 3 and 4. The one-guess enforcement those phases depend on is settled in
-  [`decisions.md`](decisions.md) entry 13 and not yet built.
+- **The interface's consent and transfer screens**, in
+  [`plans/receiver-consent-and-status-plan-2026-09-14.md`](plans/receiver-consent-and-status-plan-2026-09-14.md)
+  phase 5. No wire change: the frames above are complete. Today a person
+  cancels with Ctrl-C at a command; the interface closes before a transfer
+  starts.

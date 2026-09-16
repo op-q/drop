@@ -53,6 +53,8 @@ pub enum TransportError {
     /// and is passed through verbatim, because it is more specific than
     /// anything this layer could say about it.
     Refused(String),
+    /// A person at this end stopped the transfer. See [`crate::cancel`].
+    Cancelled,
 }
 
 impl fmt::Display for TransportError {
@@ -62,6 +64,7 @@ impl fmt::Display for TransportError {
             | Self::Io(message)
             | Self::Malformed(message)
             | Self::Refused(message) => write!(formatter, "{message}"),
+            Self::Cancelled => formatter.write_str("cancelled"),
         }
     }
 }
@@ -82,15 +85,19 @@ pub trait Transport {
     /// attempt, and over the relay a third party provides that: `claim_receiver`
     /// refuses a second claim, so a wrong guess burns the session server-side
     /// and this answers `false`. A direct connection has nobody to do that, so
-    /// it answers `true` and the peers run the checkpoint after `meta` that
-    /// `docs/decisions.md` entry 13 specifies.
+    /// it answers `true`, and the sender's checkpoint after `meta` is the
+    /// enforcement that `docs/decisions.md` entry 13 specifies.
     ///
-    /// **Deliberately without a default.** Both wrong answers are security bugs
-    /// rather than papercuts — `false` on a direct connection is an unlimited
-    /// guessing oracle, and `true` over the relay makes the receiver send a
-    /// frame the relay rejects, failing every transfer — so a new carrier that
-    /// has not thought about it should fail to compile rather than inherit
-    /// somebody else's answer.
+    /// Both carriers run the checkpoint since protocol version 2; this decides
+    /// what it means. On `true` a failed checkpoint is one counted attempt, and
+    /// a human may allow another. On `false` it ends the transfer, since the
+    /// relay has already burned the session, and the relay's own narration
+    /// between `meta` and the answer is read past.
+    ///
+    /// **Deliberately without a default.** `false` on a direct connection
+    /// would turn the enforcement off and leave an unlimited guessing oracle,
+    /// so a new carrier that has not thought about it should fail to compile
+    /// rather than inherit somebody else's answer.
     fn peers_enforce_one_guess(&self) -> bool;
 
     /// Waits until the peer is present.
@@ -123,6 +130,12 @@ pub trait Transport {
 
     /// Waits for the peer's next frame, or `None` once it has finished
     /// speaking.
+    ///
+    /// **Must be cancel-safe**: a call dropped before it returns must not lose
+    /// any part of a frame. The receiver keeps reading while a person decides
+    /// whether to accept a transfer, because a relay stops hearing from a
+    /// socket nobody reads and drops it, and it abandons that read the moment
+    /// they answer.
     ///
     /// A closed connection is not an error here. Every caller treats a peer
     /// that stopped early as a failure of the transfer rather than of the

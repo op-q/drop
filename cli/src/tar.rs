@@ -12,10 +12,13 @@
 //! than from two implementations that must agree.
 
 use std::{
+    borrow::Cow,
     fs,
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
 };
+
+use crate::names::Naming;
 
 const BLOCK: usize = 512;
 const NAME_LEN: usize = 100;
@@ -98,8 +101,8 @@ impl TarPlan {
             .count()
     }
 
-    /// Entries that could not be represented in a ustar archive, such as
-    /// sockets, FIFOs, and device nodes.
+    /// Entries left out of the archive, each with why: sockets, FIFOs and
+    /// device nodes, and on Windows links to absolute paths.
     pub fn skipped(&self) -> &[String] {
         &self.skipped
     }
@@ -144,6 +147,15 @@ fn collect(
 
     if file_type.is_symlink() {
         let target = fs::read_link(path)?;
+        let Some(link_target) = portable_link_target(&target.to_string_lossy(), cfg!(windows))
+        else {
+            skipped.push(format!(
+                "{archive_path}: its link points to an absolute Windows path, \
+                 which would not resolve on any other machine"
+            ));
+            return Ok(());
+        };
+
         entries.push(TarEntry {
             archive_path: archive_path.to_string(),
             source: path.to_path_buf(),
@@ -151,7 +163,7 @@ fn collect(
             size: 0,
             mode: 0o777,
             mtime: modified_seconds(&metadata),
-            link_target: target.to_string_lossy().into_owned(),
+            link_target,
         });
         return Ok(());
     }
@@ -194,8 +206,32 @@ fn collect(
         return Ok(());
     }
 
-    skipped.push(archive_path.to_string());
+    skipped.push(format!("{archive_path}: unsupported file type"));
     Ok(())
+}
+
+/// A symlink target as an archive should record it.
+///
+/// Tar stores targets with `/`, and every receiver reads them that way. A
+/// Windows sender's `read_link` gives `..\shared\config`, which a Linux
+/// receiver would take as one name containing backslashes and create a link
+/// that never resolves. So on Windows relative targets are rewritten with `/`,
+/// and absolute ones (`C:\...`, `\\server\...`, `\...`) are left out: they
+/// would dangle anywhere else, and a receiver refuses them anyway.
+///
+/// Elsewhere a target is recorded as it is. A backslash is an ordinary
+/// character in a Unix file name.
+pub fn portable_link_target(target: &str, windows: bool) -> Option<String> {
+    if !windows {
+        return Some(target.to_string());
+    }
+
+    let has_drive = target.as_bytes().get(1) == Some(&b':');
+    if has_drive || target.starts_with(['\\', '/']) {
+        return None;
+    }
+
+    Some(target.replace('\\', "/"))
 }
 
 #[cfg(unix)]
@@ -465,35 +501,87 @@ fn write_octal(field: &mut [u8], value: u64, digits: usize) {
 /// Absolute paths, `..` components, and Windows drive prefixes are all refused
 /// rather than normalized away, because a rewritten path silently changes where
 /// a hostile archive lands instead of refusing it.
+///
+/// Uses this platform's [`Naming`]. See [`resolve_archive_path`] for the name
+/// that results and whether it had to change.
 pub fn safe_relative_path(destination: &Path, archive_path: &str) -> Option<PathBuf> {
+    resolve_archive_path(destination, archive_path, Naming::for_this_platform())
+        .map(|resolved| resolved.path)
+}
+
+/// Where an archive entry will be written, once judged safe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedEntry {
+    /// The path on disk, inside the destination.
+    pub path: PathBuf,
+    /// The entry's path as it will exist, `/`-separated and relative, for
+    /// telling the receiver about a rename.
+    pub stored_as: String,
+    /// Whether a component had to be rewritten for this platform.
+    pub renamed: bool,
+}
+
+/// Judges an archive path against the destination and resolves it under
+/// `naming`.
+///
+/// An archive path is `/`-separated by the format, whatever platform wrote it,
+/// so it is split on `/` by hand rather than handed to [`Path`], which would
+/// read `C:` as a drive on Windows and as a directory name everywhere else.
+/// Splitting first means every platform judges the same components.
+///
+/// Refused, on every platform: an empty path, a leading `/` or `\`, any `..`,
+/// and any component containing `\`. That last one is a separator on
+/// Windows, and `a\..\b` must not become a parent reference there. Accepted
+/// components go through [`Naming::component`], which can change a
+/// component's spelling but can never introduce a separator.
+pub fn resolve_archive_path(
+    destination: &Path,
+    archive_path: &str,
+    naming: Naming,
+) -> Option<ResolvedEntry> {
     let trimmed = archive_path.trim_end_matches('/');
 
     if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('\\') {
         return None;
     }
 
-    let candidate = Path::new(trimmed);
-    let mut resolved = destination.to_path_buf();
+    let mut path = destination.to_path_buf();
+    let mut stored = Vec::new();
+    let mut renamed = false;
 
-    for component in candidate.components() {
+    for component in trimmed.split('/') {
         match component {
-            Component::Normal(part) => {
-                let text = part.to_string_lossy();
-                if text.contains('\\') {
-                    return None;
-                }
-                resolved.push(part);
+            "" | "." => {}
+            ".." => return None,
+            _ if component.contains('\\') => return None,
+            _ => {
+                let on_disk = naming.component(component);
+                renamed |= matches!(on_disk, Cow::Owned(_));
+                path.push(on_disk.as_ref());
+                stored.push(on_disk.into_owned());
             }
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
         }
     }
 
-    if resolved == destination {
+    if stored.is_empty() {
         return None;
     }
 
-    Some(resolved)
+    // Belt and braces: whatever the naming did, the result must still be
+    // lexically inside the destination and made only of normal components.
+    let relative = path.strip_prefix(destination).ok()?;
+    if !relative
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+
+    Some(ResolvedEntry {
+        path,
+        stored_as: stored.join("/"),
+        renamed,
+    })
 }
 
 /// Whether every directory `path` traverses below `destination` is a real

@@ -26,6 +26,8 @@ struct MetricsInner {
     total_sessions_expired: AtomicU64,
     total_transfers_completed: AtomicU64,
     total_transfer_failures: AtomicU64,
+    total_transfers_declined: AtomicU64,
+    total_transfers_cancelled: AtomicU64,
     total_bytes_relayed: AtomicU64,
 }
 
@@ -37,6 +39,10 @@ pub struct MetricsSnapshot {
     pub total_sessions_expired: u64,
     pub total_transfers_completed: u64,
     pub total_transfer_failures: u64,
+    /// A receiver saw the offer and said no, or did not answer. Not a failure.
+    pub total_transfers_declined: u64,
+    /// A peer chose to stop. Not a failure.
+    pub total_transfers_cancelled: u64,
     pub total_bytes_relayed: u64,
 }
 
@@ -73,6 +79,20 @@ impl AppMetrics {
         decrement(&self.inner.active_sessions);
     }
 
+    pub fn record_transfer_declined(&self) {
+        self.inner
+            .total_transfers_declined
+            .fetch_add(1, Ordering::Relaxed);
+        decrement(&self.inner.active_sessions);
+    }
+
+    pub fn record_transfer_cancelled(&self) {
+        self.inner
+            .total_transfers_cancelled
+            .fetch_add(1, Ordering::Relaxed);
+        decrement(&self.inner.active_sessions);
+    }
+
     pub fn record_bytes_relayed(&self, bytes: u64) {
         self.inner
             .total_bytes_relayed
@@ -97,6 +117,8 @@ impl AppMetrics {
             total_sessions_expired: self.inner.total_sessions_expired.load(Ordering::Relaxed),
             total_transfers_completed: self.inner.total_transfers_completed.load(Ordering::Relaxed),
             total_transfer_failures: self.inner.total_transfer_failures.load(Ordering::Relaxed),
+            total_transfers_declined: self.inner.total_transfers_declined.load(Ordering::Relaxed),
+            total_transfers_cancelled: self.inner.total_transfers_cancelled.load(Ordering::Relaxed),
             total_bytes_relayed: self.inner.total_bytes_relayed.load(Ordering::Relaxed),
         }
     }

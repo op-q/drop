@@ -347,7 +347,10 @@ fn browse(screen: &mut Screen, start: PathBuf, picking: Picking) -> Outcome<Path
 
             body.push(row(
                 selected == index + 1,
-                format!("{}{detail}", entry.name),
+                // A local name, but not necessarily a benign one: a file
+                // extracted from somebody's archive can carry an escape
+                // sequence, and ratatui prints a cell's text as it is given.
+                format!("{}{detail}", crate::display::name(&entry.name)),
             ));
         }
 

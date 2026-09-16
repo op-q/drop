@@ -10,7 +10,10 @@ use std::{
 use serde_json::json;
 
 use crate::{
-    client, crypto, direct,
+    cancel::{Cancel, Cancellable, Ended},
+    client,
+    consent::{self, ConsentPrompt, Outcome},
+    crypto, direct, display, names,
     payload::{GZIP_MIME, TAR_GZIP_MIME, TAR_MIME},
     progress::Progress,
     transport::{Frame, Transport, relay},
@@ -102,6 +105,86 @@ pub struct ReceiveOptions {
     pub out_dir: PathBuf,
     pub extract: bool,
     pub force: bool,
+    /// Whether to ask before accepting, or accept without asking (`--yes`).
+    pub acceptance: consent::Acceptance,
+}
+
+/// Where a transfer would land, worked out before anything exists on disk.
+///
+/// The receiver is shown this and then asked, so nothing here may create,
+/// truncate, or reserve a name. [`create_target`] does that, after a yes.
+enum PlannedTarget {
+    File {
+        directory: PathBuf,
+        /// The name the file is expected to get: rewritten for this platform
+        /// and numbered past anything already there.
+        path: PathBuf,
+        /// The name before numbering, which `create_new_file` starts from.
+        name: String,
+        /// What the sender asked for, when the expected name differs from it.
+        instead_of: Option<String>,
+        replacing: bool,
+    },
+    Archive {
+        root: PathBuf,
+    },
+}
+
+/// A received file that is deleted unless the transfer finishes.
+///
+/// Every way a receive can end early (an integrity failure, a dropped
+/// connection, the sender cancelling, a person pressing Ctrl-C) leaves the
+/// first N chunks on disk, and they look exactly like a whole file. Deleting
+/// on drop covers all of them, including the ones a `?` returns through, which
+/// the old explicit cleanup did not.
+struct PartialFile {
+    path: PathBuf,
+    file: Option<fs::File>,
+    complete: bool,
+}
+
+impl PartialFile {
+    fn new(path: PathBuf, file: fs::File) -> Self {
+        Self {
+            path,
+            file: Some(file),
+            complete: false,
+        }
+    }
+
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        match self.file.as_mut() {
+            Some(file) => file.write_all(data),
+            None => Err(io::Error::other("the received file was already closed")),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.as_mut().map_or(Ok(()), fs::File::flush)
+    }
+
+    /// The transfer finished and was confirmed: this is a real file now.
+    fn keep(&mut self) {
+        self.complete = true;
+    }
+}
+
+impl Drop for PartialFile {
+    fn drop(&mut self) {
+        if !self.complete {
+            drop(self.file.take());
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+impl ConsentPrompt for consent::Acceptance {
+    async fn decide(&mut self, preview: &consent::Preview) -> consent::Consent {
+        match self {
+            Self::Ask => consent::AskTheReceiver.decide(preview).await,
+            Self::Yes => consent::AcceptWithoutAsking.decide(preview).await,
+        }
+    }
 }
 
 /// Where received bytes are written: either straight to a file, or through the
@@ -109,7 +192,7 @@ pub struct ReceiveOptions {
 enum Target {
     File {
         path: PathBuf,
-        file: fs::File,
+        file: PartialFile,
     },
     Archive {
         root: PathBuf,
@@ -118,6 +201,34 @@ enum Target {
 }
 
 pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // Before anything is contacted: finding out after the key exchange would
+    // burn the sender's code for a question nobody can answer.
+    options.acceptance.check_answerable()?;
+
+    // The first Ctrl-C tells the sender and stops; a second exits at once. The
+    // exit restores the terminal first, which matters since the interface
+    // may have left it raw. See `crate::cancel`.
+    let cancel = Cancel::default();
+    crate::cancel::exit_on_second_interrupt(cancel.clone());
+
+    let mut acceptance = options.acceptance;
+    run_deciding(code, &options, &mut acceptance, cancel).await
+}
+
+/// [`run`], with the consent question put to `prompt` instead of to the
+/// terminal, so `options.acceptance` is not consulted, and stopped by `cancel`
+/// rather than by a signal handler it installs. For programs and tests that
+/// decide for themselves.
+pub async fn run_deciding<P: ConsentPrompt + Send>(
+    code: &str,
+    options: &ReceiveOptions,
+    prompt: &mut P,
+    cancel: Cancel,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if options.status {
+        direct::enable_state_lines();
+    }
+
     if options.path == direct::Path::Relay && options.origin.is_none() {
         return Err(format!(
             "--transport relay receives through a relay, and none is configured: {}.",
@@ -125,16 +236,6 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
         )
         .into());
     }
-
-    // The receiver has no spool file to clean up, so it had no termination
-    // handler at all and a signal simply killed it. That was harmless until the
-    // interface put the terminal in raw mode: the default SIGINT disposition
-    // runs no Rust code, so nothing would hand it back.
-    tokio::spawn(async {
-        crate::payload::wait_for_termination().await;
-        crate::ui::terminal::restore();
-        std::process::exit(130);
-    });
 
     let code = crypto::TransferCode::parse(code)?;
 
@@ -148,7 +249,7 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
     // the sender fell back. A missing record is not a wrong code — a wrong code
     // is not detectable here at all, and surfaces at the sealed metadata.
     if options.path != direct::Path::Relay {
-        match try_direct(&code, &options).await {
+        match try_direct(&code, options, prompt, &cancel).await {
             Ok(Some(outcome)) => return outcome,
             Ok(None) => {
                 direct::may_fall_back(options.path, options.origin.as_deref(), &*missing_record())?;
@@ -174,9 +275,20 @@ pub async fn run(code: &str, options: ReceiveOptions) -> Result<(), Box<dyn Erro
     eprintln!("Connecting to {origin}...");
     direct::report(direct::Carrier::Relay, fallback, options.status);
 
-    let mut transport = relay::connect_receiver(&origin, code.nameplate()).await?;
+    let mut transport = Cancellable::new(
+        relay::connect_receiver(&origin, code.nameplate()).await?,
+        cancel,
+    );
 
-    receive_transfer(&mut transport, &code, &options).await
+    receive_transfer(&mut transport, &code, options, prompt).await
+}
+
+/// The message in an `error` frame, made safe to print.
+///
+/// A peer on the direct path, or the relay on the other one, wrote it, and
+/// neither is trusted to put bytes on this terminal.
+fn peer_error(payload: &serde_json::Value, otherwise: &str) -> String {
+    display::peer_message(payload["message"].as_str().unwrap_or(otherwise))
 }
 
 fn missing_record() -> Box<dyn Error + Send + Sync> {
@@ -189,18 +301,24 @@ fn missing_record() -> Box<dyn Error + Send + Sync> {
 /// broken", because only the first is an ordinary outcome worth falling back
 /// from quietly.
 #[allow(clippy::type_complexity)]
-async fn try_direct(
+async fn try_direct<P: ConsentPrompt + Send>(
     code: &crypto::TransferCode,
     options: &ReceiveOptions,
+    prompt: &mut P,
+    cancel: &Cancel,
 ) -> Result<Option<Result<(), Box<dyn Error + Send + Sync>>>, Box<dyn Error + Send + Sync>> {
     eprintln!("Looking for the sender...");
 
     let directory = options.rendezvous.directory()?;
 
-    let Some(mut dialled) = direct::dial_sender(&directory, code, &options.rendezvous).await?
-    else {
+    let Some(dialled) = direct::dial_sender(&directory, code, &options.rendezvous).await? else {
         return Ok(None);
     };
+    let direct::Dialled {
+        transport,
+        endpoint,
+    } = dialled;
+    let mut transport = Cancellable::new(transport, cancel.clone());
 
     direct::report(
         direct::Carrier::Direct,
@@ -212,9 +330,9 @@ async fn try_direct(
     // driver, so dropping it early kills a transfer that had just started —
     // which is exactly what happened the first time this ran over a real
     // network, and what the loopback tests could not see.
-    let outcome = receive_transfer(&mut dialled.transport, code, options).await;
+    let outcome = receive_transfer(&mut transport, code, options, prompt).await;
 
-    dialled.endpoint.shutdown().await;
+    endpoint.shutdown().await;
 
     Ok(Some(outcome))
 }
@@ -223,10 +341,11 @@ async fn try_direct(
 ///
 /// Written against the conversation rather than against a socket, so a second
 /// carrier is a different `T` and not a second copy of this function.
-pub(crate) async fn receive_transfer<T: Transport>(
+pub(crate) async fn receive_transfer<T: Transport, P: ConsentPrompt>(
     transport: &mut T,
     code: &crypto::TransferCode,
     options: &ReceiveOptions,
+    prompt: &mut P,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let keys = exchange_keys(transport, code).await?;
     let (version, ciphertext_size, sealed_metadata) = wait_for_meta(transport).await?;
@@ -238,12 +357,9 @@ pub(crate) async fn receive_transfer<T: Transport>(
     // Opening the metadata is where a mistyped code is caught: it happens
     // before any destination is created and before a byte is written. The
     // session is consumed either way, which is what holds an attacker to one
-    // guess.
-    //
-    // Who consumes it differs by carrier. Over the relay a server refuses the
-    // next claim and this side says nothing. Over a direct connection there is
-    // no server, so the sender is waiting to hear how this went and cannot
-    // proceed until it does — `docs/decisions.md` entry 13.
+    // guess. Over the relay a server refuses the next claim; over a direct
+    // connection the sender counts the attempt — `docs/decisions.md` entry 13.
+    // Either way the sender is waiting to hear how this went.
     let sealed_metadata = crypto::from_hex(&sealed_metadata)?;
     let meta = match crypto::open_metadata(&keys, ciphertext_size, &sealed_metadata) {
         Ok(meta) => meta,
@@ -251,39 +367,37 @@ pub(crate) async fn receive_transfer<T: Transport>(
             // Saying so discloses nothing. A peer that reaches this branch
             // already knows it failed, and staying silent would only make the
             // sender wait out its timeout before reaching the same conclusion.
-            if transport.peers_enforce_one_guess() {
-                let _ = transport
-                    .send_control(json!({
-                        "type": "error",
-                        "message": "the code did not open this transfer",
-                    }))
-                    .await;
-            }
+            let _ = transport
+                .send_control(json!({
+                    "type": "error",
+                    "message": "the code did not open this transfer",
+                }))
+                .await;
 
             return Err(error.into());
         }
     };
 
-    // The checkpoint the direct path adds, and the reason it is here rather
-    // than after the destination is opened: what it attests is that this peer
-    // knew the code, which opening the metadata has just proved. A receiver
-    // that then fails to create a file has still guessed correctly, and
-    // charging it an attempt would punish the wrong failure.
-    if transport.peers_enforce_one_guess() {
-        transport.send_control(json!({ "type": "meta_ok" })).await?;
-    }
+    // The checkpoint, and the reason it is here rather than after the
+    // destination is opened: what it attests is that this peer knew the code,
+    // which opening the metadata has just proved. A receiver that then fails
+    // to create a file has still guessed correctly, and charging it an attempt
+    // would punish the wrong failure.
+    //
+    // It carries proof rather than a claim. A bare `meta_ok` could be sent by
+    // a peer that opened nothing, which is exactly the peer the sender is
+    // trying to notice. Sent on both carriers: over the relay it is what lets
+    // the sender say the code was right before a byte moves.
+    transport
+        .send_control(json!({
+            "type": "meta_ok",
+            "confirmation": crypto::to_hex(&keys.confirmation()),
+        }))
+        .await?;
 
     let size = meta.plaintext_size;
     let filename = meta.filename;
     let mime_type = meta.mime_type;
-
-    let mut opener = crypto::Opener::new(&keys, size);
-
-    eprintln!(
-        "Receiving {} ({})",
-        filename,
-        crate::progress::format_bytes(size)
-    );
 
     let decompress = options.extract
         && (mime_type == GZIP_MIME || mime_type == TAR_GZIP_MIME || filename.ends_with(".gz"));
@@ -292,7 +406,62 @@ pub(crate) async fn receive_transfer<T: Transport>(
             || mime_type == TAR_GZIP_MIME
             || strip_gz(&filename).ends_with(".tar"));
 
-    let mut target = open_target(options, &filename, is_archive, decompress)?;
+    // Consent before bytes. Everything the question needs is known now, and
+    // nothing has been created: `plan_target` only looks.
+    let planned = plan_target(options, &filename, is_archive, decompress);
+    let preview = consent::Preview {
+        name: filename.clone(),
+        size,
+        landing: planned.landing(),
+        entry_count: meta.entry_count,
+        unpacked_size: meta.unpacked_size,
+    };
+
+    match consent::ask(transport, prompt, &preview, consent::ACCEPT_DEADLINE).await? {
+        Outcome::Accepted => {
+            transport.send_control(json!({ "type": "accept" })).await?;
+            direct::state("accepted");
+        }
+        declined => {
+            let reason = if declined == Outcome::TimedOut {
+                eprintln!("No answer within two minutes, so the transfer was declined.");
+                "timed_out"
+            } else {
+                eprintln!("Declined.");
+                "declined"
+            };
+
+            let _ = transport
+                .send_control(json!({ "type": "decline", "reason": reason }))
+                .await;
+            transport.close().await;
+            eprintln!("Nothing was saved.");
+            direct::state("declined");
+            return Ok(());
+        }
+    }
+
+    let mut target = match create_target(options, planned) {
+        Ok(target) => target,
+        Err(error) => {
+            // Accepted and then unable to write. The sender is told in the
+            // agreed terms rather than left to find a dropped connection.
+            let _ = transport
+                .send_control(json!({ "type": "cancel", "reason": "write_failed" }))
+                .await;
+            return Err(error);
+        }
+    };
+
+    let mut opener = crypto::Opener::new(&keys, size);
+
+    // The sender chose this name. It reaches the terminal only through
+    // `display`, because an escape sequence in it would otherwise run here.
+    eprintln!(
+        "Receiving {} ({})",
+        display::name(&filename),
+        crate::progress::format_bytes(size)
+    );
     let mut decoder = if decompress {
         Some(flate2::write::GzDecoder::new(Vec::new()))
     } else {
@@ -352,7 +521,19 @@ pub(crate) async fn receive_transfer<T: Transport>(
                         return Err(error.into());
                     }
 
+                    // Closing the file, or finishing an extraction, can take
+                    // a while after the last byte. The sender is told so it
+                    // can say what is happening rather than appear stuck.
+                    let _ = transport.send_control(json!({ "type": "finishing" })).await;
+
                     finish(&mut target, decoder, &mut expansion)?;
+
+                    // Every byte arrived, authenticated and counted, and the
+                    // file is flushed. It is a whole file from here, whether
+                    // or not the sender hears that below.
+                    if let Target::File { file, .. } = &mut target {
+                        file.keep();
+                    }
                     progress.finish(written);
 
                     transport
@@ -361,14 +542,35 @@ pub(crate) async fn receive_transfer<T: Transport>(
 
                     report(&target, written);
                     transport.close().await;
+                    direct::state("done");
                     return Ok(());
                 }
+                Some("cancel") => {
+                    let written_into = match &target {
+                        Target::Archive { root, extractor } => {
+                            Some((root.clone(), extractor.files_written()))
+                        }
+                        Target::File { .. } => None,
+                    };
+                    discard_partial(target);
+
+                    if let Some((root, files)) = written_into {
+                        eprintln!(
+                            "{files} file{} had already been extracted into {} and were kept.",
+                            if files == 1 { "" } else { "s" },
+                            display::for_terminal(&root.display().to_string())
+                        );
+                    }
+
+                    direct::state("cancelled");
+                    return Err(Ended::PeerCancelled(consent::peer_cancelled(
+                        "sender",
+                        payload["reason"].as_str(),
+                    ))
+                    .into());
+                }
                 Some("error") => {
-                    return Err(payload["message"]
-                        .as_str()
-                        .unwrap_or("the relay reported an error")
-                        .to_string()
-                        .into());
+                    return Err(peer_error(&payload, "the relay reported an error").into());
                 }
                 _ => {}
             },
@@ -418,11 +620,7 @@ async fn exchange_keys<T: Transport>(
                 }
             }
             Some("error") => {
-                return Err(payload["message"]
-                    .as_str()
-                    .unwrap_or("the relay reported an error")
-                    .to_string()
-                    .into());
+                return Err(peer_error(&payload, "the relay reported an error").into());
             }
             _ => {}
         }
@@ -440,10 +638,8 @@ async fn exchange_keys<T: Transport>(
 /// individually authentic, and deleting a tree the receiver may already have
 /// had files in is a worse failure than reporting the stop.
 fn discard_partial(target: Target) {
-    if let Target::File { path, file } = target {
-        drop(file);
-        let _ = fs::remove_file(&path);
-    }
+    // `PartialFile` removes an incomplete file when dropped.
+    drop(target);
 }
 
 async fn wait_for_meta<T: Transport>(
@@ -470,11 +666,7 @@ async fn wait_for_meta<T: Transport>(
                 }
             }
             Some("error") => {
-                return Err(payload["message"]
-                    .as_str()
-                    .unwrap_or("the relay reported an error")
-                    .to_string()
-                    .into());
+                return Err(peer_error(&payload, "the relay reported an error").into());
             }
             _ => {}
         }
@@ -483,56 +675,133 @@ async fn wait_for_meta<T: Transport>(
     Err("the transfer connection closed before the sender described the file".into())
 }
 
-fn open_target(
+/// Works out where a transfer would land, touching nothing.
+///
+/// The name a file is expected to get is computed the way [`create_new_file`]
+/// will compute it, but by looking rather than creating, so declining leaves
+/// the directory exactly as it was. If another file takes that name while the
+/// receiver is deciding, [`create_target`] numbers past it and says so.
+fn plan_target(
     options: &ReceiveOptions,
     filename: &str,
     is_archive: bool,
     decompress: bool,
-) -> Result<Target, Box<dyn Error + Send + Sync>> {
-    fs::create_dir_all(&options.out_dir)?;
-
+) -> PlannedTarget {
     if is_archive {
-        return Ok(Target::Archive {
+        return PlannedTarget::Archive {
             root: options.out_dir.clone(),
-            extractor: Box::new(TarExtractor::new(&options.out_dir).overwriting(options.force)),
-        });
+        };
     }
 
     // A remote peer chooses this name, so keep only the final component: an
     // archive-style path in `filename` must not decide where the file lands.
-    let mut safe_name = Path::new(filename)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty() && name != "." && name != "..")
-        .unwrap_or_else(|| "download.bin".to_string());
+    // On Windows the component is also rewritten, so `report:v2.pdf` is saved
+    // as a file rather than as a stream on a file named `report`.
+    let (mut name, renamed) =
+        names::received_file_name(filename, names::Naming::for_this_platform());
 
     if decompress {
-        safe_name = strip_gz(&safe_name).to_string();
+        name = strip_gz(&name).to_string();
     }
 
-    let requested = options.out_dir.join(&safe_name);
+    let requested = options.out_dir.join(&name);
 
     if options.force {
-        let file = fs::File::create(&requested)?;
-        return Ok(Target::File {
+        let replacing = requested.symlink_metadata().is_ok();
+        return PlannedTarget::File {
+            directory: options.out_dir.clone(),
             path: requested,
-            file,
-        });
+            instead_of: renamed.then(|| filename.to_string()),
+            name,
+            replacing,
+        };
     }
 
-    let (path, file) = create_new_file(&options.out_dir, &safe_name)?;
+    let path = (0..=MAX_NAME_ATTEMPTS)
+        .map(|attempt| {
+            if attempt == 0 {
+                requested.clone()
+            } else {
+                options.out_dir.join(numbered_name(&name, attempt))
+            }
+        })
+        .find(|candidate| candidate.symlink_metadata().is_err())
+        .unwrap_or_else(|| requested.clone());
 
-    if path != requested {
-        eprintln!(
-            "{} already exists; saving as {} instead",
-            safe_name,
-            path.file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy()
-        );
+    let instead_of = (renamed || path != requested).then(|| filename.to_string());
+
+    PlannedTarget::File {
+        directory: options.out_dir.clone(),
+        path,
+        name,
+        instead_of,
+        replacing: false,
     }
+}
 
-    Ok(Target::File { path, file })
+impl PlannedTarget {
+    fn landing(&self) -> consent::Landing {
+        match self {
+            Self::File {
+                path,
+                instead_of,
+                replacing,
+                ..
+            } => consent::Landing::File {
+                path: path.display().to_string(),
+                instead_of: instead_of.clone(),
+                replacing: *replacing,
+            },
+            Self::Archive { root } => consent::Landing::Folder {
+                into: root.display().to_string(),
+            },
+        }
+    }
+}
+
+/// Creates what [`plan_target`] described, now that the receiver has agreed.
+fn create_target(
+    options: &ReceiveOptions,
+    planned: PlannedTarget,
+) -> Result<Target, Box<dyn Error + Send + Sync>> {
+    fs::create_dir_all(&options.out_dir)?;
+
+    match planned {
+        PlannedTarget::Archive { root } => Ok(Target::Archive {
+            extractor: Box::new(TarExtractor::new(&root).overwriting(options.force)),
+            root,
+        }),
+        PlannedTarget::File {
+            directory,
+            path: expected,
+            name,
+            replacing: _,
+            instead_of: _,
+        } => {
+            if options.force {
+                let file = fs::File::create(&expected)?;
+                return Ok(Target::File {
+                    file: PartialFile::new(expected.clone(), file),
+                    path: expected,
+                });
+            }
+
+            let (path, file) = create_new_file(&directory, &name)?;
+
+            if path != expected {
+                eprintln!(
+                    "{} was taken while you were deciding; saving as {} instead",
+                    display::for_terminal(&expected.display().to_string()),
+                    display::for_terminal(&path.display().to_string())
+                );
+            }
+
+            Ok(Target::File {
+                file: PartialFile::new(path.clone(), file),
+                path,
+            })
+        }
+    }
 }
 
 /// Creates the destination file, adding `-1`, `-2`, and so on to the name when
@@ -654,19 +923,21 @@ fn report(target: &Target, received: u64) {
         Target::File { path, .. } => {
             eprintln!(
                 "Saved {} ({}).",
-                path.display(),
+                display::for_terminal(&path.display().to_string()),
                 crate::progress::format_bytes(received)
             );
         }
         Target::Archive { root, extractor } => {
             for warning in extractor.warnings() {
-                eprintln!("warning: {warning}");
+                // Warnings quote entry names from the archive, which the
+                // sender chose.
+                eprintln!("warning: {}", display::for_terminal(warning));
             }
 
             eprintln!(
                 "Extracted {} files into {}.",
                 extractor.files_written(),
-                root.display()
+                display::for_terminal(&root.display().to_string())
             );
         }
     }

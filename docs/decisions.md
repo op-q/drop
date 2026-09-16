@@ -277,6 +277,12 @@ depends on infrastructure nobody involved is paying for.
 
 ## 11. The browser runs the envelope as WebAssembly, not a second implementation
 
+> **Superseded by entry 17.** The browser client and `crypto-wasm/` were
+> removed in 0.4.0. What survives is the crate boundary this entry created:
+> `crypto/` stays a separate crate for its own sake, and the argument below,
+> one implementation compiled rather than two kept in step by hand, is the
+> one any future browser client inherits.
+
 **Decision.** The envelope is its own crate, `crypto/`, and `crypto-wasm/`
 compiles it to WebAssembly for the browser. The web client implements no
 cryptography of its own: the SPAKE2 transcript, the chunk framing, the HKDF
@@ -590,3 +596,164 @@ move those pieces in-house.
 
 The `k8s/overlays/gke` manifests still carry the placeholder `drop.example.com`.
 They describe how to host a relay, not one that is running.
+
+## 17. The browser client is removed, and the relay stays
+
+**Decision.** `web/` and `crypto-wasm/` are deleted, with everything that
+existed only for them: the relay's `/` and `/assets` routes, CORS and
+`DROP_ALLOWED_ORIGINS`, `Dockerfile.fullstack`, the `web` CI job, npm in
+dependabot, and the JavaScript CodeQL analysis, which now analyses Rust. `GET /`
+answers 404 with one line saying what the host is. The CLI installer, which only
+lived in `web/public/` because entry 8's frontend host served it, moved to
+`scripts/install.sh` first, in its own change, so no commit could break a
+release. Shipped in 0.4.0.
+
+**Why.** Entry 16 removed the browser client's audience. With no hosted relay,
+the only person who could reach it was someone self-hosting the full-stack
+image. It had also never been exercised by a browser: its interoperation tests
+drove the envelope from Node, and `tsc` does not check `.svelte` files. So it
+was an untested second implementation of the protocol, and it cost the most
+expensive CI job and a stream of dependency updates. And it would have had to
+learn every wire change coming in 0.4.0 (key confirmation, receiver consent,
+cancel), each of which it would have carried untested.
+
+**The relay is not part of this.** Its browser reason is gone; its other reason
+is real and tested. `--transport relay` is what works on a network that lets no
+UDP out, and netlab's UDP-blocked topology covers exactly that case.
+Deleting the browser client is not a step towards deleting the relay, and
+that would need its own entry.
+
+**What is kept.** The rules in `AGENTS.md` and `security.md` about what a
+browser transfer may be called stay, marked dormant, because they bind any
+future browser client unchanged:
+[`plans/browser-on-iroh-plan-2026-09-11.md`](plans/browser-on-iroh-plan-2026-09-11.md)
+is that future, and a browser still runs code its site delivered whatever
+carries the bytes. The `crypto/` crate boundary stays (entry 11).
+
+**Recovering the client.** The last tree with it is `a1e84d6`, the 0.3.0 release
+merge; `App.svelte` and the rest are there.
+
+**Consequences.** A self-hoster running `Dockerfile.fullstack` loses the browser
+UI and has to build `Dockerfile` instead; release notes say so plainly. A relay
+with `DROP_ALLOWED_ORIGINS` set ignores it, so anyone serving their own
+frontend against a self-hosted relay stops getting CORS headers. Removing the
+job names changes two required status checks in the repository's branch
+protection ("Web" goes, "Analyze JavaScript and TypeScript" becomes "Analyze
+Rust"), which is a settings change, not a code change.
+
+While removing `Dockerfile.fullstack`, `Dockerfile` turned out not to build: it
+copied the CLI's manifest but not `crypto/`, the CLI's path dependency, so
+cargo could not load the workspace. That had been true of both images since the
+envelope became its own crate. It now copies `crypto/` and builds with
+`--locked`.
+
+## 18. The receiver proves it opened the metadata, on both paths, as protocol version 2
+
+**Decision.** `meta_ok` carries `confirmation`, the hex of a fourth HKDF output
+(`drop/v1/confirm`, 32 bytes), and the sender streams nothing until it matches
+its own copy under a constant-time comparison. Both carriers run the
+checkpoint: the relay forwards `meta_ok` verbatim instead of refusing it. A
+missing, malformed or wrong confirmation is one failed attempt, exactly like an
+`error`, a timeout or a disconnect. `ENVELOPE_VERSION` and `DROP_ALPN` both
+become 2, so a 0.3.0 peer or relay is refused by name rather than meeting a
+0.4.0 one and failing in a way that looks like a wrong code.
+
+**Why.** Entry 13 made the sender count guesses and ask a human, so that being
+probed is visible. It rested on a frame the probed-for party could forge: a
+guesser who could not open the metadata could still say `meta_ok`, the counter
+never climbed, and the human was never asked. The rate limit held and the
+noticing did not. The confirmation makes the answer a proof. Derived rather than
+a second sealing, because every extra use of a key is another nonce to manage,
+and one HKDF output costs nothing and reveals nothing.
+
+Both paths rather than the direct path only, because the relay path gets
+something real from it: a sender can say "the code was right" before a byte
+moves, which the receiver consent work in
+[`plans/receiver-consent-and-status-plan-2026-09-14.md`](plans/receiver-consent-and-status-plan-2026-09-14.md)
+builds on. Over the relay a failed checkpoint ends the transfer; the relay has
+already refused a second claim, so there is nothing to offer another attempt to.
+
+**The version now versions the conversation**, not only the sealing. Entry 7
+and `protocol.md` described `ENVELOPE_VERSION` as the envelope's version. It was
+already checked at both ends and at the relay and already fatal on mismatch, so
+it is the right gate for a change in what the peers say, and a separate
+"conversation version" would be a second number to keep in step. The ALPN
+carries the same number, and a test fails if they drift.
+
+**Consequences.** This is a wire break, and it arrived later than it should
+have. The plan said to land it before the direct path shipped, and the direct
+path shipped in v0.2.0. A 0.4.0 build does not interoperate with 0.3.0 or
+earlier on either path, or with a 0.3.0 relay; each refuses with a message
+naming versions. The receiver consent work changes the conversation again under
+the same unreleased version 2, so users take one break, not two.
+
+## 19. The receiver consents before a byte is written, and unattended consent is explicit
+
+**Decision.** After the key confirmation, the receiver is shown the transfer
+(name, a type label from the real extension, size, where it will land, and a
+folder's counts) and answers before anything is created. `accept` lets the
+sender stream, and the relay carries no chunk before it. `decline` ends the
+transfer as a normal outcome. An unanswered question is declined after 120
+seconds. Without a terminal on stdin, `drop recv` refuses to start unless given
+`--yes`. `decline` and `cancel` carry reasons from a fixed set. `/metrics`
+counts declines and cancels apart from failures. Everything rides on protocol
+version 2 (entry 18).
+
+**Why.** A receiver learned what it was getting only as it arrived, and the
+file was created before any question could have been asked. The user asked for
+this first on 2026-09-14. The design choices each close a way of getting it
+wrong:
+
+- *Planned, not created.* The destination's name, including collision
+  numbering and Windows rewriting, is computed by looking, so a decline leaves
+  no empty file and no used-up numbered name.
+- *The receiver's type label, not the sender's MIME type.* Both come from the
+  sender, but the extension of the file that lands is what decides what
+  opening it does.
+- *`--yes` required without a terminal* (the user's choice over auto-accepting).
+  Auto-accepting keeps old scripts working, and removes consent in exactly the
+  case where nobody is watching. The refusal happens before contacting anyone,
+  so it never spends a code.
+- *Reasons as enumerations.* Free text would be a second route for a peer's
+  words onto the other terminal, after the one `cli/src/display.rs` closed.
+- *The relay gates chunks on `accept`.* The receiver checks too; the relay's
+  check keeps its shared memory budget from being spent on unaccepted bytes.
+- *Keep reading while asking.* A relay socket nobody reads stops answering
+  pings and is dropped. So every carrier's `receive` must be cancel-safe, and
+  the QUIC framing now keeps partial frames in the transport.
+
+**Consequences.** Scripts that pipe `drop recv` must add `--yes`. A 0.3.0 relay
+cannot carry a 0.4.0 transfer. Three clocks bound an unanswered question, in
+this order: the receiver's 120 seconds, the sender's 150, the relay's five-minute
+session. A test fails if they are reordered. A person cancelling mid-transfer
+from a key or Ctrl-C is not part of this entry; the frames exist, and wiring a
+person to them is the consent plan's phase 4.
+
+## 20. Cancelling is a message to the peer, and each ending has its own exit status
+
+**Decision.** The first Ctrl-C or SIGTERM cancels the transfer. The next thing
+the transfer waits on sends the peer `cancel {reason: "user"}` and stops; a
+second signal, or two seconds without stopping, exits at once as before. The
+mechanism is a wrapper around the transport (`cancel::Cancellable`), so every
+wait in both directions honours it. A receiver deletes a partially written file
+on every early exit, not only on integrity failures. The binary exits `3` when
+the receiver declined or did not answer, `4` when the other side cancelled, and
+`130` when cancelled here. Declines and cancels print as sentences, not errors.
+
+**Why.** Before, Ctrl-C exited without a word: the peer saw a dropped connection
+and the relay counted a failure. The user asked for cancel on both sides and for
+the other side to be told. A wrapper rather than a token passed into each
+function, because a transport is already the one thing every wait goes through,
+and a token threaded by hand is a token some later wait forgets. The second
+signal keeps the old guarantee that Ctrl-C always gets you out, even of a
+transfer stuck somewhere that will not notice.
+
+Distinct exit statuses, because a script deciding whether to retry needs to know
+whether the other person said no, stopped it, or whether something broke, and
+matching on English text is what `--status` was introduced to avoid.
+
+**Consequences.** A transfer in progress can take up to about a second longer to
+exit on Ctrl-C while it tells the peer. A script that treated any non-zero exit
+as a failure still does; one that checks for `1` specifically now misses
+declines and cancels, deliberately. The interface does not have a cancel key yet,
+because it closes before a transfer starts; that is the consent plan's phase 5.

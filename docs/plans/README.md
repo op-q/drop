@@ -40,9 +40,72 @@ the plan contract unmissable and indexes what is here.
   Phase 2 is the QUIC transport, and starts with a decision the refactor
   surfaced — the relay renames and invents control frames, and a direct
   connection has nobody to do that.
+- [`browser-client-removal-plan-2026-09-11.md`](browser-client-removal-plan-2026-09-11.md)
+  — **active 2026-09-14**, open questions answered; phase 0 is next and lands
+  alone. Delete `web/` and `crypto-wasm/` and every dependent, keeping the relay.
+  [`../decisions.md`](../decisions.md) entry 16 removed the browser client's
+  audience: with no hosted relay and no compiled-in default, only someone
+  self-hosting the fullstack image can reach it. Phase 0 stands alone and is
+  release-critical — `release.yml` publishes `web/public/install.sh`, so the
+  script moves to `scripts/` before anything is deleted or the next tag fails
+  in `publish` after a full build matrix. The relay is explicitly not in scope:
+  its browser justification is gone, its UDP-blocked one is real and `netlab`
+  covers it.
+- [`network-lab-plan-2026-08-31.md`](network-lab-plan-2026-08-31.md)
+  — **2026-09-14 finding:** hole punching has never been exercised in the lab.
+  QUIC address discovery fails TLS against the lab's self-signed helper
+  (`UnknownIssuer`), so no peer learns its public address and no punch is
+  attempted. The full-cone row fails for that reason, not because iroh cannot
+  punch. The same gap hits a self-hosted relay with a private-CA certificate;
+  see the self-hosted rendezvous plan's phase 3. Background:
+  a `netlab/` directory that runs the real binaries inside Linux network
+  namespaces against constructed topologies, so the peer-to-peer plan's
+  validation gates stop being unreachable by hand. Two findings shape it: the
+  lab needs no root, because an unprivileged user namespace grants
+  `CAP_NET_ADMIN` inside itself; and the direct path cannot run hermetically as
+  the code stands, because rendezvous needs the public DHT, n0's relays, and an
+  address that [`../decisions.md`](../decisions.md) entry 14 deliberately
+  refuses to publish. The relay-path topologies are unblocked and come first.
+- [`self-hosted-rendezvous-plan-2026-09-10.md`](self-hosted-rendezvous-plan-2026-09-10.md)
+  — phases 1 and 2 shipped in 0.3.0. Phase 3, proposed 2026-09-14 and awaiting
+  the user's decision: trust an operator's CA for the rendezvous relay, or
+  document that traversal needs a publicly trusted certificate.
 
 ## Proposed
 
+- [`receiver-consent-and-status-plan-2026-09-14.md`](receiver-consent-and-status-plan-2026-09-14.md)
+  — the receiver sees name, type, size and destination and accepts before a
+  byte is written; either side can cancel and the other is told in words; the
+  sender sees the receiver's state throughout. Supersedes the 2026-08-19
+  confirmation plan. Three findings: a received filename can put escape
+  sequences on the terminal **today**, so display sanitisation lands first and
+  alone; Ctrl-C tells the peer nothing and the relay counts a cancel as a
+  failure; and the sender's progress is already acknowledgement-driven, so
+  "how much the receiver has" needs no new frame. A wire change, bumping
+  `ENVELOPE_VERSION` and `DROP_ALPN` to 2 together with `meta_ok` confirmation,
+  so 0.3.0 against 0.4.0 fails with a sentence instead of a hang.
+- [`cross-platform-plan-2026-09-14.md`](cross-platform-plan-2026-09-14.md)
+  — Windows, macOS and Linux, and transfers between them. Today Linux is the
+  only platform tests have ever run on, macOS is built but untested, and
+  Windows has no build. Phase 0 puts the test suite on all three runners first,
+  because every `cfg(not(unix))` branch has never compiled. Findings from
+  reading: a symlink in a folder aborts every Linux-to-Windows folder transfer;
+  names like `a:b`, `CON` and `report.` mean something else to Windows (an NTFS
+  stream, a device, a stripped dot); closing the Windows console leaves spool
+  files in `%TEMP%`. Cross-OS confidence comes from archives produced on each OS
+  and extracted on the others in CI, plus a manual Windows ↔ Linux checklist on
+  the user's machine. The wire itself is platform-neutral.
+
+- [`browser-on-iroh-plan-2026-09-11.md`](browser-on-iroh-plan-2026-09-11.md)
+  — **not scheduled.** Rebuild the browser client as an iroh node compiled to
+  wasm, so a browser speaks the same conversation as the CLI and the relay
+  stops translating between two dialects. Recorded so it is not rediscovered as
+  new. Blocked on three things: the transport trait declares every future
+  `Send` and wasm futures are not, `discovery-pkarr-dht` cannot run in a
+  browser so rendezvous needs an HTTP relay the entry 15 variables do not
+  describe, and `meta_ok` must land first or the wire breaks twice. A browser
+  peer is permanently relayed — iroh cannot hole-punch from a sandbox — so it
+  is never the direct path.
 - [`interactive-terminal-ui-plan-2026-09-10.md`](interactive-terminal-ui-plan-2026-09-10.md)
   — make `drop send` and `drop recv` the only two things a person needs to
   know: typed bare on a terminal each opens a small full-screen interface, and
@@ -52,25 +115,18 @@ the plan contract unmissable and indexes what is here.
   unwinding, so a raw terminal is never restored on Ctrl-C. Terminal lifecycle
   therefore lands before a single screen is drawn. Bare `drop` opens a chooser
   on a terminal, and still prints usage and exits 1 anywhere else.
-
-
-- [`network-lab-plan-2026-08-31.md`](network-lab-plan-2026-08-31.md)
-  — a `netlab/` directory that runs the real binaries inside Linux network
-  namespaces against constructed topologies, so the peer-to-peer plan's
-  validation gates stop being unreachable by hand. Two findings shape it: the
-  lab needs no root, because an unprivileged user namespace grants
-  `CAP_NET_ADMIN` inside itself; and the direct path cannot run hermetically as
-  the code stands, because rendezvous needs the public DHT, n0's relays, and an
-  address that [`../decisions.md`](../decisions.md) entry 14 deliberately
-  refuses to publish. The relay-path topologies are unblocked and come first.
 - [`meta-ok-key-confirmation-plan-2026-08-31.md`](meta-ok-key-confirmation-plan-2026-08-31.md)
   — make the receiver prove it opened the sealed metadata instead of saying so.
   `meta_ok` carries a key-confirmation value derived from the agreed secret and
   compared in constant time, closing the case where an attacker who guessed
   wrong claims success and so suppresses the prompt entry 13 exists to raise.
+
+## Abandoned
+
 - [`receiver-confirmation-plan-2026-08-19.md`](receiver-confirmation-plan-2026-08-19.md)
-  — show the receiver what it is about to accept and require a y/n before any
-  bytes move. Adds a protocol handshake and a new terminal outcome.
+  — superseded 2026-09-14 by the receiver consent and status plan. Written
+  against cleartext metadata and a browser client; its three findings carried
+  forward, its protocol design did not.
 
 ## Done
 
@@ -120,3 +176,37 @@ story for the slow one.
 
 Confirmation last is otherwise unchanged, and no longer carries the caveat that
 it ships while the relay can forge the filename it displays.
+
+**Revised 2026-09-14**, at the user's direction. The priorities are now receiver
+consent, cancel on both sides, and the sender seeing the receiver's state; proof
+of NAT traversal; and Windows, macOS and Linux with transfers between them. The
+order that serves them, by dependency:
+
+1. **Browser removal phase 0**, alone. Release-critical, and every later plan
+   edits `release.yml` or `ci.yml` after it.
+2. **Cross-platform phase 0** (tests on three OSes). Cheap, and every later
+   change is then checked on Windows as it lands instead of all at once at
+   the end.
+3. **Browser removal phases 1–4.** Deletes the `meta_ok` plan's browser phase and
+   the second protocol implementation that would otherwise need the new frames.
+4. **Consent plan phase 1** (display sanitisation). A live bug and no wire
+   change.
+5. **`meta_ok` key confirmation, then consent phases 2–4.** One wire bump, to
+   version 2.
+6. **Cross-platform phases 1–3** (Windows receiver, sender, build and install),
+   then **consent phase 5** with the interface's transfer screen.
+7. **Tag 0.4.0.**
+8. Then the NAT proof, once self-hosted rendezvous phase 3 is decided, and
+   cross-platform phases 4–5.
+
+**Progress, 2026-09-15.** Steps 1–5 and the cross-platform phases 1–4 are written,
+as a stack of pull requests waiting for review: #65 (these plans), #66 (move the
+installer), #67 (CI on three OSes), #68 (display sanitisation), #69 (browser
+removal), #70 (Windows receiver), #71 (`meta_ok` confirmation), #72 (consent),
+#73 (cancel and status), #74 (Windows sender), #75 (Windows release and
+installers), #76 (cross-OS archives in CI). Separately, #77 fixes a shipped bug
+found by the lab: a stray QUIC handshake ended a direct-path send, which was
+the long-unexplained `authentication failed`. Not started: consent phase 5 (the
+interface screens) and cross-platform phase 5 (the manual Windows checklist).
+Tagging 0.4.0 waits on the merges. The NAT proof still waits on the decision in
+the self-hosted rendezvous plan's phase 3.

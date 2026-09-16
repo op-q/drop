@@ -56,8 +56,10 @@ async fn readiness_endpoint_tracks_draining_state() {
     assert_eq!(draining.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// The relay serves no web page. The root says so in words rather than as a
+/// bare 404, because the operator is the one person who will open it.
 #[tokio::test]
-async fn index_serves_the_drop_entrypoint() {
+async fn the_root_explains_what_this_host_is() {
     let app = test_app(SocketAddr::from(([127, 0, 0, 1], 3001)));
 
     let response = send(
@@ -69,10 +71,13 @@ async fn index_serves_the_drop_entrypoint() {
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let body = response_text(response).await;
-    assert!(body.contains(r#"<div id="app"></div>"#));
-    assert!(body.contains(r#"./assets/"#));
+    assert!(body.contains("Drop relay"), "unexpected body: {body}");
+    assert!(
+        body.contains("github.com/op-q/drop"),
+        "unexpected body: {body}"
+    );
 }
 
 #[tokio::test]

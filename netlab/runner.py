@@ -2,8 +2,8 @@
 
 This module starts processes and inspects their output. It does not implement
 any part of the Drop protocol — no envelope, no handshake, no framing, no chunk
-sealing. `docs/decisions.md` entry 11 refuses a second implementation of the
-envelope for the browser, and a Python one here would reintroduce exactly the
+sealing. `docs/decisions.md` entry 11 refused a second implementation of the
+envelope for the browser client, and a Python one here would reintroduce exactly the
 drift that decision prevents. What the lab knows about a transfer is what the
 binaries said and what landed on disk.
 
@@ -296,6 +296,21 @@ class Half:
     def fallback(self) -> str | None:
         return self._status("fallback")
 
+    @property
+    def states(self) -> list[str]:
+        """The `drop-status: state=` lines, in the order they were printed.
+
+        What a peer went through, in the stable vocabulary: `connected`,
+        `code-ok`, `accepted`, `finishing`, `done` for a sender that got all the
+        way, and `declined` or `cancelled` for one that did not.
+        """
+        prefix = "drop-status: state="
+        return [
+            line.strip()[len(prefix):]
+            for line in self.stderr.splitlines()
+            if line.strip().startswith(prefix)
+        ]
+
     def _status(self, field: str) -> str | None:
         for line in self.stderr.splitlines():
             match = STATUS.match(line.strip())
@@ -404,7 +419,10 @@ def transfer(
         receiver = subprocess.Popen(
             [
                 "ip", "netns", "exec", net.receiver, str(binaries.drop),
-                "recv", code, *common, "--out", str(destination),
+                # `--yes`: nobody is at this terminal to be asked, and since
+                # protocol version 2 a receiver without a terminal refuses
+                # to start rather than accept silently.
+                "recv", code, *common, "--yes", "--out", str(destination),
             ],
             env=environment,
             stdout=subprocess.PIPE,

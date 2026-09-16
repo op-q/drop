@@ -25,19 +25,24 @@ this repository.
   not only against path text: a lexical check alone misses an entry that
   escapes by traversing a symlink an earlier entry created. Extraction must not
   replace files the receiver already has unless it was asked to.
-- **Peer-to-peer is a claim about one path, never about Drop as a whole.** Every
-  transfer today crosses the relay, so Drop itself must not be described as
-  peer-to-peer. The direct CLI-to-CLI QUIC path in
+- **Peer-to-peer is a claim about one path, never about Drop as a whole.** The
+  direct CLI-to-CLI QUIC path in
   [`docs/plans/peer-to-peer-transport-plan-2026-08-20.md`](docs/plans/peer-to-peer-transport-plan-2026-08-20.md)
-  genuinely involves no Drop-operated server, and once it ships it may be
-  described that way **for that path**, naming the relay fallback alongside it.
-  Browser transfers never qualify. This is the same rule the encryption claim
-  below follows: a headline must not claim what only one path delivers.
-- CLI-to-CLI transfers are end-to-end encrypted and may be described so. Browser
-  transfers are encrypted in the browser but are only as strong as the code the
-  site delivered, which defeats a passive operator and stored traffic but not a
-  server that actively serves modified client code. Never describe the two cases
-  in wording that blurs them. See `docs/decisions.md` entries 7 and 11.
+  involves no Drop-operated server and may be described that way **for that
+  path**, naming the relay fallback alongside it. A transfer that falls back to
+  the relay does not qualify, so Drop as a whole must not be described as
+  peer-to-peer. This is the same rule the encryption claim below follows: a
+  headline must not claim what only one path delivers.
+- CLI-to-CLI transfers are end-to-end encrypted and may be described so.
+- **No browser client ships** (`docs/decisions.md` entry 17). These two rules
+  stay because they bind any future one, and the plan for one exists:
+  [`docs/plans/browser-on-iroh-plan-2026-09-11.md`](docs/plans/browser-on-iroh-plan-2026-09-11.md).
+  A browser transfer never qualifies as peer-to-peer. A browser transfer is
+  encrypted in the browser but is only as strong as the code the site
+  delivered, which defeats a passive operator and stored traffic but not a
+  server that actively serves modified client code. Never describe it in
+  wording that blurs it with the CLI case. See `docs/decisions.md` entries 7
+  and 11.
 - Treat active session codes, transferred bytes, filenames, IP addresses, and
   operational logs as sensitive.
 - Preserve the one-sender, one-receiver session lifecycle and bounded resource
@@ -62,17 +67,37 @@ this repository.
 - Record a costly or hard-to-reverse choice in
   [`docs/decisions.md`](docs/decisions.md) rather than only in a commit message.
 
+## Release notes
+
+Each release has one file, `docs/releases/vX.Y.Z.md`, written on the release
+branch and reviewed in its pull request. The release workflow refuses a tag
+without one and publishes it as the GitHub release text.
+[`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md) is the model.
+
+- Use only these headings, in this order, and leave out any with nothing
+  under it: `## Before you upgrade`, `## Added`, `## Fixed`.
+- **Before you upgrade** is for anything that stops working or needs action:
+  a protocol break, a changed default, a removed flag or feature.
+- One bullet per change, one or two short sentences, written for someone who
+  uses `drop`, not someone who reads its code. Say what they can do now, or what
+  no longer goes wrong.
+- Leave out what a user never notices: refactors, tests, CI, documentation,
+  dependency bumps, and plan or decision numbers. No PR numbers, commit hashes,
+  or credits.
+- A security fix goes under **Fixed** and says plainly what was possible
+  before.
+- Claim only what is tested. Twelve bullets is a lot; merge small related
+  changes into one.
+
 ## Development workflow
 
 - Keep changes focused and include tests for behavior changes.
 - Run Rust formatting, Clippy, and tests when a Rust toolchain is available.
-- The repository is a Cargo workspace (`api` and `cli`); run workspace-wide
-  checks, not just the root package.
-- Build the web client after changing Svelte, TypeScript, HTML, or CSS. The
-  web build compiles `crypto-wasm/` to WebAssembly first, so it needs a Rust
-  toolchain and the `wasm32-unknown-unknown` target as well as Node.
-- `tsc --noEmit` does not cover `.svelte` files. Changes to `App.svelte` are
-  checked by the build and by tests, not by the type checker.
+- The repository is a Cargo workspace (`api`, `cli` and `crypto`); run
+  workspace-wide checks, not just the root package.
+- CI runs Clippy and the tests on Linux, macOS and Windows. A change that only
+  compiles on one of them is not done; see
+  [`docs/plans/cross-platform-plan-2026-09-14.md`](docs/plans/cross-platform-plan-2026-09-14.md).
 - Keep README claims aligned with tested behavior and deployment reality.
 - Avoid committing caches and unrelated generated output.
 
@@ -83,9 +108,4 @@ scripts/check-secrets.sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets
-npm --prefix web ci
-npm --prefix web run build
-npm --prefix web run typecheck
-npm --prefix web test
-npm --prefix web audit --audit-level=high
 ```

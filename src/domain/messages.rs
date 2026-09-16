@@ -19,7 +19,12 @@ pub enum SenderMessage {
         metadata: String,
     },
     Complete,
-    Cancel,
+    /// The sender abandons the transfer. `reason` is one of a fixed set;
+    /// see [`cancel_reason`].
+    Cancel {
+        #[serde(default)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +34,12 @@ pub enum ReceiverMessage {
     KeyExchange {
         message: String,
     },
+    /// The receiver opened the sealed metadata, and proves it with a value
+    /// only a peer holding the same keys can produce. Forwarded to the sender
+    /// untouched: the relay cannot check the proof, and does not need to.
+    MetaOk {
+        confirmation: String,
+    },
     ChunkAck {
         bytes_received: u64,
     },
@@ -36,4 +47,45 @@ pub enum ReceiverMessage {
         bytes_received: u64,
     },
     Error,
+    /// The receiver saw what was offered and agreed. Until this arrives the
+    /// relay carries no chunk.
+    Accept,
+    /// The receiver saw what was offered and refused, or did not answer in
+    /// time. A normal ending, not a failure.
+    Decline {
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    /// The receiver abandons the transfer.
+    Cancel {
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    /// Every byte has arrived and the receiver is closing the file or
+    /// finishing an extraction, which for a large archive takes a while.
+    Finishing,
+}
+
+/// Why a receiver declined, from the fixed set peers agree on.
+///
+/// Normalised here rather than forwarded as sent, so the relay never passes a
+/// peer's own text to the other peer's terminal. Anything unrecognised is an
+/// ordinary decline.
+pub fn decline_reason(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("timed_out") => "timed_out",
+        _ => "declined",
+    }
+}
+
+/// Why a peer cancelled, from the fixed set peers agree on. Anything
+/// unrecognised is a person choosing to stop.
+pub fn cancel_reason(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("write_failed") => "write_failed",
+        Some("read_failed") => "read_failed",
+        Some("integrity") => "integrity",
+        Some("too_large") => "too_large",
+        _ => "user",
+    }
 }

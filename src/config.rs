@@ -1,10 +1,6 @@
 use std::{env, net::IpAddr};
 
-use axum::http::{
-    HeaderMap, HeaderValue, Method,
-    header::{ACCEPT, CONTENT_TYPE},
-};
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use axum::http::HeaderMap;
 
 pub const GIBIBYTE: u64 = 1024 * 1024 * 1024;
 pub const MAX_UPLOAD_SIZE_BYTES: u64 = 4 * GIBIBYTE;
@@ -71,7 +67,7 @@ pub const PROGRESS_INTERVAL_MS: u64 = 200;
 /// `crypto::envelope`, because the relay cannot depend on the client crate;
 /// `envelope_version_matches_the_client` in `cli/tests/protocol.rs` fails if
 /// the two ever drift apart.
-pub const ENVELOPE_VERSION: u8 = 1;
+pub const ENVELOPE_VERSION: u8 = 2;
 
 /// Ceiling on an opaque client-supplied field the relay forwards without
 /// understanding — the sealed metadata blob and the key-exchange messages.
@@ -118,33 +114,6 @@ pub fn bind_addr_from_env() -> String {
     }
 
     "0.0.0.0:8080".into()
-}
-
-pub fn cors_layer_from_env() -> CorsLayer {
-    let layer = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers([CONTENT_TYPE, ACCEPT]);
-
-    let origins = env::var("DROP_ALLOWED_ORIGINS")
-        .ok()
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|origin| !origin.is_empty())
-                .map(|origin| {
-                    HeaderValue::from_str(origin)
-                        .expect("DROP_ALLOWED_ORIGINS contains an invalid origin value")
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    if origins.is_empty() {
-        layer
-    } else {
-        layer.allow_origin(AllowOrigin::list(origins))
-    }
 }
 
 pub fn client_ip_from_request(peer_ip: IpAddr, headers: &HeaderMap) -> IpAddr {

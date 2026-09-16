@@ -61,26 +61,25 @@ async fn next_binary_message(
     }
 }
 
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// The receiver agrees to what it was shown, and the sender hears it. Since
+/// protocol version 2 the relay carries no chunk before this.
+async fn accept_the_transfer(receiver_ws: &mut Socket, sender_ws: &mut Socket) {
+    receiver_ws
+        .send(Message::text(json!({ "type": "accept" }).to_string()))
+        .await
+        .expect("expected the acceptance to be sent");
+    next_json_message_matching(sender_ws, |payload| payload["type"] == "accept").await;
+}
+
 /// Inserts a session the way `POST /api/session/create` would, with neither
 /// peer connected yet.
 async fn insert_session(state: &api::app_state::AppState, code: &str, ciphertext_size: u64) {
     state
         .sessions
-        .insert(
-            code.to_string(),
-            Session {
-                ciphertext_size,
-                created_at: Instant::now(),
-                last_activity: Instant::now(),
-                sender_tx: None,
-                download_tx: None,
-                sender_connected: false,
-                receiver_connected: false,
-                bytes_relayed: 0,
-                receiver_acknowledged_bytes: 0,
-                sender_finished: false,
-            },
-        )
+        .insert(code.to_string(), Session::new(ciphertext_size))
         .await;
 }
 
@@ -113,21 +112,7 @@ async fn upload_socket_rejects_chunks_over_the_message_cap() {
     let state = build_state();
     state
         .sessions
-        .insert(
-            code.to_string(),
-            Session {
-                ciphertext_size: file_size,
-                created_at: Instant::now(),
-                last_activity: Instant::now(),
-                sender_tx: None,
-                download_tx: None,
-                sender_connected: false,
-                receiver_connected: false,
-                bytes_relayed: 0,
-                receiver_acknowledged_bytes: 0,
-                sender_finished: false,
-            },
-        )
+        .insert(code.to_string(), Session::new(file_size))
         .await;
 
     let server = spawn_network_test_server_with_state(state.clone()).await;
@@ -161,11 +146,36 @@ async fn upload_socket_rejects_chunks_over_the_message_cap() {
         .await
         .expect("expected sender meta message to be sent");
     next_json_message_matching(&mut receiver_ws, |payload| payload["type"] == "meta").await;
+    accept_the_transfer(&mut receiver_ws, &mut sender_ws).await;
 
-    sender_ws
-        .send(Message::binary(oversized))
-        .await
-        .expect("expected oversized chunk to be written");
+    // The relay refuses the frame from its header and closes the socket, which
+    // can happen while this side is still writing the frame's body. Whether
+    // the write finishes first depends on how much the kernel's socket buffer
+    // absorbs: on Linux it usually does, on macOS it usually does not, and the
+    // write fails with a broken pipe or a reset. Both mean the relay hung up on
+    // an oversized frame, which is the behaviour under test. What is asserted
+    // is what the receiver saw, below.
+    if let Err(error) = sender_ws.send(Message::binary(oversized)).await {
+        let hung_up = matches!(
+            &error,
+            tokio_tungstenite::tungstenite::Error::Io(io)
+                if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                )
+        ) || matches!(
+            &error,
+            tokio_tungstenite::tungstenite::Error::ConnectionClosed
+                | tokio_tungstenite::tungstenite::Error::AlreadyClosed
+        );
+
+        assert!(
+            hung_up,
+            "writing the oversized chunk failed for a reason other than the relay hanging up: {error}"
+        );
+    }
 
     // The relay must tear the session down instead of relaying the chunk. The
     // receiver stream therefore ends, with an error frame rather than any part
@@ -219,21 +229,7 @@ async fn upload_socket_relays_acknowledged_chunks_before_reporting_completion() 
     let full_budget = state.relay_budget.available_bytes();
     state
         .sessions
-        .insert(
-            code.to_string(),
-            Session {
-                ciphertext_size: file_size,
-                created_at: Instant::now(),
-                last_activity: Instant::now(),
-                sender_tx: None,
-                download_tx: None,
-                sender_connected: false,
-                receiver_connected: false,
-                bytes_relayed: 0,
-                receiver_acknowledged_bytes: 0,
-                sender_finished: false,
-            },
-        )
+        .insert(code.to_string(), Session::new(file_size))
         .await;
 
     let server = spawn_network_test_server_with_state(state.clone()).await;
@@ -292,6 +288,10 @@ async fn upload_socket_relays_acknowledged_chunks_before_reporting_completion() 
     })
     .await;
     assert_eq!(sender_sending_status["status"], "sending");
+
+    // Read past the relay's own narration first: the helper below discards
+    // anything that is not the acceptance.
+    accept_the_transfer(&mut receiver_ws, &mut sender_ws).await;
 
     let mut acknowledged = 0_u64;
     for chunk in payload.chunks(64 * 1024) {
@@ -395,21 +395,7 @@ async fn returns_the_relay_budget_after_a_receiver_abandons_a_transfer() {
 
     state
         .sessions
-        .insert(
-            code.to_string(),
-            Session {
-                ciphertext_size: file_size,
-                created_at: Instant::now(),
-                last_activity: Instant::now(),
-                sender_tx: None,
-                download_tx: None,
-                sender_connected: false,
-                receiver_connected: false,
-                bytes_relayed: 0,
-                receiver_acknowledged_bytes: 0,
-                sender_finished: false,
-            },
-        )
+        .insert(code.to_string(), Session::new(file_size))
         .await;
 
     let server = spawn_network_test_server_with_state(state.clone()).await;
@@ -443,6 +429,7 @@ async fn returns_the_relay_budget_after_a_receiver_abandons_a_transfer() {
         .await
         .expect("expected sender meta message to be sent");
     next_json_message_matching(&mut receiver_ws, |payload| payload["type"] == "meta").await;
+    accept_the_transfer(&mut receiver_ws, &mut sender_ws).await;
 
     sender_ws
         .send(Message::binary(chunk.clone()))
@@ -605,4 +592,306 @@ async fn a_sender_key_exchange_before_the_receiver_is_refused() {
 
     wait_for_session_removal(&state, code).await;
     assert_eq!(state.metrics.snapshot().total_transfer_failures, 1);
+}
+
+/// The receiver's key confirmation reaches the sender exactly as it was sent.
+///
+/// Since protocol version 2 the receiver proves it opened the metadata on
+/// both paths. The relay cannot check that proof and must not alter it: before
+/// this, the relay's closed set of receiver frames refused `meta_ok` outright
+/// and failed the session.
+#[tokio::test]
+async fn a_key_confirmation_is_forwarded_to_the_sender_verbatim() {
+    let code = "CONFIRMS";
+    let state = build_state();
+    insert_session(&state, code, 64).await;
+
+    let server = spawn_network_test_server_with_state(state.clone()).await;
+
+    let (mut receiver_ws, _) = connect_async(server.ws_url(&format!("/ws/download/{code}")))
+        .await
+        .expect("expected receiver websocket connection");
+    next_json_message_matching(&mut receiver_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "waiting_for_sender"
+    })
+    .await;
+
+    let (mut sender_ws, _) = connect_async(server.ws_url(&format!("/ws/upload/{code}")))
+        .await
+        .expect("expected sender websocket connection");
+    next_json_message_matching(&mut sender_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "receiver_connected"
+    })
+    .await;
+
+    let confirmation = "ab".repeat(32);
+    receiver_ws
+        .send(Message::text(
+            json!({ "type": "meta_ok", "confirmation": confirmation }).to_string(),
+        ))
+        .await
+        .expect("expected the confirmation to be sent");
+
+    let forwarded =
+        next_json_message_matching(&mut sender_ws, |payload| payload["type"] == "meta_ok").await;
+    assert_eq!(forwarded["confirmation"], confirmation);
+    assert!(
+        state.sessions.get(code).await.is_some(),
+        "forwarding a confirmation must not end the session"
+    );
+}
+
+/// Opaque, so bounded rather than inspected, like every other field the relay
+/// cannot read.
+#[tokio::test]
+async fn an_oversized_key_confirmation_fails_the_session() {
+    let code = "BIGCONF";
+    let state = build_state();
+    insert_session(&state, code, 64).await;
+
+    let server = spawn_network_test_server_with_state(state.clone()).await;
+
+    let (mut receiver_ws, _) = connect_async(server.ws_url(&format!("/ws/download/{code}")))
+        .await
+        .expect("expected receiver websocket connection");
+    next_json_message_matching(&mut receiver_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "waiting_for_sender"
+    })
+    .await;
+
+    let (mut sender_ws, _) = connect_async(server.ws_url(&format!("/ws/upload/{code}")))
+        .await
+        .expect("expected sender websocket connection");
+    next_json_message_matching(&mut sender_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "receiver_connected"
+    })
+    .await;
+
+    let oversized = "a".repeat(api::config::MAX_OPAQUE_FIELD_BYTES + 1);
+    receiver_ws
+        .send(Message::text(
+            json!({ "type": "meta_ok", "confirmation": oversized }).to_string(),
+        ))
+        .await
+        .expect("expected the confirmation to be sent");
+
+    let error =
+        next_json_message_matching(&mut sender_ws, |payload| payload["type"] == "error").await;
+    assert_eq!(error["message"], "key confirmation is too large");
+
+    wait_for_session_removal(&state, code).await;
+}
+
+/// Both peers connected and the transfer described to the receiver, which is
+/// where every consent decision starts.
+async fn described_transfer(code: &str) -> (api::app_state::AppState, Socket, Socket) {
+    let state = build_state();
+    insert_session(&state, code, 64).await;
+
+    let server = spawn_network_test_server_with_state(state.clone()).await;
+
+    let (mut receiver_ws, _) = connect_async(server.ws_url(&format!("/ws/download/{code}")))
+        .await
+        .expect("expected receiver websocket connection");
+    next_json_message_matching(&mut receiver_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "waiting_for_sender"
+    })
+    .await;
+
+    let (mut sender_ws, _) = connect_async(server.ws_url(&format!("/ws/upload/{code}")))
+        .await
+        .expect("expected sender websocket connection");
+    next_json_message_matching(&mut sender_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "receiver_connected"
+    })
+    .await;
+
+    sender_ws
+        .send(Message::text(
+            json!({
+                "type": "meta",
+                "version": api::config::ENVELOPE_VERSION,
+                "ciphertext_size": 64,
+                "metadata": "00",
+            })
+            .to_string(),
+        ))
+        .await
+        .expect("expected sender meta message to be sent");
+    next_json_message_matching(&mut receiver_ws, |payload| payload["type"] == "meta").await;
+
+    (state, receiver_ws, sender_ws)
+}
+
+/// Consent before bytes, enforced where the bytes would pass. A sender that
+/// streams before the receiver agreed is failed, and nothing reaches the
+/// receiver.
+#[tokio::test]
+async fn a_chunk_before_the_receiver_accepts_is_refused() {
+    let code = "EAGER";
+    let (state, mut receiver_ws, mut sender_ws) = described_transfer(code).await;
+
+    sender_ws
+        .send(Message::binary(vec![7_u8; 64]))
+        .await
+        .expect("expected the chunk to be written");
+
+    let error =
+        next_json_message_matching(&mut sender_ws, |payload| payload["type"] == "error").await;
+    assert_eq!(
+        error["message"],
+        "the sender streamed before the receiver accepted"
+    );
+
+    while let Ok(Some(Ok(message))) = timeout(Duration::from_secs(1), receiver_ws.next()).await {
+        assert!(
+            !message.is_binary(),
+            "a chunk nobody accepted reached the receiver"
+        );
+        if message.is_close() {
+            break;
+        }
+    }
+
+    wait_for_session_removal(&state, code).await;
+}
+
+/// A decline is the receiver's answer, not a failure. The sender hears it in
+/// the receiver's terms and the metrics count it apart from failures.
+#[tokio::test]
+async fn a_decline_reaches_the_sender_and_is_not_counted_as_a_failure() {
+    let code = "NOTHANKS";
+    let (state, mut receiver_ws, mut sender_ws) = described_transfer(code).await;
+
+    receiver_ws
+        .send(Message::text(
+            json!({ "type": "decline", "reason": "timed_out" }).to_string(),
+        ))
+        .await
+        .expect("expected the decline to be sent");
+
+    let decline =
+        next_json_message_matching(&mut sender_ws, |payload| payload["type"] == "decline").await;
+    assert_eq!(decline["reason"], "timed_out");
+
+    wait_for_session_removal(&state, code).await;
+    let metrics = state.metrics.snapshot();
+    assert_eq!(metrics.total_transfers_declined, 1);
+    assert_eq!(metrics.total_transfer_failures, 0);
+}
+
+/// The relay passes on a reason from the agreed set and nothing else, so a
+/// peer's own words never reach the other peer's terminal through it.
+#[tokio::test]
+async fn a_reason_outside_the_agreed_set_is_not_forwarded() {
+    let code = "WORDY";
+    let (_state, mut receiver_ws, mut sender_ws) = described_transfer(code).await;
+
+    receiver_ws
+        .send(Message::text(
+            json!({ "type": "decline", "reason": "\u{1b}[2Jgotcha" }).to_string(),
+        ))
+        .await
+        .expect("expected the decline to be sent");
+
+    let decline =
+        next_json_message_matching(&mut sender_ws, |payload| payload["type"] == "decline").await;
+    assert_eq!(decline["reason"], "declined");
+}
+
+/// The receiver can stop a transfer too, and the sender is told it was a
+/// choice rather than a dropped connection.
+#[tokio::test]
+async fn a_receiver_cancel_reaches_the_sender_and_is_not_a_failure() {
+    let code = "RCANCEL";
+    let (state, mut receiver_ws, mut sender_ws) = described_transfer(code).await;
+    accept_the_transfer(&mut receiver_ws, &mut sender_ws).await;
+
+    receiver_ws
+        .send(Message::text(
+            json!({ "type": "cancel", "reason": "user" }).to_string(),
+        ))
+        .await
+        .expect("expected the cancel to be sent");
+
+    let cancel =
+        next_json_message_matching(&mut sender_ws, |payload| payload["type"] == "cancel").await;
+    assert_eq!(cancel["reason"], "user");
+
+    wait_for_session_removal(&state, code).await;
+    let metrics = state.metrics.snapshot();
+    assert_eq!(metrics.total_transfers_cancelled, 1);
+    assert_eq!(metrics.total_transfer_failures, 0);
+}
+
+/// A sender's cancel reaches the receiver as a cancel. It used to arrive as
+/// `error: sender cancelled`, which the receiver could not tell apart from
+/// the relay breaking.
+#[tokio::test]
+async fn a_sender_cancel_reaches_the_receiver_as_a_cancel() {
+    let code = "SCANCEL";
+    let (state, mut receiver_ws, mut sender_ws) = described_transfer(code).await;
+    accept_the_transfer(&mut receiver_ws, &mut sender_ws).await;
+
+    sender_ws
+        .send(Message::text(
+            json!({ "type": "cancel", "reason": "user" }).to_string(),
+        ))
+        .await
+        .expect("expected the cancel to be sent");
+
+    let cancel =
+        next_json_message_matching(&mut receiver_ws, |payload| payload["type"] == "cancel").await;
+    assert_eq!(cancel["reason"], "user");
+
+    wait_for_session_removal(&state, code).await;
+    let metrics = state.metrics.snapshot();
+    assert_eq!(metrics.total_transfers_cancelled, 1);
+    assert_eq!(metrics.total_transfer_failures, 0);
+}
+
+/// Agreeing to something not yet described is not consent.
+#[tokio::test]
+async fn an_accept_before_the_transfer_is_described_is_refused() {
+    let code = "BLIND";
+    let state = build_state();
+    insert_session(&state, code, 64).await;
+    let server = spawn_network_test_server_with_state(state.clone()).await;
+
+    let (mut receiver_ws, _) = connect_async(server.ws_url(&format!("/ws/download/{code}")))
+        .await
+        .expect("expected receiver websocket connection");
+    next_json_message_matching(&mut receiver_ws, |payload| {
+        payload["type"] == "status" && payload["status"] == "waiting_for_sender"
+    })
+    .await;
+
+    receiver_ws
+        .send(Message::text(json!({ "type": "accept" }).to_string()))
+        .await
+        .expect("expected the accept to be sent");
+
+    let error =
+        next_json_message_matching(&mut receiver_ws, |payload| payload["type"] == "error").await;
+    assert_eq!(
+        error["message"],
+        "accept arrived before the transfer was described"
+    );
+    wait_for_session_removal(&state, code).await;
+}
+
+/// The receiver's progression reaches the sender, so a sender can say what
+/// the other end is doing.
+#[tokio::test]
+async fn acceptance_and_finishing_are_forwarded_to_the_sender() {
+    let code = "PROGRESS";
+    let (_state, mut receiver_ws, mut sender_ws) = described_transfer(code).await;
+
+    accept_the_transfer(&mut receiver_ws, &mut sender_ws).await;
+
+    receiver_ws
+        .send(Message::text(json!({ "type": "finishing" }).to_string()))
+        .await
+        .expect("expected finishing to be sent");
+    next_json_message_matching(&mut sender_ws, |payload| payload["type"] == "finishing").await;
 }

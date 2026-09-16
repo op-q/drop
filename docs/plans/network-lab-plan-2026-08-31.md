@@ -2,7 +2,7 @@
 
 Status: **in progress** — phases 0 to 4 done, 5 outstanding
 Created: **2026-08-31**
-Last updated: **2026-09-10**
+Last updated: **2026-09-14**
 
 ## Goal
 
@@ -642,6 +642,76 @@ and something about dialling an endpoint whose record was published from
 behind this NAT. The next step is packet capture on both sides of the NAT
 namespace, not another assertion.
 
+#### Second look, 2026-09-14 — **the lab cannot punch, because address discovery never works in it**
+
+Re-run on `main` at `a1e84d6`: plain LAN and symmetric NAT pass, and full cone
+fails. This time it failed by staying relayed, not with `authentication failed`:
+the rendezvous link carried 33.36 MiB, 2.09 times the 16 MiB payload. Then three
+experiments, run from a scratch test that was not committed:
+
+1. **Is the punch just late?** Throttle the core router's egress to the
+   rendezvous host to 16 Mbit, send 48 MiB, and sample the link counter every
+   half second. It climbed at a steady ~1.85 MiB per half second for the whole
+   27-second transfer and never flattened. **No punch at any point**, so it is
+   not a matter of the lab timing out too early.
+2. **Is it a conntrack clash on a NAT with no firewall?** A dump of
+   `/proc/net/nf_conntrack` on both NATs mid-transfer shows each peer sending
+   to the other's **private** address, such as `10.10.0.2 → 10.20.0.2:42277`.
+   Those packets die at the core, which has no route to either inner subnet.
+   There is **no entry at all toward the other NAT's public address**
+   (`10.60.0.2`), so nobody ever tried the mapped address. A stateful WAN
+   input firewall on both NATs, the next hypothesis, changed nothing useful.
+   That run failed with `authentication failed` instead. See below.
+3. **Did the peers learn their public address?** A temporary tracing
+   subscriber in the CLI (`iroh=debug`) answers it directly. On both peers:
+
+   ```text
+   iroh::_events::direct_addrs: addrs={DirectAddr { addr: 10.10.0.2:60090, typ: Local }}
+   iroh::net_report: QADv4: probe failed: QUIC connection failed: the cryptographic
+       handshake failed: error 48: invalid peer certificate: UnknownIssuer
+   iroh::net_report: net_report generated report=Report { udp_v4: false, ...,
+       global_v4: None, global_v6: None, ... }
+   ```
+
+**Root cause: QUIC address discovery (QAD) against the lab's rendezvous helper
+fails TLS verification.** With no `global_v4`, a peer's only candidates are its
+private interface addresses, so hole punching has nothing to work with. Every
+direct-path topology here has been relay-or-LAN since phase 4 was written. The
+full-cone row was never testing iroh's traversal. It was testing an endpoint
+that could not discover itself.
+
+**The helper's own premise is wrong.** `netlab/rendezvous/src/main.rs:44-48`
+and `:77` say the self-signed certificate works "because iroh's QUIC client
+does not verify relays against a public root". iroh 1.0.3 does verify QAD
+against its CA roots, and the log above is the rejection. The self-hosted
+rendezvous plan's risk list repeats the claim and is wrong in the same way.
+
+**This is also a product gap, not only a lab one.** `DROP_RENDEZVOUS_RELAY`
+pointed at an operator's relay with a certificate from a private CA gets the
+same outcome: transfers still complete over the relay, `--status` still says
+`path=p2p`, and **no hole is ever punched**. Nothing anywhere says so. Only
+operators whose relay has a publicly trusted certificate get traversal. See
+[`self-hosted-rendezvous-plan-2026-09-10.md`](self-hosted-rendezvous-plan-2026-09-10.md)
+phase 3.
+
+**The fix is not in this plan.** It changes which certificates the CLI trusts,
+and that needs the user's decision first. The candidate: a
+`DROP_RENDEZVOUS_CA` variable naming a PEM file of extra roots for the
+rendezvous relay only, and a helper that issues a CA and signs its leaf with it,
+since a self-signed leaf used as its own trust anchor is rejected as
+`UnknownIssuer` too. **Rejected: skipping verification in the lab**, even as an
+experiment. It would make the lab exercise a code path that production never
+runs.
+
+**`authentication failed` is still unexplained, and is separate.** It now
+appears intermittently rather than every time: two of four runs today, one of
+them with no firewall. It is not the missing QAD, which is missing in the
+passing runs too. It needs its own traced run, with the full sender and
+receiver logs kept, once QAD works and the traversal path is actually being
+exercised. Separately, the receiver logs
+`Endpoint dropped without calling Endpoint::close` on its dial-timeout path, a
+small cleanup bug in `direct::dial_sender`.
+
 Topology 2's checkbox stays `[x]` because the topology and its measurements are
 written and running. What is unproven is the claim it was built to test.
 
@@ -750,6 +820,37 @@ The probe now *attempts* a namespace with the same flags the re-execution will
 use and reports what that said, naming the refusing knob as a hint. Predicting
 a capability you are about to depend on irrecoverably is the bug; the fix is to
 try it while there is still a process left to report.
+
+#### `authentication failed`, explained and fixed, 2026-09-15
+
+The intermittent failure first seen in the full-cone row, and later in plain LAN,
+was **not in iroh's traversal and not in TLS verification.** A traced run
+(`iroh=debug`, from a temporary subscriber that was not committed) shows the
+failing sender's last moments:
+
+```text
+iroh::_events::conn::incoming: remote_addr=Ip(10.40.0.2:7842)
+noq_proto::endpoint: failed to authenticate initial packet
+error: a peer failed to complete the handshake: ... authentication failed
+```
+
+`10.40.0.2:7842` is the rendezvous host's QUIC address-discovery port. A late
+packet from the address-discovery exchange reached the sender's socket and was
+taken for an incoming connection. It failed its handshake, and
+`QuicEndpoint::accept_transfer` returned that failure, **ending the whole send**
+before the real receiver dialled. The receiver then timed out reaching a sender
+that had already gone.
+
+Fixed on `fix/accept-survives-stray-handshakes`: a connection attempt that fails
+its handshake is dropped and the wait goes on. It is neither the receiver, which
+completes the handshake, nor a guess, which needs a completed handshake first.
+Measured on this machine, plain LAN on `main` passed **1 run in 5** before the fix
+and **8 in 8** after. A unit test sends a junk QUIC Initial to a waiting sender
+and then connects a real receiver; with the old behaviour restored it fails 3
+times in 3.
+
+The same failure is reachable in production. Anyone who can send one UDP packet
+to a sender waiting on a public address could end its transfer.
 
 ### Phase 5 — Reporting and CI
 

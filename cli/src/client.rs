@@ -98,7 +98,8 @@ pub fn create_session(origin: &str, ciphertext_size: u64) -> Result<String, Clie
                 .and_then(|body| body.message)
                 .unwrap_or_else(|| format!("the relay rejected the request with status {status}"));
 
-            Err(ClientError::Server(message))
+            // The relay is untrusted, and this is printed as it arrives.
+            Err(ClientError::Server(crate::display::peer_message(&message)))
         }
         Err(error) => Err(ClientError::Transport(format!(
             "could not reach {origin}: {error}"

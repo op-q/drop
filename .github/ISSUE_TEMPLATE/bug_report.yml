@@ -32,10 +32,10 @@ body:
     attributes:
       label: Surface
       options:
-        - Rust API
+        - drop command-line client
+        - Relay (Rust API)
         - Sender WebSocket
         - Receiver WebSocket
-        - Browser client
         - Docker or Caddy
         - Documentation
         - Other
@@ -46,7 +46,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Include relevant browser, operating-system, deployment, and reverse-proxy versions.
+      description: Include the drop version, operating system and terminal, and any deployment or reverse-proxy versions.
     validations:
       required: true
 

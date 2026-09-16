@@ -136,6 +136,7 @@ async fn transfer_forcing(
                     out_dir: destination,
                     extract: true,
                     force,
+                    acceptance: drop_cli::consent::Acceptance::Yes,
                 },
             )
             .await
@@ -273,6 +274,7 @@ async fn reports_a_clear_error_for_an_unknown_code() {
             out_dir: base.clone(),
             extract: true,
             force: true,
+            acceptance: drop_cli::consent::Acceptance::Yes,
         },
     )
     .await
@@ -304,6 +306,7 @@ async fn a_malformed_code_fails_before_the_relay_is_contacted() {
             out_dir: base.clone(),
             extract: true,
             force: true,
+            acceptance: drop_cli::consent::Acceptance::Yes,
         },
     )
     .await
@@ -318,6 +321,10 @@ async fn a_malformed_code_fails_before_the_relay_is_contacted() {
 }
 
 /// Builds a ustar archive from `(name, typeflag, link_target, contents)`.
+///
+/// Unix only because its one caller is: the hostile archive it builds plants
+/// symlinks, and the receiver cannot create those on Windows.
+#[cfg(unix)]
 fn archive_of(entries: &[(&str, u8, &str, &[u8])]) -> Vec<u8> {
     let mut archive = Vec::new();
 
@@ -556,6 +563,7 @@ async fn a_wrong_code_is_refused_and_leaves_nothing_on_disk() {
             out_dir: destination.clone(),
             extract: true,
             force: true,
+            acceptance: drop_cli::consent::Acceptance::Yes,
         },
     )
     .await
@@ -667,6 +675,7 @@ async fn a_receiver_that_connects_first_still_completes_the_transfer() {
                     out_dir: destination,
                     extract: true,
                     force: true,
+                    acceptance: drop_cli::consent::Acceptance::Yes,
                 },
             )
             .await
@@ -771,6 +780,7 @@ async fn the_carrier_line_reaches_a_program_that_spawned_the_binary() {
         .args([
             "recv",
             &code,
+            "--yes",
             "--server",
             &origin,
             "--transport",
@@ -863,6 +873,7 @@ async fn the_carrier_line_stays_out_of_an_ordinary_transfer() {
         .args([
             "recv",
             &code,
+            "--yes",
             "--server",
             &origin,
             "--transport",
@@ -909,5 +920,621 @@ async fn the_carrier_line_stays_out_of_an_ordinary_transfer() {
     assert!(
         sent.contains("Path    relay"),
         "the sender stopped saying which path it took:\n{sent}"
+    );
+}
+
+/// A name the sender chose cannot run on the receiver's terminal.
+///
+/// The name carries a clear-line-and-move-up sequence and a right-to-left
+/// override. Before `display` existed, the receiver's "Receiving" line printed
+/// both verbatim, before the receiver had agreed to anything.
+///
+/// Through the real binary and a pipe, because a pipe is what makes the
+/// assertion meaningful: the progress line only writes escape sequences when
+/// stderr is a terminal, so any escape found here came from the name.
+///
+/// Unix only. Windows refuses control characters in file names, so there is
+/// no way to create the fixture there, and a Windows sender cannot produce
+/// this name either.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hostile_file_name_cannot_write_escape_sequences_to_the_receiver() {
+    let origin = spawn_relay().await;
+    let base = scratch("hostile-name");
+    let hostile_name = "report\x1b[2K\x1b[1A\u{202E}fdp.exe";
+    let source = base.join(hostile_name);
+    let destination = base.join("received");
+    fs::create_dir_all(&destination).expect("destination directory");
+    write_file(&source, b"not what the name says");
+
+    let mut sender = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .arg("send")
+        .arg(&source)
+        .args(["--server", &origin, "--transport", "relay"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the sender");
+
+    let mut announced = BufReader::new(sender.stdout.take().expect("the sender's stdout")).lines();
+    let code = tokio::time::timeout(Duration::from_secs(30), announced.next_line())
+        .await
+        .expect("the sender announced a code in time")
+        .expect("reading the sender's stdout")
+        .expect("the sender announced a code at all");
+
+    let receiver = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .args([
+            "recv",
+            &code,
+            "--yes",
+            "--server",
+            &origin,
+            "--transport",
+            "relay",
+        ])
+        .arg("--out")
+        .arg(&destination)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the receiver")
+        .wait_with_output();
+
+    let receiver = tokio::time::timeout(Duration::from_secs(60), receiver)
+        .await
+        .expect("the receiver finished in time")
+        .expect("the receiver ran");
+    let sender = tokio::time::timeout(Duration::from_secs(60), sender.wait_with_output())
+        .await
+        .expect("the sender finished in time")
+        .expect("the sender ran");
+
+    let sent = String::from_utf8_lossy(&sender.stderr);
+    let received = String::from_utf8_lossy(&receiver.stderr);
+
+    assert!(sender.status.success(), "the sender failed:\n{sent}");
+    assert!(
+        receiver.status.success(),
+        "the receiver failed:\n{received}"
+    );
+
+    for (who, output) in [("receiver", &received), ("sender", &sent)] {
+        assert!(
+            !output.contains('\x1b'),
+            "an escape sequence from the name reached the {who}'s terminal:\n{output:?}"
+        );
+        assert!(
+            !output.contains('\u{202E}'),
+            "a right-to-left override from the name reached the {who}'s terminal:\n{output:?}"
+        );
+    }
+
+    assert!(
+        received.contains("fdp.exe"),
+        "the name should still be shown, only neutralised:\n{received}"
+    );
+
+    // The file itself keeps the name the sender gave it. Displaying a name
+    // safely is not the same as renaming a file, and this test is about the
+    // first.
+    assert_eq!(
+        fs::read(destination.join(hostile_name)).expect("the received file"),
+        b"not what the name says"
+    );
+}
+
+/// Says no to whatever it is shown, and remembers what that was.
+struct Declines {
+    shown: std::sync::Arc<std::sync::Mutex<Option<drop_cli::consent::Preview>>>,
+}
+
+impl drop_cli::consent::ConsentPrompt for Declines {
+    async fn decide(&mut self, preview: &drop_cli::consent::Preview) -> drop_cli::consent::Consent {
+        *self.shown.lock().expect("not poisoned") = Some(preview.clone());
+        drop_cli::consent::Consent::Decline
+    }
+}
+
+/// The whole point of consent, over a real relay: the receiver is shown what
+/// is coming, says no, and nothing about its directory changes. The sender
+/// hears a decline, not a broken connection, and the relay does not count it
+/// as a failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn declining_writes_nothing_and_tells_the_sender() {
+    let (origin, relay) = spawn_relay_with_state().await;
+    let base = scratch("decline");
+    let source = base.join("quarterly-report.pdf");
+    let destination = base.join("received");
+    write_file(&source, &vec![5_u8; 70_000]);
+    // Already there, so a careless decline path that numbered or truncated a
+    // file would show up.
+    write_file(
+        &destination.join("quarterly-report.pdf"),
+        b"the receiver's own",
+    );
+
+    let before: Vec<_> = fs::read_dir(&destination)
+        .expect("list")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+
+    let (code_tx, code_rx) = oneshot::channel();
+    let mut code_tx = Some(code_tx);
+    let sender = tokio::spawn({
+        let origin = origin.clone();
+        let source = source.clone();
+        async move {
+            send::run(
+                &source,
+                SendOptions {
+                    origin: Some(origin),
+                    compress: None,
+                    path: drop_cli::direct::Path::Relay,
+                    status: false,
+                    rendezvous: drop_cli::direct::Rendezvous::default(),
+                    on_code: Box::new(move |code| {
+                        if let Some(sender) = code_tx.take() {
+                            let _ = sender.send(code.to_string());
+                        }
+                    }),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+    });
+
+    let code = tokio::time::timeout(Duration::from_secs(10), code_rx)
+        .await
+        .expect("a code in time")
+        .expect("a code at all");
+
+    let shown = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut prompt = Declines {
+        shown: shown.clone(),
+    };
+    let received = recv::run_deciding(
+        &code,
+        &ReceiveOptions {
+            path: drop_cli::direct::Path::Relay,
+            status: false,
+            rendezvous: drop_cli::direct::Rendezvous::default(),
+            origin: Some(origin),
+            out_dir: destination.clone(),
+            extract: true,
+            force: false,
+            // Not consulted: `run_deciding` puts the question to the prompt
+            // passed below instead.
+            acceptance: drop_cli::consent::Acceptance::Ask,
+        },
+        &mut prompt,
+        drop_cli::cancel::Cancel::default(),
+    )
+    .await;
+
+    assert!(received.is_ok(), "declining is not a failure: {received:?}");
+
+    let sent = tokio::time::timeout(Duration::from_secs(30), sender)
+        .await
+        .expect("the sender finished")
+        .expect("the sender task ran");
+    let error = sent.expect_err("a declined transfer did not happen");
+    assert!(
+        error.contains("declined"),
+        "the sender should say so: {error}"
+    );
+
+    let preview = shown
+        .lock()
+        .expect("not poisoned")
+        .clone()
+        .expect("a preview was shown");
+    assert_eq!(preview.name, "quarterly-report.pdf");
+    assert_eq!(preview.size, 70_000);
+    let drop_cli::consent::Landing::File {
+        path, instead_of, ..
+    } = preview.landing
+    else {
+        panic!("a single file should land as a file");
+    };
+    assert!(
+        path.ends_with("quarterly-report-1.pdf"),
+        "the preview should show the numbered name it would have used: {path}"
+    );
+    assert_eq!(instead_of.as_deref(), Some("quarterly-report.pdf"));
+
+    let after: Vec<_> = fs::read_dir(&destination)
+        .expect("list")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    assert_eq!(
+        before, after,
+        "declining must leave the destination as it was"
+    );
+    assert_eq!(
+        fs::read(destination.join("quarterly-report.pdf")).expect("read"),
+        b"the receiver's own"
+    );
+
+    for _ in 0..100 {
+        if relay.metrics.snapshot().total_transfers_declined == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let metrics = relay.metrics.snapshot();
+    assert_eq!(metrics.total_transfers_declined, 1);
+    assert_eq!(metrics.total_transfer_failures, 0);
+}
+
+/// With nobody at a terminal to ask and no `--yes`, the receiver refuses
+/// before contacting anything, so the sender's code is not spent on a question
+/// nobody could answer.
+#[tokio::test]
+async fn a_receiver_with_no_terminal_and_no_yes_refuses_before_connecting() {
+    // A listener standing in for a relay, so a connection attempt would be
+    // seen rather than inferred from an error message.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let origin = format!("http://{}", listener.local_addr().expect("address"));
+
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .args([
+            "recv",
+            "A1B2C3-abandon-ability-able",
+            "--server",
+            &origin,
+            "--transport",
+            "relay",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    let output = tokio::time::timeout(Duration::from_secs(30), output)
+        .await
+        .expect("the receiver finished in time")
+        .expect("the receiver ran");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "it should refuse:\n{stderr}");
+    assert!(
+        stderr.contains("--yes"),
+        "it should name the way out:\n{stderr}"
+    );
+
+    let contacted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+    assert!(
+        contacted.is_err(),
+        "the receiver contacted the relay before refusing"
+    );
+}
+
+/// Starts a relayed send of `size` bytes that can be cancelled, and returns
+/// the code with the sender's task.
+async fn cancellable_send(
+    origin: &str,
+    source: &Path,
+    cancel: drop_cli::cancel::Cancel,
+) -> (
+    String,
+    tokio::task::JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+) {
+    let (code_tx, code_rx) = oneshot::channel();
+    let mut code_tx = Some(code_tx);
+    let sender = tokio::spawn({
+        let origin = origin.to_string();
+        let source = source.to_path_buf();
+        async move {
+            send::run_cancellable(
+                &source,
+                SendOptions {
+                    origin: Some(origin),
+                    compress: None,
+                    path: drop_cli::direct::Path::Relay,
+                    status: false,
+                    rendezvous: drop_cli::direct::Rendezvous::default(),
+                    on_code: Box::new(move |code| {
+                        if let Some(sender) = code_tx.take() {
+                            let _ = sender.send(code.to_string());
+                        }
+                    }),
+                },
+                cancel,
+            )
+            .await
+        }
+    });
+
+    let code = tokio::time::timeout(Duration::from_secs(10), code_rx)
+        .await
+        .expect("a code in time")
+        .expect("a code at all");
+
+    (code, sender)
+}
+
+fn relayed_receive(origin: &str, destination: &Path) -> ReceiveOptions {
+    ReceiveOptions {
+        path: drop_cli::direct::Path::Relay,
+        status: false,
+        rendezvous: drop_cli::direct::Rendezvous::default(),
+        origin: Some(origin.to_string()),
+        out_dir: destination.to_path_buf(),
+        extract: true,
+        force: false,
+        acceptance: drop_cli::consent::Acceptance::Yes,
+    }
+}
+
+/// A file of `len` zero bytes that takes no disk space.
+///
+/// The cancel tests need a transfer that is certainly still running when the
+/// cancel lands. A real 48 MiB file moves in a few hundred milliseconds here,
+/// which once let the last byte arrive before the cancel did. A gibibyte cannot,
+/// and a sparse one costs nothing to create.
+fn sparse_file(path: &Path, len: u64) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("parent directory");
+    }
+    fs::File::create(path)
+        .and_then(|file| file.set_len(len))
+        .expect("sparse fixture");
+}
+
+/// Waits until a file has started arriving, so a cancel lands mid-transfer
+/// rather than before it or after it.
+async fn wait_until_partly_written(path: &Path) {
+    for _ in 0..500 {
+        if fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{} never started arriving", path.display());
+}
+
+/// A receiver that stops half-way tells the sender, which ends saying the
+/// receiver cancelled rather than that a connection dropped. The half-written
+/// file does not survive to be mistaken for the whole one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_receiver_cancelling_mid_transfer_tells_the_sender_and_keeps_nothing() {
+    let (origin, relay) = spawn_relay_with_state().await;
+    let base = scratch("receiver-cancels");
+    let source = base.join("large.bin");
+    let destination = base.join("received");
+    fs::create_dir_all(&destination).expect("destination");
+    sparse_file(&source, 1024 * 1024 * 1024);
+
+    let (code, sender) =
+        cancellable_send(&origin, &source, drop_cli::cancel::Cancel::default()).await;
+
+    let receiver_cancel = drop_cli::cancel::Cancel::default();
+    let receiver = tokio::spawn({
+        let origin = origin.clone();
+        let destination = destination.clone();
+        let cancel = receiver_cancel.clone();
+        async move {
+            recv::run_deciding(
+                &code,
+                &relayed_receive(&origin, &destination),
+                &mut drop_cli::consent::Acceptance::Yes,
+                cancel,
+            )
+            .await
+            .map_err(|error| drop_cli::cancel::exit_code_for(error.as_ref()))
+        }
+    });
+
+    wait_until_partly_written(&destination.join("large.bin")).await;
+    receiver_cancel.fire();
+
+    let received = tokio::time::timeout(Duration::from_secs(10), receiver)
+        .await
+        .expect("the receiver stopped promptly")
+        .expect("the receiver task ran");
+    assert_eq!(received, Err(130), "cancelled here");
+
+    let sent = tokio::time::timeout(Duration::from_secs(10), sender)
+        .await
+        .expect("the sender stopped promptly")
+        .expect("the sender task ran");
+    let error = sent.expect_err("a cancelled transfer did not complete");
+    assert_eq!(
+        drop_cli::cancel::exit_code_for(error.as_ref()),
+        4,
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("receiver cancelled"),
+        "the sender should say who stopped it: {error}"
+    );
+
+    assert!(
+        !destination.join("large.bin").exists(),
+        "a half-written file was left behind"
+    );
+
+    for _ in 0..100 {
+        if relay.metrics.snapshot().total_transfers_cancelled == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(relay.metrics.snapshot().total_transfers_cancelled, 1);
+    assert_eq!(relay.metrics.snapshot().total_transfer_failures, 0);
+}
+
+/// The same from the other side: a sender that stops half-way is reported to
+/// the receiver as the sender cancelling, and the receiver keeps nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sender_cancelling_mid_transfer_tells_the_receiver_and_it_keeps_nothing() {
+    let origin = spawn_relay().await;
+    let base = scratch("sender-cancels");
+    let source = base.join("large.bin");
+    let destination = base.join("received");
+    fs::create_dir_all(&destination).expect("destination");
+    sparse_file(&source, 1024 * 1024 * 1024);
+
+    let sender_cancel = drop_cli::cancel::Cancel::default();
+    let (code, sender) = cancellable_send(&origin, &source, sender_cancel.clone()).await;
+
+    let receiver = tokio::spawn({
+        let origin = origin.clone();
+        let destination = destination.clone();
+        async move {
+            recv::run_deciding(
+                &code,
+                &relayed_receive(&origin, &destination),
+                &mut drop_cli::consent::Acceptance::Yes,
+                drop_cli::cancel::Cancel::default(),
+            )
+            .await
+        }
+    });
+
+    wait_until_partly_written(&destination.join("large.bin")).await;
+    sender_cancel.fire();
+
+    let sent = tokio::time::timeout(Duration::from_secs(10), sender)
+        .await
+        .expect("the sender stopped promptly")
+        .expect("the sender task ran");
+    let error = sent.expect_err("cancelled");
+    assert_eq!(drop_cli::cancel::exit_code_for(error.as_ref()), 130);
+
+    let received = tokio::time::timeout(Duration::from_secs(10), receiver)
+        .await
+        .expect("the receiver stopped promptly")
+        .expect("the receiver task ran");
+    let error = received.expect_err("a cancelled transfer did not complete");
+    assert_eq!(
+        drop_cli::cancel::exit_code_for(error.as_ref()),
+        4,
+        "{error}"
+    );
+    assert!(error.to_string().contains("sender cancelled"), "{error}");
+
+    assert!(
+        !destination.join("large.bin").exists(),
+        "a half-written file was left behind"
+    );
+}
+
+/// Ctrl-C, for real: a signal to a running `drop recv` makes it tell the
+/// sender and exit 130, and the sender exits 4 saying the receiver cancelled.
+/// Before this, the receiver died without a word and the sender reported a
+/// dropped connection.
+///
+/// Unix only, because it sends SIGINT with `kill`. On Windows the same code
+/// path is reached by `tokio::signal::ctrl_c`, which cannot be delivered to one
+/// child process from a test.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_interrupt_cancels_politely_and_both_sides_say_so() {
+    let origin = spawn_relay().await;
+    let base = scratch("interrupt");
+    let source = base.join("large.bin");
+    let destination = base.join("received");
+    fs::create_dir_all(&destination).expect("destination");
+    sparse_file(&source, 1024 * 1024 * 1024);
+
+    let mut sender = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .arg("send")
+        .arg(&source)
+        .args(["--server", &origin, "--transport", "relay", "--status"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the sender");
+
+    let mut announced = BufReader::new(sender.stdout.take().expect("stdout")).lines();
+    let code = tokio::time::timeout(Duration::from_secs(30), announced.next_line())
+        .await
+        .expect("a code in time")
+        .expect("stdout readable")
+        .expect("a code at all");
+
+    let mut receiver = tokio::process::Command::new(env!("CARGO_BIN_EXE_drop"))
+        .args([
+            "recv",
+            &code,
+            "--yes",
+            "--status",
+            "--server",
+            &origin,
+            "--transport",
+            "relay",
+        ])
+        .arg("--out")
+        .arg(&destination)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the receiver");
+
+    // Collected as it arrives, so the signal goes in once the transfer is
+    // genuinely under way and the full output is still there to assert on.
+    let mut receiver_lines = BufReader::new(receiver.stderr.take().expect("stderr")).lines();
+    let mut received_text = String::new();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(line) = receiver_lines.next_line().await.expect("stderr readable") {
+            received_text.push_str(&line);
+            received_text.push('\n');
+            if line.starts_with("drop-status: state=accepted") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the receiver accepted in time");
+    wait_until_partly_written(&destination.join("large.bin")).await;
+
+    let pid = receiver.id().expect("a running receiver").to_string();
+    let killed = std::process::Command::new("kill")
+        .args(["-INT", &pid])
+        .status()
+        .expect("kill ran");
+    assert!(killed.success());
+
+    let receiver_status = tokio::time::timeout(Duration::from_secs(10), receiver.wait())
+        .await
+        .expect("the receiver exited promptly")
+        .expect("the receiver ran");
+    while let Ok(Some(line)) = receiver_lines.next_line().await {
+        received_text.push_str(&line);
+        received_text.push('\n');
+    }
+
+    let sender = tokio::time::timeout(Duration::from_secs(10), sender.wait_with_output())
+        .await
+        .expect("the sender exited promptly")
+        .expect("the sender ran");
+    let sent_text = String::from_utf8_lossy(&sender.stderr);
+
+    assert_eq!(receiver_status.code(), Some(130), "{received_text}");
+    assert!(received_text.contains("Cancelled."), "{received_text}");
+
+    assert_eq!(sender.status.code(), Some(4), "{sent_text}");
+    assert!(
+        sent_text.contains("the receiver cancelled the transfer"),
+        "{sent_text}"
+    );
+
+    let states: Vec<&str> = sent_text
+        .lines()
+        .filter_map(|line| line.strip_prefix("drop-status: state="))
+        .collect();
+    assert_eq!(
+        states,
+        vec!["connected", "code-ok", "accepted", "cancelled"],
+        "the sender's states, in order:\n{sent_text}"
+    );
+
+    assert!(
+        !destination.join("large.bin").exists(),
+        "a half-written file was left behind"
     );
 }

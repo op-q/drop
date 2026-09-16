@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     config::{MAX_CONCURRENT_SESSIONS, MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_LABEL},
-    domain::session::{DownloadEvent, SenderEvent, Session},
+    domain::session::{Acceptance, DownloadEvent, SenderEvent, Session},
     errors::AppError,
     services::cleanup_service::remove_expired_sessions,
 };
@@ -68,24 +68,9 @@ impl SessionService {
             .collect::<String>()
             .to_uppercase();
 
-        let now = Instant::now();
         state
             .sessions
-            .insert(
-                code.clone(),
-                Session {
-                    ciphertext_size,
-                    created_at: now,
-                    last_activity: now,
-                    sender_tx: None,
-                    download_tx: None,
-                    sender_connected: false,
-                    receiver_connected: false,
-                    bytes_relayed: 0,
-                    receiver_acknowledged_bytes: 0,
-                    sender_finished: false,
-                },
-            )
+            .insert(code.clone(), Session::new(ciphertext_size))
             .await;
 
         state.metrics.record_session_created();
@@ -261,6 +246,37 @@ impl SessionService {
                 }
 
                 session.receiver_acknowledged_bytes = bytes_received;
+                session.last_activity = Instant::now();
+                true
+            })
+            .await
+            .unwrap_or(false)
+    }
+
+    /// Records that the sender's `meta` went to the receiver, and hands back
+    /// the receiver's consent for the upload socket to check per chunk.
+    pub async fn mark_meta_forwarded(state: &AppState, code: &str) -> Option<Acceptance> {
+        state
+            .sessions
+            .with_session_mut(code, |session| {
+                session.meta_forwarded = true;
+                session.last_activity = Instant::now();
+                session.receiver_accepted.clone()
+            })
+            .await
+    }
+
+    /// Records the receiver's consent. Refused before the transfer has been
+    /// described: agreeing to something unseen is not consent.
+    pub async fn accept(state: &AppState, code: &str) -> bool {
+        state
+            .sessions
+            .with_session_mut(code, |session| {
+                if !session.meta_forwarded {
+                    return false;
+                }
+
+                session.receiver_accepted.give();
                 session.last_activity = Instant::now();
                 true
             })
