@@ -4,15 +4,19 @@
 [![CodeQL](https://github.com/op-q/drop/actions/workflows/codeql.yml/badge.svg)](https://github.com/op-q/drop/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-No Drop server in the middle, and nothing readable in the middle when one is
-involved. `drop send` and `drop recv` connect two computers directly over
-QUIC. There is no hosted relay: a relay is something you run, and without one
-the direct path is the only path.
+Drop is a command-line tool for sending files and folders between computers. Run
+`drop` and choose send or receive. The sender gets a code to give to the
+receiver.
 
-> [!IMPORTANT]
-> Drop is pre-release software. The protocol and deployment defaults may
-> change, and the public instance should not be treated as a durable storage or
-> high-assurance secure-transfer service.
+Transfers are end-to-end encrypted and go directly between the two computers. If
+a direct connection isn't possible, they fall back to a relay: by default a
+public one run by n0, the makers of iroh, or one you host yourself. The relay
+only sees encrypted data.
+
+Works across Linux, macOS and Windows.
+
+> [!NOTE]
+> Drop is early software. Use the same version on both computers.
 
 ## Install
 
@@ -28,107 +32,15 @@ Windows, in PowerShell:
 irm https://github.com/op-q/drop/releases/latest/download/install.ps1 | iex
 ```
 
-Both verify the download against the release's checksums. The Windows installer
-puts `drop.exe` in `%LOCALAPPDATA%\Programs\drop` and adds that to your own PATH;
-it needs no administrator rights.
-
-| Platform | Prebuilt | Tested in CI |
-| --- | --- | --- |
-| Linux, x86_64 | yes | yes |
-| Linux, aarch64 | yes | the release build starts |
-| macOS, Apple silicon | yes | yes |
-| macOS, Intel | yes | the release build starts |
-| Windows, x86_64 | yes | yes |
-| Windows, Arm | when it builds, see below | no |
-
-A transfer between any two of them works the same way. On Windows, a name that
-Windows cannot store as sent (`notes:v2.txt`, `CON`, a trailing dot) is saved with
-`_` in place of what it could not keep, and the receiver is told. A symbolic link
-in a folder sent to Windows is skipped with a warning. Windows has no executable
-bit, so a script sent from Windows to Linux or macOS arrives not executable.
-
-The Windows on Arm build is marked experimental in the release workflow and is
-published only if it builds. Windows 11 on Arm runs the x86_64 build meanwhile.
-The first time `drop` runs on Windows, the firewall may ask whether to allow it on
-the network; a transfer usually still works if you decline.
-
 ## Use
 
-Typed on their own in a terminal, `drop`, `drop send` and `drop recv` open an
-interface that asks for what they need — a file browser for `send`, a code
-field and a destination picker for `recv`, and a few checkboxes either way.
-
 ```bash
-$ drop
-$ drop send
-$ drop recv
+drop
+drop send [filepath]
+drop recv [code]
 ```
 
-Given a path or a code, or run anywhere the output is not a terminal, they
-behave exactly as they always have:
+## More
 
-```bash
-$ drop send ./project
-Sending ./project (128 files, archived as project.tar)
-Looking for a peer-to-peer path...
-7F2A91-crossover-clockwork-ridge
-
-  Give that code to whoever is receiving. They can run "drop recv"
-  and enter it when asked, or skip the prompt with:
-
-      drop recv 7F2A91-crossover-clockwork-ridge
-
-Path    peer-to-peer (no Drop server)
-Waiting for the receiver to connect...
-```
-
-```bash
-$ drop recv 7F2A91-crossover-clockwork-ridge
-Path    peer-to-peer (no Drop server)
-
-Incoming transfer
-  Folder   project   128 files, 1.1 GiB unpacked
-  Size     412.7 MiB to download
-  Into     .
-Accept? [y/N] y
-Receiving  100.0%  412.7 MiB / 412.7 MiB  86.4 MiB/s  ETA --
-Extracted 128 files into .
-```
-
-The receiver is shown what is coming, with its name, type, size and where it
-will be saved, and nothing is written until they accept. The sender sees each
-step: the receiver entering the code, deciding, accepting, finishing. A
-question nobody answers is declined after two minutes. In a script, where
-there is nobody to ask, pass `--yes`; without a terminal `drop recv` refuses to
-start rather than accept silently.
-
-Ctrl-C on either side cancels the transfer and tells the other side, and a
-half-received file is not left behind. `drop --help` lists the exit statuses a
-script can act on.
-
-That's the default, `auto`: direct, falling back to a relay only if you have
-configured one with `--server` or `DROP_SERVER`. Every transfer is encrypted
-end to end either way — what the carrier changes is who moves the bytes, not
-who can read them. Run `drop --help` for the full flag list, including
-`--transport`, `--compress`, and `--force`.
-
-"No Drop server" is the precise claim and not a larger one. The direct path
-still finds the other computer through the public DHT and a relay operated by
-n0, and that relay carries the encrypted connection when two peers cannot hole
-punch. `DROP_RENDEZVOUS_RELAY` and `DROP_RENDEZVOUS_BOOTSTRAP` point both at
-infrastructure you run instead.
-
-## Docs
-
-- [Security model](docs/security.md) — encryption, trust boundaries, hostile input
-- [Architecture](docs/architecture.md) — crates, transport, transfer flow
-- [Protocol](docs/protocol.md) — the wire format
-- [Deployment](docs/deployment.md) — requirements, configuration, Docker, Kubernetes/GKE
-- [Commands](docs/commands.md) — running from source, local dev workflows
-- [Network lab](netlab/README.md) — topology tests, and what they do not prove
-- [Contributing](.github/CONTRIBUTING.md)
-- [Full documentation index](docs/README.md)
-
-## License
-
-Drop is available under the [MIT License](LICENSE).
+- [Documentation](docs/README.md): security, protocol, and running your own relay
+- [MIT License](LICENSE)

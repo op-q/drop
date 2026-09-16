@@ -82,7 +82,8 @@ Documentation that lives with the thing it describes:
 
 ## Where information belongs
 
-- User-facing CLI options and basic usage belong in the root README.
+- Installing and basic usage belong in the root README, and nothing more. The
+  full option list is `drop --help`.
   Configuration variables and deployment steps belong in `deployment.md`.
 - Anything a third client would need to interoperate belongs in `protocol.md`.
 - Attacker capabilities, hostile-input handling, and accepted risk belong in
